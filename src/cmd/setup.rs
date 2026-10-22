@@ -38,6 +38,12 @@ pub fn devices() -> Result<()> {
     println!("En ASIO, `live` ouvre le pilote « Focusrite USB ASIO » (ou celui choisi avec --input).");
 
     println!();
+    println!("Sorties du PC captables avec `--audio output` (→ : sortie par défaut, sans --input) :");
+    for (i, output) in audio::list_outputs()?.iter().enumerate() {
+        println!("{} {output}", if i == 0 { "→" } else { " " });
+    }
+
+    println!();
     let ports = midi::list_inputs()?;
     if ports.is_empty() {
         println!("Aucune entrée MIDI trouvée.");

@@ -22,10 +22,11 @@ const BPM_REFRESH: Duration = Duration::from_secs(1);
 const REPAINT: Duration = Duration::from_millis(33);
 const MESSAGE_DURATION: Duration = Duration::from_secs(8);
 const MODES: [FlashMode; 3] = [FlashMode::Kicks, FlashMode::Reactive, FlashMode::EveryBeat];
-const BACKENDS: [(Backend, &str); 3] = [
+const BACKENDS: [(Backend, &str); 4] = [
     (Backend::Auto, "Auto (ASIO si libre)"),
     (Backend::Asio, "ASIO"),
     (Backend::Wasapi, "WASAPI"),
+    (Backend::Output, "Sortie du PC"),
 ];
 const BPM_SIZE: f32 = 96.0;
 
@@ -51,6 +52,7 @@ struct App {
     /// Mode live en cours, s'il est lancé.
     engine: Option<Engine>,
     inputs: Vec<String>,
+    outputs: Vec<String>,
     midi_ports: Vec<String>,
     /// BPM saisi : tempo imposé au lancement, puis pendant le live.
     bpm_input: String,
@@ -73,6 +75,7 @@ impl App {
             cfg,
             engine: None,
             inputs: Vec::new(),
+            outputs: Vec::new(),
             midi_ports: Vec::new(),
             shown_bpm: None,
             shown_source: TempoSource::Auto,
@@ -86,6 +89,7 @@ impl App {
 
     fn refresh_devices(&mut self) {
         self.inputs = audio::list_inputs().map(|list| list.into_iter().map(|i| i.name).collect()).unwrap_or_default();
+        self.outputs = audio::list_outputs().unwrap_or_default();
         self.midi_ports = midi::list_inputs().unwrap_or_default();
     }
 
@@ -187,17 +191,32 @@ impl App {
 
     /// Réglages qui ne changent qu'avant le lancement.
     fn launch_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Entrée audio");
-        ui.horizontal(|ui| {
+        ui.heading("Source audio");
+        ui.horizontal_wrapped(|ui| {
             for (backend, label) in BACKENDS {
-                ui.radio_value(&mut self.settings.audio, backend, label);
+                let was_output = self.settings.audio == Backend::Output;
+                if ui.radio_value(&mut self.settings.audio, backend, label).changed()
+                    && was_output != (backend == Backend::Output)
+                {
+                    // Une entrée et une sortie ne portent pas les mêmes noms.
+                    self.settings.input = None;
+                }
             }
         });
+        let output = self.settings.audio == Backend::Output;
+        if output {
+            ui.weak("Capte ce que le PC joue sur cette sortie (haut-parleurs, carte son…).");
+        }
         ui.horizontal(|ui| {
-            let selected = self.settings.input.clone().unwrap_or_else(|| "Automatique (Focusrite)".to_owned());
+            let (default, names) = if output {
+                ("Sortie par défaut de Windows", &self.outputs)
+            } else {
+                ("Automatique (Focusrite)", &self.inputs)
+            };
+            let selected = self.settings.input.clone().unwrap_or_else(|| default.to_owned());
             egui::ComboBox::from_id_salt("entrée").width(280.0).selected_text(selected).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.settings.input, None, "Automatique (Focusrite)");
-                for name in &self.inputs {
+                ui.selectable_value(&mut self.settings.input, None, default);
+                for name in names {
                     ui.selectable_value(&mut self.settings.input, Some(name.clone()), name);
                 }
             });

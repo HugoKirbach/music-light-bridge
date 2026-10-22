@@ -50,6 +50,10 @@ le bleu (son brillant).
    - `--flash kicks|reactif|temps` : vrais kicks anticipés (par défaut), chaque kick sans
      anticipation (aucun flash annulé, mais ~55 ms de retard), ou chaque temps de l'horloge.
    - `--input "nom partiel"` : une autre entrée audio.
+   - `--audio output` : capte ce que le PC joue (WASAPI loopback), sur la sortie par défaut ou
+     celle choisie avec `--input` (haut-parleurs, sorties de la carte son). Dans la fenêtre :
+     « Sortie du PC ». La latence de sortie n'étant pas connue, les flashs peuvent précéder le
+     son de quelques ms (davantage en Bluetooth).
    - `--audio auto|asio|wasapi` : pilote de capture. Par défaut, ASIO (« Focusrite USB ASIO »)
      s'il est libre, sinon WASAPI ; un pilote ASIO n'accepte souvent qu'un logiciel à la fois,
      d'où le repli quand Ableton l'utilise déjà. En ASIO, la latence d'entrée dépend de la taille

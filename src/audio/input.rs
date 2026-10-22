@@ -32,6 +32,19 @@ pub enum Backend {
     Asio,
     /// WASAPI : pilote standard de Windows, partageable avec d'autres logiciels
     Wasapi,
+    /// Sortie du PC (haut-parleurs, carte son) : capte ce que Windows joue, en WASAPI loopback
+    Output,
+}
+
+/// Sorties audio du PC, captables en mode `Output` ; la première est la sortie par défaut.
+pub fn list_outputs() -> Result<Vec<String>> {
+    let host = cpal::host_from_id(HostId::Wasapi)?;
+    let default = host.default_output_device().map(|d| d.to_string());
+    let mut outputs: Vec<String> = host.output_devices()?.map(|d| d.to_string()).collect();
+    if let Some(i) = default.and_then(|name| outputs.iter().position(|o| *o == name)) {
+        outputs[..=i].rotate_right(1);
+    }
+    Ok(outputs)
 }
 
 pub struct InputInfo {
@@ -71,7 +84,7 @@ pub fn list_inputs() -> Result<Vec<InputInfo>> {
 pub struct AudioInput {
     _stream: Stream,
     pub device: String,
-    /// « ASIO » ou « WASAPI ».
+    /// « ASIO », « WASAPI » ou « sortie du PC ».
     pub backend: &'static str,
     /// En mode automatique, la raison pour laquelle l'ASIO n'a pas pu être utilisé.
     pub fallback: Option<String>,
@@ -84,10 +97,13 @@ pub struct AudioInput {
 impl AudioInput {
     /// `wanted` : morceau du nom de l'entrée (ou du pilote ASIO) ; à défaut, la Focusrite,
     /// et en WASAPI l'entrée par défaut de Windows si elle n'est pas branchée.
+    /// En mode `Output`, `wanted` est un morceau du nom de la sortie ; à défaut, la sortie par
+    /// défaut de Windows.
     pub fn start(wanted: Option<&str>, backend: Backend, features: Arc<Features>) -> Result<Self> {
         match backend {
             Backend::Asio => Self::open(HostId::Asio, wanted, features),
             Backend::Wasapi => Self::open(HostId::Wasapi, wanted, features),
+            Backend::Output => Self::open_output(wanted, features),
             Backend::Auto => match Self::open(HostId::Asio, wanted, features.clone()) {
                 Ok(input) => Ok(input),
                 Err(asio) => {
@@ -103,6 +119,32 @@ impl AudioInput {
         let host = cpal::host_from_id(host_id)?;
         let device = pick_device(&host, host_id, wanted)?;
         let supported = device.default_input_config()?;
+        let backend = if host_id == HostId::Asio { "ASIO" } else { "WASAPI" };
+        Self::capture(device, supported, backend, features)
+    }
+
+    /// Ouvre une sortie comme une entrée : WASAPI capte alors ce qui y est joué (loopback).
+    fn open_output(wanted: Option<&str>, features: Arc<Features>) -> Result<Self> {
+        let host = cpal::host_from_id(HostId::Wasapi)?;
+        let device = match wanted {
+            Some(name) => {
+                let needle = name.to_lowercase();
+                host.output_devices()?
+                    .find(|d| d.to_string().to_lowercase().contains(&needle))
+                    .with_context(|| format!("aucune sortie audio ne contient « {name} » : lance `dj-bridge devices`"))?
+            }
+            None => host.default_output_device().context("aucune sortie audio disponible")?,
+        };
+        let supported = device.default_output_config()?;
+        Self::capture(device, supported, "sortie du PC", features)
+    }
+
+    fn capture(
+        device: cpal::Device,
+        supported: cpal::SupportedStreamConfig,
+        backend: &'static str,
+        features: Arc<Features>,
+    ) -> Result<Self> {
         let format = supported.sample_format();
         let config: StreamConfig = supported.into();
         let (sample_rate, channels) = (config.sample_rate, config.channels);
@@ -116,7 +158,6 @@ impl AudioInput {
             other => bail!("format audio non géré : {other}"),
         };
         stream.play()?;
-        let backend = if host_id == HostId::Asio { "ASIO" } else { "WASAPI" };
         Ok(Self { _stream: stream, device: device.to_string(), backend, fallback: None, sample_rate, channels, capture })
     }
 }
