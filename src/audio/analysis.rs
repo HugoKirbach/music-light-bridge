@@ -225,6 +225,14 @@ pub struct Levels {
     /// Logarithme du rapport des enveloppes brutes grave/aigu (avant normalisation, qui
     /// effacerait un filtre en quelques secondes) ; `None` dans le silence.
     pub tilt: Option<f32>,
+    /// Niveau brut des médiums et des aigus (dBFS) : il enfle pendant une montée (riser,
+    /// roulement de caisse claire) ; `None` dans le silence.
+    pub presence: Option<f32>,
+}
+
+/// Niveau en dBFS ; rien dans le silence.
+fn decibels(level: f32) -> Option<f32> {
+    (level > GAIN_FLOOR).then(|| 20.0 * level.log10())
 }
 
 /// Équilibre grave/aigu ; rien dans le silence, où il ne veut rien dire.
@@ -266,7 +274,13 @@ impl Analyzer {
 
     pub fn levels(&self) -> Levels {
         let [bass, mid, high] = self.normalized;
-        Levels { bass, mid, high, tilt: tilt(self.raw[0], self.raw[2]) }
+        Levels {
+            bass,
+            mid,
+            high,
+            tilt: tilt(self.raw[0], self.raw[2]),
+            presence: decibels(self.raw[1] + self.raw[2]),
+        }
     }
 
     /// Traite un échantillon mono ; `true` si un kick vient d'être détecté.

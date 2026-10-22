@@ -125,6 +125,9 @@ struct LiveArgs {
     /// Quand flasher : sur les vrais kicks (anticipés), sur chaque kick, ou sur chaque temps
     #[arg(long, value_enum, default_value_t = flash::FlashMode::Kicks)]
     flash: flash::FlashMode,
+    /// Animation : auto (suit les phases du morceau), pulse, breath (respiration) ou build-up (montée)
+    #[arg(long, value_enum, default_value_t = look::Motion::Auto)]
+    motion: look::Motion,
     /// Rejoint la session Ableton Link : tempo et phase viennent de la session
     #[arg(long)]
     link: bool,
@@ -147,6 +150,7 @@ impl LiveArgs {
             midi: self.midi.map(|name| (!name.is_empty()).then_some(name)),
             palette,
             dynamics,
+            motion: self.motion,
         }
     }
 }

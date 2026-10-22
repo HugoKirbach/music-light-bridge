@@ -103,6 +103,17 @@ couleurs, le mode de flash et le seuil, puis le bouton **Lancer** démarre le mo
 - le mode de flash (kicks anticipés, réactif, chaque temps), le tempo imposé ou automatique, le
   seuil de détection et l'enregistrement d'une capture.
 
+La section **Animation** choisit le mouvement de la lumière (`--motion` dans le terminal) :
+
+- **Pulse** : un flash par kick ;
+- **Respiration** : la luminosité suit l'énergie du son, les kicks n'ajoutent qu'une houle ;
+- **Montée** : la lumière s'intensifie et blanchit, les flashs gagnent en force ;
+- **Auto** (par défaut) : suit les phases du morceau, reconnues à l'écoute : **groove** (kicks
+  réguliers) → pulse, **break** (plus de kick depuis 1,5 s) → respiration, **montée** (médiums et
+  aigus qui enflent de plus de 4 dB sans basse, ou kicks qui roulent à plus de 4,5 par seconde)
+  → montée, puis **drop** (premier gros kick après la montée) → éclat blanc et retour au pulse.
+  Le passage d'une animation à l'autre se fait en fondu ; la phase reconnue s'affiche sous le BPM.
+
 La section **Flashs** règle leur allure, avant comme pendant le live : **intensité** (jusqu'où
 monte un flash au-dessus de la lueur), **redescente** (de 40 ms, sec, à 1,5 s, très doux) et
 **lueur de fond** (luminosité minimale gardée entre les kicks).

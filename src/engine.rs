@@ -25,7 +25,7 @@ use crate::hue::api;
 use crate::hue::snapshot::Restored;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
 use crate::link::LinkSession;
-use crate::look::{Dynamics, Palette, ReactiveLook};
+use crate::look::{Dynamics, Motion, Palette, Phase, ReactiveLook};
 use crate::midi::{MidiListener, Notes, note_hue};
 use crate::tempo::{MANUAL_BPM_LIMITS, TempoSource, Tracker};
 use crate::timing;
@@ -55,6 +55,7 @@ pub struct Options {
     pub midi: Option<Option<String>>,
     pub palette: Palette,
     pub dynamics: Dynamics,
+    pub motion: Motion,
 }
 
 /// Ce qui est connu au démarrage.
@@ -92,6 +93,9 @@ pub struct Status {
     pub link_peers: Option<u64>,
     /// Couleur envoyée à la lampe, en sRGB 8 bits.
     pub color: [u8; 3],
+    /// Phase reconnue et animation effectivement jouée.
+    pub phase: Phase,
+    pub active_motion: Motion,
 }
 
 /// Bilan affiché à l'arrêt.
@@ -116,6 +120,10 @@ pub struct Summary {
 struct Shared {
     stop: AtomicBool,
     mode: AtomicU8,
+    motion: AtomicU8,
+    /// Publiés par la boucle d'éclairage.
+    phase: AtomicU8,
+    active_motion: AtomicU8,
     tracker: Mutex<Tracker>,
     palette: Mutex<Palette>,
     dynamics: Mutex<Dynamics>,
@@ -221,6 +229,9 @@ impl Engine {
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
             mode: AtomicU8::new(options.flash.index()),
+            motion: AtomicU8::new(options.motion.index()),
+            phase: AtomicU8::new(Phase::default().index()),
+            active_motion: AtomicU8::new(options.motion.index()),
             tracker: Mutex::new(tracker),
             palette: Mutex::new(options.palette),
             dynamics: Mutex::new(options.dynamics),
@@ -306,7 +317,13 @@ impl Engine {
             input_lost: features.input_lost(),
             link_peers: self.shared.link.then(|| self.shared.link_peers.load(Ordering::Relaxed)),
             color: [(color >> 16) as u8, (color >> 8) as u8, color as u8],
+            phase: Phase::from_index(self.shared.phase.load(Ordering::Relaxed)),
+            active_motion: Motion::from_index(self.shared.active_motion.load(Ordering::Relaxed)),
         }
+    }
+
+    pub fn set_motion(&self, motion: Motion) {
+        self.shared.motion.store(motion.index(), Ordering::Relaxed);
     }
 
     pub fn set_mode(&self, mode: FlashMode) {
@@ -553,7 +570,10 @@ fn light_loop(
         }
         look.palette = shared.palette();
         look.dynamics = shared.dynamics();
+        look.motion = Motion::from_index(shared.motion.load(Ordering::Relaxed));
         let color = look.render(now - last, features.levels());
+        shared.phase.store(look.phase().index(), Ordering::Relaxed);
+        shared.active_motion.store(look.active_motion().index(), Ordering::Relaxed);
         last = now;
         for (_, c) in frame.iter_mut() {
             *c = color;

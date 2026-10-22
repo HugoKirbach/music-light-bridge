@@ -74,6 +74,8 @@ pub struct Features {
     high: AtomicF32,
     /// Équilibre grave/aigu ; `NaN` dans le silence.
     tilt: AtomicF32,
+    /// Présence des médiums et aigus (dBFS) ; `NaN` dans le silence.
+    presence: AtomicF32,
     threshold: AtomicF32,
     input_latency_us: AtomicU64,
     /// Coupures signalées par le pilote : des échantillons ont été perdus.
@@ -95,6 +97,7 @@ impl Features {
             mid: AtomicF32::default(),
             high: AtomicF32::default(),
             tilt: AtomicF32::new(f32::NAN),
+            presence: AtomicF32::new(f32::NAN),
             threshold: AtomicF32::new(threshold),
             input_latency_us: AtomicU64::new(0),
             glitches: AtomicU32::new(0),
@@ -134,12 +137,13 @@ impl Features {
     }
 
     pub fn levels(&self) -> Levels {
-        let tilt = self.tilt.load();
+        let known = |value: f32| (!value.is_nan()).then_some(value);
         Levels {
             bass: self.bass.load(),
             mid: self.mid.load(),
             high: self.high.load(),
-            tilt: (!tilt.is_nan()).then_some(tilt),
+            tilt: known(self.tilt.load()),
+            presence: known(self.presence.load()),
         }
     }
 
@@ -182,6 +186,7 @@ impl Features {
         self.mid.store(levels.mid);
         self.high.store(levels.high);
         self.tilt.store(levels.tilt.unwrap_or(f32::NAN));
+        self.presence.store(levels.presence.unwrap_or(f32::NAN));
     }
 
     fn set_input_latency(&self, latency: Duration) {

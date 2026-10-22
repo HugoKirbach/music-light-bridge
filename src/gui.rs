@@ -12,7 +12,7 @@ use crate::audio::{self, Backend};
 use crate::config::{Config, LiveSettings};
 use crate::engine::{self, Engine, Status, THRESHOLD_RANGE};
 use crate::flash::FlashMode;
-use crate::look::{Dynamics, Palette};
+use crate::look::{Dynamics, Motion, Palette};
 use crate::midi;
 use crate::tempo::{DEFAULT_BPM_RANGE, TempoSource};
 
@@ -132,6 +132,7 @@ impl App {
             bpm: self.settings.bpm,
             bpm_range: DEFAULT_BPM_RANGE,
             flash: self.settings.flash,
+            motion: self.settings.motion,
             link: self.settings.link,
             midi: self.settings.midi.clone().map(Some),
             palette: self.palette,
@@ -189,6 +190,8 @@ impl App {
                 None => format!("BPM · {}", self.shown_source.label()),
             };
             ui.label(RichText::new(source).size(16.0).weak());
+            let phase = format!("phase : {} · animation : {}", status.phase.label(), motion_name(status.active_motion));
+            ui.label(RichText::new(phase).size(16.0));
             ui.add_space(6.0);
         });
     }
@@ -294,8 +297,19 @@ impl App {
         }
     }
 
+    fn motion(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Animation");
+        for motion in Motion::ALL {
+            if ui.radio_value(&mut self.settings.motion, motion, motion.description()).changed()
+                && let Some(engine) = &self.engine
+            {
+                engine.set_motion(motion);
+            }
+        }
+    }
+
     fn flash_mode(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Mode de flash");
+        ui.heading("Déclenchement des flashs");
         for mode in MODES {
             if ui.radio_value(&mut self.settings.flash, mode, mode.description()).changed()
                 && let Some(engine) = &self.engine
@@ -387,6 +401,8 @@ impl eframe::App for App {
                     None => self.launch_settings(ui),
                 }
                 ui.separator();
+                self.motion(ui);
+                ui.separator();
                 self.colors(ui);
                 ui.separator();
                 self.flash_shape(ui);
@@ -414,6 +430,15 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.stop();
+    }
+}
+
+fn motion_name(motion: Motion) -> &'static str {
+    match motion {
+        Motion::Auto => "auto",
+        Motion::Pulse => "pulse",
+        Motion::Breath => "respiration",
+        Motion::BuildUp => "montée",
     }
 }
 

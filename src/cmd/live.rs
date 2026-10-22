@@ -162,13 +162,14 @@ fn status_text(status: &Status) -> String {
     };
     let levels = status.levels;
     format!(
-        "B{} M{} A{} {}{} ♩{tempo} {source} {} s{:.2} {metric}{alert}",
+        "B{} M{} A{} {}{} ♩{tempo} {source} {} {} s{:.2} {metric}{alert}",
         tui::meter(levels.bass, METER_WIDTH),
         tui::meter(levels.mid, METER_WIDTH),
         tui::meter(levels.high, METER_WIDTH),
         if status.kick_lit { "●" } else { "○" },
         if status.note_lit { "♪" } else { " " },
         status.mode.label(),
+        status.phase.label(),
         status.threshold,
     )
 }

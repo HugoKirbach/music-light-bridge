@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio::Backend;
 use crate::audio::analysis::DEFAULT_THRESHOLD;
 use crate::flash::FlashMode;
-use crate::look::{Dynamics, Palette};
+use crate::look::{Dynamics, Motion, Palette};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -45,6 +45,7 @@ pub struct LiveSettings {
     /// Port MIDI écouté ; `None` : pas de MIDI.
     pub midi: Option<String>,
     pub flash: FlashMode,
+    pub motion: Motion,
     pub threshold: f32,
 }
 
@@ -57,6 +58,7 @@ impl Default for LiveSettings {
             link: false,
             midi: None,
             flash: FlashMode::Kicks,
+            motion: Motion::Auto,
             threshold: DEFAULT_THRESHOLD,
         }
     }

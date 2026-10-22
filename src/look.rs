@@ -27,6 +27,103 @@ const TILT_MEMORY: f32 = 30.0;
 const FILTER_START: f32 = 1.6;
 const FILTER_FULL: f32 = 3.0;
 
+/// Une montée s'annonce quand la présence (médiums et aigus) dépasse de 4 dB sa moyenne des
+/// 6 dernières secondes alors que les basses sont faibles…
+const BUILD_RISE_DB: f32 = 4.0;
+const PRESENCE_FAST: f32 = 1.0;
+const PRESENCE_SLOW: f32 = 6.0;
+const BUILD_MAX_BASS: f32 = 0.5;
+/// … ou quand les kicks roulent : plus de 4,5 par seconde.
+const ROLL_RATE: f32 = 4.5;
+const KICK_RATE_WINDOW: f32 = 2.0;
+/// Une montée dure au moins 1,5 s avant qu'un drop puisse la conclure, et retombe si plus rien
+/// ne monte pendant 4 s.
+const BUILD_MIN: f32 = 1.5;
+const BUILD_STALL: f32 = 4.0;
+/// Temps pour qu'une montée atteigne son plein.
+const BUILD_RAMP: f32 = 8.0;
+/// Le drop : un kick aux basses fortes, après une seconde de basses faibles.
+const DROP_BASS: f32 = 0.6;
+const DROP_QUIET_BASS: f32 = 0.35;
+const BASS_MEMORY: f32 = 1.0;
+/// Respiration : la luminosité suit l'énergie, vite en montée et lentement en descente ; un
+/// kick n'y ajoute qu'une légère houle.
+const BREATH_ATTACK: f32 = 0.35;
+const BREATH_RELEASE: f32 = 0.9;
+const BREATH_KICK: f32 = 0.25;
+/// Fondu d'une animation à l'autre.
+const MOTION_FADE: f32 = 0.4;
+
+/// Animation de la lumière.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Motion {
+    /// Suit les phases du morceau : pulse sur le groove, respiration en break, montée, drop
+    #[default]
+    Auto,
+    /// Un flash par kick
+    Pulse,
+    /// La luminosité suit l'énergie, sans flash net
+    Breath,
+    /// La lumière s'intensifie et blanchit, flashs de plus en plus forts
+    BuildUp,
+}
+
+impl Motion {
+    pub const ALL: [Self; 4] = [Self::Auto, Self::Pulse, Self::Breath, Self::BuildUp];
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto : suit les phases du morceau",
+            Self::Pulse => "Pulse : un flash par kick",
+            Self::Breath => "Respiration : suit l'énergie, sans flash net",
+            Self::BuildUp => "Montée : s'intensifie et blanchit",
+        }
+    }
+
+    pub fn index(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_index(index: u8) -> Self {
+        Self::ALL.get(usize::from(index)).copied().unwrap_or(Self::Auto)
+    }
+}
+
+/// Phase du morceau, reconnue à l'écoute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Phase {
+    /// Kicks réguliers.
+    #[default]
+    Groove,
+    /// Plus de kick : break, passage calme.
+    Calm,
+    /// Montée vers un drop.
+    BuildUp,
+}
+
+impl Phase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Groove => "groove",
+            Self::Calm => "break",
+            Self::BuildUp => "montée",
+        }
+    }
+
+    pub fn index(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_index(index: u8) -> Self {
+        match index {
+            1 => Self::Calm,
+            2 => Self::BuildUp,
+            _ => Self::Groove,
+        }
+    }
+}
+
 /// Les trois couleurs choisies, en sRGB 8 bits. Leur luminosité plafonne celle de la scène :
 /// du noir en temps creux éteint la lampe pendant les breaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,10 +175,102 @@ fn approach(current: f32, target: f32, dt: f32, time: f32) -> f32 {
     current + (target - current) * (1.0 - (-dt / time).exp())
 }
 
+/// Ce qui permet de reconnaître la phase du morceau.
+#[derive(Debug, Default)]
+struct PhaseTracker {
+    phase: Phase,
+    /// Durée passée dans la phase actuelle (s).
+    phase_time: f32,
+    /// Horloge propre (s) et instants des derniers kicks, pour leur cadence.
+    time: f32,
+    kick_times: std::collections::VecDeque<f32>,
+    /// Un kick a été détecté depuis le dernier rendu.
+    kicked: bool,
+    presence_fast: Option<f32>,
+    presence_slow: Option<f32>,
+    bass_memory: f32,
+    /// Temps écoulé sans que rien ne monte, pendant une montée.
+    stall: f32,
+    /// Avancement de la montée, de 0 à 1.
+    build: f32,
+}
+
+impl PhaseTracker {
+    fn kick(&mut self) {
+        self.kicked = true;
+        self.kick_times.push_back(self.time);
+    }
+
+    /// Met la phase à jour ; `true` au drop qui conclut une montée.
+    fn update(&mut self, dt: f32, levels: Levels, grooving: bool) -> bool {
+        self.time += dt;
+        self.phase_time += dt;
+        while self.kick_times.front().is_some_and(|&t| self.time - t > KICK_RATE_WINDOW) {
+            self.kick_times.pop_front();
+        }
+        let rolling = self.kick_times.len() as f32 / KICK_RATE_WINDOW > ROLL_RATE;
+        let rise = match levels.presence {
+            Some(db) => {
+                let fast = approach(*self.presence_fast.get_or_insert(db), db, dt, PRESENCE_FAST);
+                let slow = approach(*self.presence_slow.get_or_insert(db), db, dt, PRESENCE_SLOW);
+                self.presence_fast = Some(fast);
+                self.presence_slow = Some(slow);
+                fast - slow
+            }
+            None => 0.0,
+        };
+        let quiet_bass_before = self.bass_memory < DROP_QUIET_BASS;
+        self.bass_memory = approach(self.bass_memory, levels.bass, dt, BASS_MEMORY);
+        let kicked = std::mem::take(&mut self.kicked);
+        // Une simple hausse de présence ne suffit pas quand les basses sont là : c'est un drop
+        // ou l'entrée d'un élément, pas une montée.
+        let building = (rise > BUILD_RISE_DB && self.bass_memory < BUILD_MAX_BASS) || rolling;
+        self.stall = if building { 0.0 } else { self.stall + dt };
+
+        let mut dropped = false;
+        let next = match self.phase {
+            Phase::BuildUp
+                if kicked
+                    && self.phase_time > BUILD_MIN
+                    && quiet_bass_before
+                    && levels.bass > DROP_BASS
+                    && !rolling =>
+            {
+                dropped = true;
+                Phase::Groove
+            }
+            Phase::BuildUp if self.stall > BUILD_STALL => {
+                if grooving { Phase::Groove } else { Phase::Calm }
+            }
+            Phase::BuildUp => Phase::BuildUp,
+            _ if building => Phase::BuildUp,
+            _ if grooving => Phase::Groove,
+            _ => Phase::Calm,
+        };
+        if next != self.phase {
+            self.phase = next;
+            self.phase_time = 0.0;
+        }
+        self.build = if self.phase == Phase::BuildUp {
+            let surge = ((rise - BUILD_RISE_DB) / 10.0).clamp(0.0, 1.0);
+            (self.build + dt / BUILD_RAMP).max(surge).min(1.0)
+        } else {
+            approach(self.build, 0.0, dt, MOTION_FADE)
+        };
+        dropped
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ReactiveLook {
     pub palette: Palette,
     pub dynamics: Dynamics,
+    pub motion: Motion,
+    phases: PhaseTracker,
+    /// Part de chaque animation (pulse, respiration, montée) dans le rendu, en fondu.
+    weights: [f32; 3],
+    /// Luminosité de la respiration.
+    breath: f32,
     flash: f32,
     /// Part de blanc du flash en cours.
     punch: f32,
@@ -113,6 +302,22 @@ impl ReactiveLook {
     /// Un kick vient d'être détecté (flashé ou non) : la musique n'est pas dans un temps creux.
     pub fn kick_detected(&mut self) {
         self.since_kick = 0.0;
+        self.phases.kick();
+    }
+
+    /// Phase du morceau reconnue à l'écoute.
+    pub fn phase(&self) -> Phase {
+        self.phases.phase
+    }
+
+    /// Animation effectivement jouée : celle choisie, ou celle de la phase en mode Auto.
+    pub fn active_motion(&self) -> Motion {
+        match (self.motion, self.phases.phase) {
+            (Motion::Auto, Phase::Groove) => Motion::Pulse,
+            (Motion::Auto, Phase::Calm) => Motion::Breath,
+            (Motion::Auto, Phase::BuildUp) => Motion::BuildUp,
+            (motion, _) => motion,
+        }
     }
 
     /// Flash de note, à sa couleur (teinte dans [0, 1[) ; la lueur garde ensuite cette couleur.
@@ -141,6 +346,24 @@ impl ReactiveLook {
         self.fresh = false;
         self.since_kick += dt;
 
+        let dropped = self.phases.update(dt, levels, self.since_kick <= CALM_AFTER);
+        if dropped && matches!(self.motion, Motion::Auto | Motion::BuildUp) {
+            // Le drop : un éclat blanc à pleine puissance.
+            self.flash = 1.0;
+            self.punch = 1.0;
+        }
+        let target = match self.active_motion() {
+            Motion::Breath => 1,
+            Motion::BuildUp => 2,
+            Motion::Auto | Motion::Pulse => 0,
+        };
+        if self.weights == [0.0; 3] {
+            self.weights[target] = 1.0;
+        }
+        for (i, weight) in self.weights.iter_mut().enumerate() {
+            *weight = approach(*weight, if i == target { 1.0 } else { 0.0 }, dt, MOTION_FADE);
+        }
+
         let calm = if self.since_kick > CALM_AFTER { 1.0 } else { 0.0 };
         let filtered = self.filter_amount(levels.tilt, dt);
         self.calm = approach(self.calm, calm, dt, SCENE_FADE);
@@ -152,12 +375,29 @@ impl ReactiveLook {
         );
         let base = self.note_color.unwrap_or(scene);
 
-        // Le flash part de la lueur de fond et monte, selon l'intensité choisie, vers le plein.
         let floor = self.dynamics.floor.clamp(0.0, 1.0);
-        let glow = (floor + GLOW * (1.0 - floor) * levels.bass).min(1.0);
         let flash = self.flash * self.dynamics.flash.clamp(0.0, 1.0);
-        let value = glow + (1.0 - glow) * flash;
-        let white = self.punch * flash;
+
+        // Pulse : le flash part de la lueur de fond et monte, selon l'intensité choisie.
+        let glow = (floor + GLOW * (1.0 - floor) * levels.bass).min(1.0);
+        let pulse = (glow + (1.0 - glow) * flash, self.punch * flash);
+
+        // Respiration : suit l'énergie, un kick n'ajoute qu'une houle.
+        let energy = 0.5 * levels.bass + 0.3 * levels.mid + 0.2 * levels.high;
+        let breath_time = if energy > self.breath { BREATH_ATTACK } else { BREATH_RELEASE };
+        self.breath = approach(self.breath, energy, dt, breath_time);
+        let breath = ((floor + (1.0 - floor) * (0.8 * self.breath + BREATH_KICK * flash)).min(1.0), 0.0);
+
+        // Montée : la lumière s'intensifie et blanchit, les flashs gagnent en force.
+        let build = self.phases.build;
+        let tension = floor + (1.0 - floor) * (0.15 + 0.55 * build);
+        let strength = flash * (0.4 + 0.6 * build);
+        let build_up = (tension + (1.0 - tension) * strength, (self.punch * strength + 0.4 * build).min(1.0));
+
+        let [w_pulse, w_breath, w_build] = self.weights;
+        let total = (w_pulse + w_breath + w_build).max(1e-6);
+        let value = (w_pulse * pulse.0 + w_breath * breath.0 + w_build * build_up.0) / total;
+        let white = (w_pulse * pulse.1 + w_breath * breath.1 + w_build * build_up.1) / total;
         let [r, g, b] = base.map(|c| ((c * (1.0 - white) + white) * value).clamp(0.0, 1.0));
         let quantize = |u: f32| (u * f32::from(u16::MAX)) as u16;
         Rgb { r: quantize(r), g: quantize(g), b: quantize(b) }
@@ -268,6 +508,81 @@ mod tests {
         let floor = Dynamics { floor: 0.3, ..Dynamics::default() };
         let rest = after_flash(floor, 120);
         assert!(rest >= (0.3 * f32::from(u16::MAX)) as u16 - 1, "fond : {rest}");
+    }
+
+    fn white_look(motion: Motion) -> ReactiveLook {
+        let white = [255, 255, 255];
+        let palette = Palette { primary: white, calm: white, filtered: white };
+        ReactiveLook { motion, palette, ..ReactiveLook::default() }
+    }
+
+    /// Joue `seconds` de musique de niveaux `levels`, avec un kick (détecté et flashé) toutes
+    /// les `kick_every` trames ; renvoie la dernière couleur.
+    fn perform(look: &mut ReactiveLook, seconds: f32, levels: impl Fn(f32) -> Levels, kick_every: Option<usize>) -> Rgb {
+        let frames = (seconds * FRAMES_PER_SECOND as f32) as usize;
+        let mut color = Rgb::OFF;
+        for frame in 0..frames {
+            if kick_every.is_some_and(|every| frame % every == 0) {
+                look.kick_detected();
+                look.kick();
+            }
+            color = look.render(FRAME, levels(frame as f32 / FRAMES_PER_SECOND as f32));
+        }
+        color
+    }
+
+    fn sound(bass: f32, presence: f32) -> Levels {
+        Levels { bass, mid: 0.5, high: 0.5, tilt: Some(1.0), presence: Some(presence) }
+    }
+
+    #[test]
+    fn phases_follow_groove_break_build_up_and_drop() {
+        let mut look = white_look(Motion::Auto);
+        perform(&mut look, 6.0, |_| sound(0.8, -20.0), Some(24));
+        assert_eq!(look.phase(), Phase::Groove);
+
+        perform(&mut look, 3.0, |_| sound(0.1, -20.0), None);
+        assert_eq!((look.phase(), look.active_motion()), (Phase::Calm, Motion::Breath));
+
+        // Riser : la présence gagne ~3 dB par seconde, sans basse ni kick ; reconnu en moins de 3 s.
+        let early = perform(&mut look, 3.0, |t| sound(0.1, -20.0 + 3.3 * t), None);
+        assert_eq!((look.phase(), look.active_motion()), (Phase::BuildUp, Motion::BuildUp));
+        let late = perform(&mut look, 4.0, |t| sound(0.1, -10.1 + 3.3 * t), None);
+        assert!(brightness(late) > brightness(early) + u16::MAX / 10, "la montée s'intensifie");
+
+        // Drop : le premier gros kick ramène le groove, dans un éclat blanc.
+        let drop = perform(&mut look, 1.0 / 60.0, |_| sound(0.9, 0.0), Some(1));
+        assert_eq!(look.phase(), Phase::Groove);
+        assert!(drop.r.min(drop.g).min(drop.b) > u16::MAX / 20 * 17, "{drop:?}");
+    }
+
+    #[test]
+    fn a_louder_groove_is_not_a_build_up() {
+        let mut look = white_look(Motion::Auto);
+        perform(&mut look, 4.0, |_| sound(0.8, -30.0), Some(24));
+        // Les charlestons entrent d'un coup : la présence bondit, mais les basses sont là.
+        perform(&mut look, 4.0, |_| sound(0.8, -15.0), Some(24));
+        assert_eq!(look.phase(), Phase::Groove);
+    }
+
+    #[test]
+    fn kick_rolls_are_a_build_up() {
+        let mut look = white_look(Motion::Auto);
+        perform(&mut look, 3.0, |_| sound(0.8, -20.0), Some(6));
+        assert_eq!(look.phase(), Phase::BuildUp);
+    }
+
+    #[test]
+    fn breathing_softens_the_kicks() {
+        let swell = |motion: Motion| {
+            let mut look = white_look(motion);
+            let before = perform(&mut look, 2.0, |_| sound(0.2, -20.0), None);
+            let peak = perform(&mut look, 1.0 / 60.0, |_| sound(0.2, -20.0), Some(1));
+            brightness(peak) - brightness(before)
+        };
+        // En respiration, un kick ajoute une houle, loin du plein flash du pulse.
+        assert!(swell(Motion::Breath) < u16::MAX / 3, "{}", swell(Motion::Breath));
+        assert!(swell(Motion::Pulse) > 2 * swell(Motion::Breath));
     }
 
     #[test]
