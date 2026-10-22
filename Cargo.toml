@@ -3,6 +3,8 @@ name = "dj-bridge"
 version = "0.1.0"
 edition = "2024"
 description = "Lumières Philips Hue pilotées par le son et le tempo, latence minimale"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/HugoKirbach/music-light-bridge"
 
 [dependencies]
 anyhow = "1.0.104"

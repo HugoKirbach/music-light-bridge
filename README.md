@@ -133,6 +133,13 @@ Les identifiants du bridge et l'avance calibrée sont stockés dans
 
 ## Licence
 
-Ableton Link est distribué sous GPLv2 (ou licence commerciale d'Ableton). DJ-Bridge l'intègre :
-l'usage personnel ne pose aucun problème, mais distribuer le programme imposerait de le publier
-sous une licence compatible GPL, ou d'obtenir une licence auprès d'Ableton.
+Copyright © 2026 Hugo KIRBACH.
+
+DJ-Bridge est un logiciel libre : vous pouvez le redistribuer et le modifier selon les termes de
+la licence publique générale GNU publiée par la Free Software Foundation, version 3 ou (à votre
+choix) toute version ultérieure (GPL-3.0-or-later). Il est distribué sans aucune garantie ; le
+texte complet de la licence est dans [LICENSE](LICENSE).
+
+DJ-Bridge intègre Ableton Link (GPLv2 ou ultérieure) et se compile avec le kit ASIO de
+Steinberg, utilisé sous GPLv3. Le kit n'est pas inclus dans ce dépôt : il se télécharge chez
+Steinberg (<https://www.steinberg.net/asiosdk>).
