@@ -2,16 +2,15 @@
 //! On ajuste l'avance du flash jusqu'à ce que les deux coïncident, à l'œil ou en filmant
 //! au ralenti ; la valeur retenue sert ensuite à anticiper les flashs calés sur le tempo.
 
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal;
+use anyhow::{Result, anyhow, bail};
+use crossterm::event::KeyCode;
 use tokio::runtime::Runtime;
 
+use super::tui::{self, RawMode};
 use crate::config::Config;
 use crate::hue::api;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
@@ -70,21 +69,23 @@ pub fn run(rt: &Runtime, cfg: &mut Config, period: Duration) -> Result<()> {
         save: AtomicBool::new(false),
         max_late_us: AtomicU64::new(0),
     };
-    let result = thread::scope(|scope| {
+    let (flashes, keyboard) = thread::scope(|scope| {
         let latency = metronome.latency.clone();
         let shared = &shared;
-        scope.spawn(move || {
+        let keyboard = scope.spawn(move || {
             let result = keyboard_loop(shared, &latency);
             shared.stop.store(true, Ordering::Relaxed);
             result
         });
-        let result = flash_loop(rt, &mut stream, &channels, origin, period, shared);
+        let flashes = flash_loop(rt, &mut stream, &channels, origin, period, shared);
         shared.stop.store(true, Ordering::Relaxed);
-        result
+        let keyboard = keyboard.join().unwrap_or_else(|_| Err(anyhow!("clavier interrompu")));
+        (flashes, keyboard)
     });
     drop(metronome);
     rt.block_on(stream.close())?;
-    result?;
+    flashes?;
+    keyboard?;
 
     let advance = shared.advance_ms.load(Ordering::Relaxed);
     if shared.save.load(Ordering::Relaxed) {
@@ -135,14 +136,13 @@ fn flash_loop(
 }
 
 fn keyboard_loop(shared: &Shared, latency: &OutputLatency) -> Result<()> {
-    terminal::enable_raw_mode()?;
-    let _raw = RawModeGuard;
+    let _raw = RawMode::enable()?;
     let mut out = std::io::stdout();
     while !shared.stop.load(Ordering::Relaxed) {
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
+        if let Some(key) = tui::poll_key(Duration::from_millis(100))? {
+            if tui::is_quit(&key) {
+                shared.stop.store(true, Ordering::Relaxed);
+            }
             let step = match key.code {
                 KeyCode::Up => 5,
                 KeyCode::Down => -5,
@@ -153,14 +153,6 @@ fn keyboard_loop(shared: &Shared, latency: &OutputLatency) -> Result<()> {
                     shared.stop.store(true, Ordering::Relaxed);
                     0
                 }
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    shared.stop.store(true, Ordering::Relaxed);
-                    0
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    shared.stop.store(true, Ordering::Relaxed);
-                    0
-                }
                 _ => 0,
             };
             let advance = shared.advance_ms.load(Ordering::Relaxed) + step;
@@ -168,25 +160,18 @@ fn keyboard_loop(shared: &Shared, latency: &OutputLatency) -> Result<()> {
                 .advance_ms
                 .store(advance.clamp(ADVANCE_RANGE_MS.0, ADVANCE_RANGE_MS.1), Ordering::Relaxed);
         }
-        write!(
-            out,
-            "\r  avance du flash : {:>4} ms │ latence sortie audio : {:>5.1} ms │ retard d'envoi max : {:>4.1} ms   ",
-            shared.advance_ms.load(Ordering::Relaxed),
-            latency.get().as_secs_f64() * 1e3,
-            shared.max_late_us.load(Ordering::Relaxed) as f64 / 1e3,
+        tui::status_line(
+            &mut out,
+            &format!(
+                "avance {} ms │ sortie audio {:.1} ms │ envoi max {:.1} ms",
+                shared.advance_ms.load(Ordering::Relaxed),
+                latency.get().as_secs_f64() * 1e3,
+                shared.max_late_us.load(Ordering::Relaxed) as f64 / 1e3,
+            ),
         )?;
-        out.flush()?;
     }
-    write!(out, "\r\n")?;
+    print!("\r\n");
     Ok(())
-}
-
-struct RawModeGuard;
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = terminal::disable_raw_mode();
-    }
 }
 
 /// Décale un instant vers le passé de `ms` millisecondes (vers le futur si négatif).

@@ -7,7 +7,7 @@ description = "Lumières Philips Hue pilotées par le son et le tempo, latence m
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
-cpal = "0.18.2"
+cpal = { version = "0.18.2", features = ["realtime"] }
 crossterm = "0.29.0"
 dirs = "7.0.0"
 hex = "0.4.3"

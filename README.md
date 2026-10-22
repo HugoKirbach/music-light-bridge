@@ -30,13 +30,58 @@ cargo build --release
 Si `cargo` est introuvable (terminal ouvert avant l'installation de Rust), lancer directement
 l'exécutable compilé : `.\target\release\dj-bridge.exe latency`, ou ouvrir un nouveau terminal.
 
+## Phase 2 : mode live (entrée audio + horloge de tempo)
+
+Seuls les vrais kicks, détectés dans les basses, déclenchent un flash : les breaks et les temps
+creux restent sombres. Les kicks alimentent aussi une horloge de tempo (BPM stable estimé sur
+les 16 dernières secondes, ou saisi, et phase calée sur les kicks). Quand les kicks tombent sur
+deux temps de suite, le flash du suivant part en avance de la latence calibrée pour s'allumer
+avec lui ; s'il ne vient pas (début de break), ce flash est aussitôt annulé. Les kicks hors
+temps (roulements de montée, retour après un break) flashent immédiatement, et ne faussent ni
+le tempo ni la phase. La lueur suit les basses et la teinte glisse du rouge (son grave) vers
+le bleu (son brillant).
+
+1. Lister les entrées audio (→ : celle utilisée par défaut, la Focusrite si elle est branchée) :
+   `.\target\release\dj-bridge.exe devices`
+2. Lancer le mode live : `.\target\release\dj-bridge.exe live`
+   - `--bpm 155` : démarrer avec un tempo imposé (sinon détection automatique).
+   - `--bpm-min` / `--bpm-max` : plage de la détection (100-190 par défaut).
+   - `--flash kicks|reactif|temps` : vrais kicks anticipés (par défaut), chaque kick sans
+     anticipation (aucun flash annulé, mais ~55 ms de retard), ou chaque temps de l'horloge.
+   - `--input "nom partiel"` : une autre entrée audio.
+3. Touches en direct :
+   - `b` puis chiffres et Entrée : saisir le BPM ; `+` / `-` : BPM ±0,5 ; `a` : BPM automatique.
+   - `m` : mode de flash, kicks → réactif → temps.
+   - ↑/↓ : seuil de détection des kicks plus haut (moins de kicks) / plus bas (plus de kicks).
+   - `r` : enregistre les 40 dernières secondes de l'entrée dans
+     `%APPDATA%\dj-bridge\captures\` (à faire juste après un passage qui décroche).
+4. Ligne d'état : B/M/A = basses, médiums, aigus ; ● = kick détecté ; ♩ = tempo (auto ou
+   man.) ; mode de flash ; ±n ms = écart moyen entre kicks et temps de l'horloge (n ms en
+   mode réactif = réaction côté PC) ; ⚠n = coupures audio signalées par le pilote.
+
+Si les barres restent vides : vérifier le gain d'entrée de la 2i2 et, dans Windows,
+Paramètres > Confidentialité > Microphone > « Autoriser les applications de bureau ».
+
+Une fois le groove établi (kicks sur 4 temps de suite), la détection attend les kicks sur les
+temps : près d'un temps, ses seuils se relâchent (kick noyé dans une basse dense) ; entre les
+temps, ils se durcissent (une note de basse ne passe pas pour un kick). Dès qu'un kick manque,
+le groove tombe et les seuils redeviennent normaux, pour les breaks et les montées.
+
+### Analyser un passage
+
+`.\target\release\dj-bridge.exe analyze <capture.wav>` rejoue l'enregistrement dans la même
+chaîne que le mode live et affiche, par tranches de 4 s : tempo, part du temps en groove, temps
+marqués par un kick, kicks hors temps et flashs (anticipés / réactifs / annulés). Les tranches où
+moins de la moitié des temps ont un kick sont signalées par ⚠. Options : `--bpm`, `--threshold`,
+`--slice` (durée des tranches).
+
 Les identifiants du bridge et l'avance calibrée sont stockés dans
 `%APPDATA%\dj-bridge\config.json`, hors du dépôt.
 
 ## Feuille de route
 
 1. Sortie Hue + mesure de latence ✅
-2. Entrée audio : Focusrite 2i2 (WASAPI puis ASIO), banc de filtres, détection de kick ← *prochaine étape*
+2. Entrée audio : Focusrite 2i2 (WASAPI ✅, puis ASIO), banc de filtres, détection de kick ← *en cours*
 3. Mode synthé live : Ableton Link + MIDI, flashs anticipés de la latence mesurée
 4. Mode DJ : détection de tempo sur l'audio + anticipation ; bonus : réseau de l'OPUS-QUAD
 5. Modes d'effets, palettes, interface `egui`

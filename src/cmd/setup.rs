@@ -5,10 +5,29 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use tokio::runtime::Runtime;
 
+use crate::audio;
 use crate::config::Config;
 use crate::hue::api;
 
 const PAIR_WAIT: Duration = Duration::from_secs(30);
+
+pub fn devices() -> Result<()> {
+    let inputs = audio::list_inputs()?;
+    if inputs.is_empty() {
+        println!("Aucune entrée audio trouvée.");
+        return Ok(());
+    }
+    println!("Entrées audio (→ : utilisée par `live` sans --input) :");
+    for input in &inputs {
+        let mark = if input.is_preferred { "→" } else { " " };
+        let default = if input.is_default { "  (défaut Windows)" } else { "" };
+        println!(
+            "{mark} {}  {} canaux, {} Hz{default}",
+            input.name, input.channels, input.sample_rate
+        );
+    }
+    Ok(())
+}
 
 pub fn discover(rt: &Runtime) -> Result<()> {
     let bridges = rt.block_on(api::discover())?;
