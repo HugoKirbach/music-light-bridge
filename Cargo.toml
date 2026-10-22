@@ -10,6 +10,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 cpal = { version = "0.18.2", features = ["asio", "realtime"] }
 crossterm = "0.29.0"
 dirs = "7.0.0"
+eframe = "0.37.0"
 hex = "0.4.3"
 midir = "0.11.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "native-tls"] }

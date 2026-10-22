@@ -51,6 +51,14 @@ impl FlashMode {
         }
     }
 
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Kicks => "Kicks, anticipés quand ils tombent sur les temps",
+            Self::Reactive => "Réactif : chaque kick, sans anticipation",
+            Self::EveryBeat => "Chaque temps, même sans kick",
+        }
+    }
+
     pub fn index(self) -> u8 {
         self as u8
     }

@@ -20,6 +20,8 @@ const BAND_RELEASE: f32 = 0.15;
 const GAIN_MEMORY: f32 = 5.0;
 /// En dessous (~ -50 dBFS), c'est du silence : on ne l'amplifie pas.
 const GAIN_FLOOR: f32 = 0.003;
+/// Plancher (-100 dBFS) des enveloppes dans le calcul de l'équilibre grave/aigu.
+const TILT_FLOOR: f32 = 1e-5;
 
 const KICK_ATTACK: f32 = 0.0005;
 const KICK_RELEASE: f32 = 0.04;
@@ -214,12 +216,20 @@ impl KickDetector {
     }
 }
 
-/// Niveaux des trois bandes, normalisés dans [0, 1].
+/// Niveaux des trois bandes, normalisés dans [0, 1], et équilibre grave/aigu.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Levels {
     pub bass: f32,
     pub mid: f32,
     pub high: f32,
+    /// Logarithme du rapport des enveloppes brutes grave/aigu (avant normalisation, qui
+    /// effacerait un filtre en quelques secondes) ; `None` dans le silence.
+    pub tilt: Option<f32>,
+}
+
+/// Équilibre grave/aigu ; rien dans le silence, où il ne veut rien dire.
+fn tilt(bass: f32, high: f32) -> Option<f32> {
+    (bass.max(high) > GAIN_FLOOR).then(|| (bass.max(TILT_FLOOR) / high.max(TILT_FLOOR)).ln())
 }
 
 /// Chaîne complète : séparation en bandes, niveaux normalisés et détection de kick.
@@ -230,7 +240,9 @@ pub struct Analyzer {
     high_filter: Biquad,
     envelopes: [Envelope; 3],
     gains: [AutoGain; 3],
-    levels: Levels,
+    /// Enveloppes brutes et normalisées des trois bandes, au dernier échantillon.
+    raw: [f32; 3],
+    normalized: [f32; 3],
     kick: KickDetector,
 }
 
@@ -242,7 +254,8 @@ impl Analyzer {
             high_filter: Biquad::high_pass(rate, HIGH_CUTOFF, FRAC_1_SQRT_2),
             envelopes: [Envelope::new(rate, BAND_ATTACK, BAND_RELEASE); 3],
             gains: [AutoGain::new(rate, GAIN_MEMORY); 3],
-            levels: Levels::default(),
+            raw: [0.0; 3],
+            normalized: [0.0; 3],
             kick: KickDetector::new(rate, threshold),
         }
     }
@@ -252,7 +265,8 @@ impl Analyzer {
     }
 
     pub fn levels(&self) -> Levels {
-        self.levels
+        let [bass, mid, high] = self.normalized;
+        Levels { bass, mid, high, tilt: tilt(self.raw[0], self.raw[2]) }
     }
 
     /// Traite un échantillon mono ; `true` si un kick vient d'être détecté.
@@ -260,10 +274,8 @@ impl Analyzer {
     pub fn process(&mut self, x: f32, expectation: Expectation) -> bool {
         let bass = self.bass_filter.process(x);
         let bands = [bass, self.mid_filter.process(x), self.high_filter.process(x)];
-        let [b, m, h] = std::array::from_fn(|i| {
-            self.gains[i].process(self.envelopes[i].process(bands[i].abs()))
-        });
-        self.levels = Levels { bass: b, mid: m, high: h };
+        self.raw = std::array::from_fn(|i| self.envelopes[i].process(bands[i].abs()));
+        self.normalized = std::array::from_fn(|i| self.gains[i].process(self.raw[i]));
         self.kick.process(bass, expectation)
     }
 }
@@ -407,5 +419,8 @@ mod tests {
         assert!(low.bass > 0.8 && low.high < 0.05, "{low:?}");
         let high = tone(9000.0);
         assert!(high.high > 0.8 && high.bass < 0.05, "{high:?}");
+        // L'équilibre grave/aigu bascule nettement d'un côté puis de l'autre (> 40 dB).
+        assert!(low.tilt.unwrap() > 4.6 && high.tilt.unwrap() < -4.6, "{low:?} {high:?}");
+        assert_eq!(Analyzer::new(RATE, DEFAULT_THRESHOLD).levels().tilt, None, "silence");
     }
 }

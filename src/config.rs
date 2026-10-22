@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::look::Palette;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     pub bridge: Option<BridgeCredentials>,
@@ -16,6 +18,9 @@ pub struct Config {
     /// Avance donnée aux flashs pour compenser la latence de la chaîne Hue (ms).
     #[serde(default)]
     pub light_advance_ms: i64,
+    /// Couleurs du mode live.
+    #[serde(default)]
+    pub palette: Palette,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -80,6 +80,26 @@ marqués par un kick, kicks hors temps et flashs (anticipés / réactifs / annul
 moins de la moitié des temps ont un kick sont signalées par ⚠. Options : `--bpm`, `--threshold`,
 `--slice` (durée des tranches).
 
+## Fenêtre et couleurs
+
+`.\target\release\dj-bridge.exe gui` lance le mode live dans une fenêtre (mêmes options que
+`live`) :
+
+- au centre, le tempo reconnu en BPM, mis à jour chaque seconde, et sa source (automatique,
+  manuel ou Ableton Link) ; au-dessus, un aperçu de la couleur envoyée à la lampe et un témoin
+  qui s'allume à chaque kick ;
+- trois sélecteurs de couleur : **principale** (groove), **temps creux** (plus de kick depuis
+  1,5 s : break, passage calme) et **filtres** (passe-haut ou passe-bas : l'équilibre grave/aigu
+  s'écarte d'au moins ~14 dB de l'habitude du morceau, mémorisée sur 30 s). La lampe passe de
+  l'une à l'autre en fondu ; la luminosité de chaque couleur plafonne celle de la scène (du noir
+  en temps creux éteint la lampe pendant les breaks) ;
+- le mode de flash (kicks anticipés, réactif, chaque temps), le tempo imposé ou automatique, le
+  seuil de détection et l'enregistrement d'une capture.
+
+Les couleurs sont enregistrées à la fermeture de la fenêtre et reprises par `live`. Limite
+connue : un break qui retire toute la basse ressemble à un passe-haut et prend la couleur des
+filtres.
+
 ## Phase 3 : mode synthé (Ableton Link + MIDI)
 
 - `live --link` rejoint la session Ableton Link du réseau local (Live, Move, Push…) : le tempo
@@ -109,7 +129,7 @@ Les identifiants du bridge et l'avance calibrée sont stockés dans
 2. Entrée audio : Focusrite 2i2 (WASAPI ✅, ASIO ✅), banc de filtres, détection de kick ✅
 3. Mode synthé live : Ableton Link + MIDI, flashs anticipés de la latence mesurée ✅ (à tester)
 4. Mode DJ : détection de tempo sur l'audio + anticipation ; bonus : réseau de l'OPUS-QUAD
-5. Modes d'effets, palettes, interface `egui`
+5. Palette à trois couleurs, interface `egui` ✅ (à tester)
 
 ## Licence
 

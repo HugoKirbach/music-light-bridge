@@ -4,7 +4,9 @@
 mod audio;
 mod cmd;
 mod config;
+mod engine;
 mod flash;
+mod gui;
 mod hue;
 mod link;
 mod look;
@@ -15,12 +17,14 @@ mod timing;
 mod wav;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use config::Config;
+use look::Palette;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -69,37 +73,10 @@ enum Command {
         #[arg(long, value_enum, default_value_t = audio::Backend::Auto)]
         audio: audio::Backend,
     },
-    /// Mode live : flashs sur les vrais kicks de l'entrée audio, anticipés grâce au tempo
-    Live {
-        /// Morceau du nom de l'entrée audio (voir `devices`) ; la Focusrite par défaut
-        #[arg(long)]
-        input: Option<String>,
-        /// Pilote audio : ASIO si libre (sinon WASAPI), ASIO seul, ou WASAPI seul
-        #[arg(long, value_enum, default_value_t = audio::Backend::Auto)]
-        audio: audio::Backend,
-        /// Seuil de détection des kicks (plus haut = moins de détections)
-        #[arg(long, default_value_t = audio::analysis::DEFAULT_THRESHOLD)]
-        threshold: f32,
-        /// Tempo de départ en BPM, modifiable en direct ; détection automatique si absent
-        #[arg(long)]
-        bpm: Option<f64>,
-        /// Tempo minimal envisagé par la détection automatique
-        #[arg(long, default_value_t = tempo::DEFAULT_BPM_RANGE.0)]
-        bpm_min: f64,
-        /// Tempo maximal envisagé par la détection automatique
-        #[arg(long, default_value_t = tempo::DEFAULT_BPM_RANGE.1)]
-        bpm_max: f64,
-        /// Quand flasher : sur les vrais kicks (anticipés), sur chaque kick, ou sur chaque temps
-        #[arg(long, value_enum, default_value_t = flash::FlashMode::Kicks)]
-        flash: flash::FlashMode,
-        /// Rejoint la session Ableton Link : tempo et phase viennent de la session
-        #[arg(long)]
-        link: bool,
-        /// Écoute une entrée MIDI (morceau de son nom, voir `devices` ; la première si vide) :
-        /// chaque note flashe à sa couleur
-        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "NOM")]
-        midi: Option<String>,
-    },
+    /// Mode live dans le terminal : flashs sur les vrais kicks, anticipés grâce au tempo
+    Live(LiveArgs),
+    /// Mode live dans une fenêtre : tempo, couleurs et mode de flash à la souris
+    Gui(LiveArgs),
     /// Rejoue une capture audio (touche `r` du mode live) et résume la détection tranche par tranche
     Analyze {
         /// Fichier WAV à analyser
@@ -122,12 +99,63 @@ enum Command {
     },
 }
 
+/// Options communes au mode live, dans le terminal comme dans la fenêtre.
+#[derive(Args)]
+struct LiveArgs {
+    /// Morceau du nom de l'entrée audio (voir `devices`) ; la Focusrite par défaut
+    #[arg(long)]
+    input: Option<String>,
+    /// Pilote audio : ASIO si libre (sinon WASAPI), ASIO seul, ou WASAPI seul
+    #[arg(long, value_enum, default_value_t = audio::Backend::Auto)]
+    audio: audio::Backend,
+    /// Seuil de détection des kicks (plus haut = moins de détections)
+    #[arg(long, default_value_t = audio::analysis::DEFAULT_THRESHOLD)]
+    threshold: f32,
+    /// Tempo de départ en BPM, modifiable en direct ; détection automatique si absent
+    #[arg(long)]
+    bpm: Option<f64>,
+    /// Tempo minimal envisagé par la détection automatique
+    #[arg(long, default_value_t = tempo::DEFAULT_BPM_RANGE.0)]
+    bpm_min: f64,
+    /// Tempo maximal envisagé par la détection automatique
+    #[arg(long, default_value_t = tempo::DEFAULT_BPM_RANGE.1)]
+    bpm_max: f64,
+    /// Quand flasher : sur les vrais kicks (anticipés), sur chaque kick, ou sur chaque temps
+    #[arg(long, value_enum, default_value_t = flash::FlashMode::Kicks)]
+    flash: flash::FlashMode,
+    /// Rejoint la session Ableton Link : tempo et phase viennent de la session
+    #[arg(long)]
+    link: bool,
+    /// Écoute une entrée MIDI (morceau de son nom, voir `devices` ; la première si vide) :
+    /// chaque note flashe à sa couleur
+    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "NOM")]
+    midi: Option<String>,
+}
+
+impl LiveArgs {
+    fn into_options(self, palette: Palette) -> engine::Options {
+        engine::Options {
+            input: self.input,
+            audio: self.audio,
+            threshold: self.threshold,
+            bpm: self.bpm,
+            bpm_range: (self.bpm_min, self.bpm_max),
+            flash: self.flash,
+            link: self.link,
+            midi: self.midi.map(|name| (!name.is_empty()).then_some(name)),
+            palette,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()?;
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?,
+    );
     let mut cfg = Config::load()?;
     match cli.command {
         Command::Discover => cmd::setup::discover(&rt),
@@ -139,20 +167,14 @@ fn main() -> Result<()> {
         }
         Command::Devices { test: false, .. } => cmd::setup::devices(),
         Command::Devices { test: true, input, audio } => cmd::setup::test_input(input, audio),
-        Command::Live { input, audio, threshold, bpm, bpm_min, bpm_max, flash, link, midi } => cmd::live::run(
-            &rt,
-            &cfg,
-            cmd::live::Options {
-                input,
-                audio,
-                threshold,
-                bpm,
-                bpm_range: (bpm_min, bpm_max),
-                flash,
-                link,
-                midi: midi.map(|name| (!name.is_empty()).then_some(name)),
-            },
-        ),
+        Command::Live(args) => {
+            let options = args.into_options(cfg.palette);
+            cmd::live::run(rt, &cfg, options)
+        }
+        Command::Gui(args) => {
+            let options = args.into_options(cfg.palette);
+            gui::run(rt, cfg, options)
+        }
         Command::Analyze { path, threshold, bpm, bpm_min, bpm_max, slice } => cmd::analyze::run(
             &cfg,
             cmd::analyze::Options { path, threshold, bpm, bpm_range: (bpm_min, bpm_max), slice },
