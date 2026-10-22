@@ -83,10 +83,11 @@ pub fn run(rt: &Runtime, cfg: &mut Config, period: Duration) -> Result<()> {
         (flashes, keyboard)
     });
     drop(metronome);
-    rt.block_on(stream.close())?;
+    let restored = rt.block_on(stream.close())?;
     flashes?;
     keyboard?;
 
+    println!("{restored}");
     let advance = shared.advance_ms.load(Ordering::Relaxed);
     if shared.save.load(Ordering::Relaxed) {
         cfg.light_advance_ms = advance;

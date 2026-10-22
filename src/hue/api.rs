@@ -1,4 +1,4 @@
-//! API REST du bridge : appairage (API v1) et zones de divertissement (CLIP v2).
+//! API REST du bridge : appairage (API v1), zones de divertissement, lampes et scènes (CLIP v2).
 
 use std::time::{Duration, Instant};
 
@@ -24,20 +24,89 @@ pub struct DiscoveredBridge {
 #[derive(Debug, Clone, Deserialize)]
 pub struct EntertainmentArea {
     pub id: String,
-    pub metadata: AreaMetadata,
+    pub metadata: Metadata,
     /// `inactive`, ou `active` si une application diffuse déjà dessus.
     pub status: String,
     pub channels: Vec<Channel>,
+    /// Lampes de la zone.
+    #[serde(default)]
+    pub light_services: Vec<ResourceRef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct AreaMetadata {
+pub struct Metadata {
     pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Channel {
     pub channel_id: u8,
+}
+
+/// Référence à une autre ressource du bridge.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResourceRef {
+    pub rid: String,
+    pub rtype: String,
+}
+
+/// État d'une lampe, tel que le décrit le bridge.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Light {
+    pub id: String,
+    pub metadata: Metadata,
+    pub on: On,
+    pub dimming: Option<Dimming>,
+    pub color: Option<Color>,
+    pub color_temperature: Option<ColorTemperature>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct On {
+    pub on: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dimming {
+    pub brightness: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Color {
+    pub xy: Xy,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct Xy {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ColorTemperature {
+    pub mirek: Option<u16>,
+    /// Faux quand la lampe affiche une couleur plutôt qu'un blanc.
+    pub mirek_valid: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Scene {
+    pub id: String,
+    pub metadata: Metadata,
+    pub status: Option<SceneStatus>,
+    #[serde(default)]
+    pub actions: Vec<SceneAction>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SceneStatus {
+    /// `inactive`, `static` ou `dynamic_palette`.
+    pub active: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SceneAction {
+    pub target: ResourceRef,
 }
 
 #[derive(Deserialize)]
@@ -122,13 +191,29 @@ pub async fn pair(ip: &str, wait: Duration) -> Result<BridgeCredentials> {
 }
 
 pub async fn entertainment_areas(bridge: &BridgeCredentials) -> Result<Vec<EntertainmentArea>> {
-    let response = bridge_client()?
-        .get(area_url(bridge, None))
-        .header(APP_KEY_HEADER, &bridge.app_key)
-        .send()
-        .await
-        .with_context(|| format!("bridge injoignable à {}", bridge.ip))?;
-    clip_data(response).await
+    clip_get(bridge, "entertainment_configuration").await
+}
+
+pub async fn light(bridge: &BridgeCredentials, id: &str) -> Result<Light> {
+    clip_get(bridge, &format!("light/{id}"))
+        .await?
+        .into_iter()
+        .next()
+        .with_context(|| format!("lampe {id} introuvable"))
+}
+
+pub async fn scenes(bridge: &BridgeCredentials) -> Result<Vec<Scene>> {
+    clip_get(bridge, "scene").await
+}
+
+/// Modifie une lampe (marche/arrêt, luminosité, couleur…) avec le corps CLIP v2 donné.
+pub async fn update_light(bridge: &BridgeCredentials, id: &str, body: &Value) -> Result<()> {
+    clip_put(bridge, &format!("light/{id}"), body).await
+}
+
+/// Rappelle une scène ; `action` vaut `static` ou `dynamic_palette` (scène animée).
+pub async fn recall_scene(bridge: &BridgeCredentials, id: &str, action: &str) -> Result<()> {
+    clip_put(bridge, &format!("scene/{id}"), &json!({ "recall": { "action": action } })).await
 }
 
 /// Zone demandée, ou la seule zone existante si aucune n'a été choisie.
@@ -150,25 +235,35 @@ pub async fn select_area(bridge: &BridgeCredentials, wanted: Option<&str>) -> Re
 /// Démarre ou arrête le mode streaming de la zone (à faire avant d'ouvrir le flux DTLS).
 pub async fn set_streaming(bridge: &BridgeCredentials, area_id: &str, active: bool) -> Result<()> {
     let action = if active { "start" } else { "stop" };
+    clip_put(bridge, &format!("entertainment_configuration/{area_id}"), &json!({ "action": action }))
+        .await
+        .with_context(|| format!("action « {action} » refusée sur la zone {area_id}"))
+}
+
+fn resource_url(bridge: &BridgeCredentials, path: &str) -> String {
+    format!("https://{}/clip/v2/resource/{path}", bridge.ip)
+}
+
+async fn clip_get<T: DeserializeOwned>(bridge: &BridgeCredentials, path: &str) -> Result<Vec<T>> {
     let response = bridge_client()?
-        .put(area_url(bridge, Some(area_id)))
+        .get(resource_url(bridge, path))
         .header(APP_KEY_HEADER, &bridge.app_key)
-        .json(&json!({ "action": action }))
         .send()
         .await
         .with_context(|| format!("bridge injoignable à {}", bridge.ip))?;
-    clip_data::<Value>(response)
-        .await
-        .with_context(|| format!("action « {action} » refusée sur la zone {area_id}"))?;
-    Ok(())
+    clip_data(response).await
 }
 
-fn area_url(bridge: &BridgeCredentials, id: Option<&str>) -> String {
-    let base = format!("https://{}/clip/v2/resource/entertainment_configuration", bridge.ip);
-    match id {
-        Some(id) => format!("{base}/{id}"),
-        None => base,
-    }
+async fn clip_put(bridge: &BridgeCredentials, path: &str, body: &Value) -> Result<()> {
+    let response = bridge_client()?
+        .put(resource_url(bridge, path))
+        .header(APP_KEY_HEADER, &bridge.app_key)
+        .json(body)
+        .send()
+        .await
+        .with_context(|| format!("bridge injoignable à {}", bridge.ip))?;
+    clip_data::<Value>(response).await?;
+    Ok(())
 }
 
 async fn clip_data<T: DeserializeOwned>(response: reqwest::Response) -> Result<Vec<T>> {

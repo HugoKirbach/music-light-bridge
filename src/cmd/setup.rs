@@ -11,6 +11,7 @@ use crate::audio::analysis::DEFAULT_THRESHOLD;
 use crate::audio::{self, AudioInput, Backend, Features};
 use crate::config::Config;
 use crate::hue::api;
+use crate::hue::snapshot::Snapshot;
 use crate::midi;
 
 const PAIR_WAIT: Duration = Duration::from_secs(30);
@@ -47,6 +48,36 @@ pub fn devices() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Rétablit l'état des lampes d'avant le flux, laissé sur disque par une session interrompue.
+pub fn restore(rt: &Runtime, cfg: &Config) -> Result<()> {
+    let Some(snapshot) = Snapshot::leftover()? else {
+        println!("Rien à rétablir : la dernière session a déjà remis les lampes dans leur état d'origine.");
+        return Ok(());
+    };
+    let bridge = cfg.bridge()?;
+    println!(
+        "État pris il y a {} : {} lampe(s), {} scène(s) active(s).",
+        format_age(snapshot.age()),
+        snapshot.lights.len(),
+        snapshot.scenes.len()
+    );
+    // Un flux resté ouvert par un plantage garderait la main sur les lampes.
+    if let Some(area_id) = &cfg.area_id {
+        let _ = rt.block_on(api::set_streaming(bridge, area_id, false));
+    }
+    println!("{}", rt.block_on(snapshot.restore(bridge))?);
+    Ok(())
+}
+
+fn format_age(age: Duration) -> String {
+    let minutes = age.as_secs() / 60;
+    match minutes {
+        0 => "moins d'une minute".to_owned(),
+        1..60 => format!("{minutes} min"),
+        _ => format!("{} h {:02}", minutes / 60, minutes % 60),
+    }
 }
 
 /// Ouvre l'entrée audio quelques secondes, sans le bridge, et rend compte de ce qu'elle reçoit.

@@ -32,7 +32,7 @@ pub fn run(rt: &Runtime, cfg: &Config, duration: Duration) -> Result<()> {
     println!("Flux DTLS établi. Arc-en-ciel pendant {} s.", duration.as_secs());
 
     let result = rainbow(rt, &mut stream, &area, duration);
-    rt.block_on(stream.close())?;
+    let restored = rt.block_on(stream.close())?;
     let stats = result?;
 
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
@@ -43,6 +43,7 @@ pub fn run(rt: &Runtime, cfg: &Config, duration: Duration) -> Result<()> {
         ms(stats.max_late),
         ms(stats.max_send),
     );
+    println!("{restored}");
     Ok(())
 }
 

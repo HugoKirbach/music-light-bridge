@@ -22,6 +22,7 @@ use crate::audio::{AudioInput, Backend, Features, Grid};
 use crate::config::Config;
 use crate::flash::{Action, CONFIRM_MARGIN, FlashMode, FlashPlanner};
 use crate::hue::api;
+use crate::hue::snapshot::Restored;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
 use crate::link::LinkSession;
 use crate::look::{Palette, ReactiveLook};
@@ -67,6 +68,8 @@ pub struct Info {
     pub midi_port: Option<String>,
     pub link: bool,
     pub advance: Duration,
+    /// L'état des lampes à rétablir vient d'une session interrompue.
+    pub resumed_snapshot: bool,
 }
 
 /// Instantané de l'état, pour l'affichage.
@@ -105,6 +108,8 @@ pub struct Summary {
     input_latency_ms: f64,
     glitches: u32,
     input_lost: bool,
+    /// Retour des lampes à leur état d'avant le flux, ou la raison de son échec.
+    restore: std::result::Result<Restored, String>,
 }
 
 struct Shared {
@@ -198,6 +203,7 @@ impl Engine {
             None => None,
         };
         let stream = rt.block_on(HueStream::open(bridge, &area))?;
+        let resumed_snapshot = stream.resumed;
         let advance = Duration::from_millis(cfg.light_advance_ms.max(0).unsigned_abs());
 
         let mut tracker = Tracker::new(options.bpm_range);
@@ -251,6 +257,7 @@ impl Engine {
             midi_port: midi.as_ref().map(|m| m.port.clone()),
             link: options.link,
             advance,
+            resumed_snapshot,
         };
         Ok(Self {
             info,
@@ -367,7 +374,7 @@ impl Engine {
         Ok(path)
     }
 
-    /// Arrête les fils, ferme le flux (la lampe revient à l'app Hue) et dresse le bilan.
+    /// Arrête les fils, ferme le flux, rétablit l'état d'origine des lampes et dresse le bilan.
     pub fn stop(mut self) -> Result<Summary> {
         self.shutdown()
     }
@@ -381,7 +388,8 @@ impl Engine {
         }
         self.midi = None;
         self.audio = None;
-        self.rt.block_on(stream.close())?;
+        // Le rétablissement des lampes est tenté même si la boucle d'éclairage a échoué.
+        let restore = self.rt.block_on(stream.close()).map_err(|e| format!("{e:#}"));
         result?;
 
         let shared = &self.shared;
@@ -400,6 +408,7 @@ impl Engine {
             input_latency_ms: self.features.input_latency().as_secs_f64() * 1e3,
             glitches: self.features.glitches(),
             input_lost: self.features.input_lost(),
+            restore,
         })
     }
 }
@@ -427,6 +436,11 @@ impl fmt::Display for Info {
         }
         if self.link {
             write!(f, "\nAbleton Link : tempo et phase suivent la session (autorise l'accès réseau si Windows le demande).")?;
+        }
+        if self.resumed_snapshot {
+            write!(f, "\nLampes : l'état d'avant une session interrompue sera rétabli à la fermeture.")?;
+        } else {
+            write!(f, "\nLampes : leur état actuel sera rétabli à la fermeture.")?;
         }
         Ok(())
     }
@@ -463,7 +477,10 @@ impl fmt::Display for Summary {
         if self.input_lost {
             write!(f, "\nL'entrée audio a été perdue en cours de route (câble ou pilote).")?;
         }
-        Ok(())
+        match &self.restore {
+            Ok(restored) => write!(f, "\n{restored}"),
+            Err(reason) => write!(f, "\n⚠ {reason}"),
+        }
     }
 }
 

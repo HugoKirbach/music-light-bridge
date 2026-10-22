@@ -120,6 +120,18 @@ La compilation utilise le CMake des Build Tools (Ableton Link), le libclang de L
 ASIO de Steinberg (`C:\Dev\ASIOSDK`, double licence GPLv3 / accord Steinberg) ; leurs chemins
 sur ce PC sont dans `.cargo/config.toml`.
 
+## État des lampes avant et après
+
+Avant de prendre la main sur la zone de divertissement (`live`, `gui`, `test`, `latency`), DJ-Bridge
+photographie l'état de chacune de ses lampes : marche/arrêt, luminosité, couleur ou blanc, et les
+scènes actives qui les concernent. À la fermeture, il le rétablit en fondu (400 ms) et relance
+ces scènes, une scène dynamique reprenant son animation.
+
+La photo est aussi écrite dans `%APPDATA%\dj-bridge\lampes-avant-flux.json`. Si l'appli est
+coupée brutalement (plantage, console fermée), elle est reprise au lancement suivant (si elle a
+moins de 6 h) et rétablie à sa fermeture ; ou tout de suite avec :
+`.\target\release\dj-bridge.exe restore`.
+
 Les identifiants du bridge et l'avance calibrée sont stockés dans
 `%APPDATA%\dj-bridge\config.json`, hors du dépôt.
 

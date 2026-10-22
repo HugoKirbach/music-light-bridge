@@ -61,6 +61,8 @@ enum Command {
         #[arg(long, default_value_t = 1000)]
         period_ms: u64,
     },
+    /// Rétablit l'état des lampes d'avant le flux, si une session a été interrompue
+    Restore,
     /// Liste les entrées audio et MIDI
     Devices {
         /// Ouvre l'entrée audio 3 s et rend compte de ce qu'elle reçoit
@@ -165,6 +167,7 @@ fn main() -> Result<()> {
         Command::Latency { period_ms } => {
             cmd::latency::run(&rt, &mut cfg, Duration::from_millis(period_ms))
         }
+        Command::Restore => cmd::setup::restore(&rt, &cfg),
         Command::Devices { test: false, .. } => cmd::setup::devices(),
         Command::Devices { test: true, input, audio } => cmd::setup::test_input(input, audio),
         Command::Live(args) => {

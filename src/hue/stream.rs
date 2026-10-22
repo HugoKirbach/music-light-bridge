@@ -11,6 +11,7 @@ use webrtc_dtls::config::Config;
 use webrtc_dtls::conn::DTLSConn;
 
 use super::api::{self, EntertainmentArea};
+use super::snapshot::{Restored, Snapshot};
 use crate::config::BridgeCredentials;
 
 const PORT: u16 = 2100;
@@ -59,23 +60,35 @@ pub struct HueStream {
     bridge: BridgeCredentials,
     area_id: String,
     packet: Vec<u8>,
+    /// État des lampes avant le flux, rétabli à la fermeture.
+    snapshot: Snapshot,
+    /// La photo vient d'une session interrompue, et non de l'état actuel des lampes.
+    pub resumed: bool,
 }
 
 impl HueStream {
-    /// Active le streaming sur la zone puis ouvre la session DTLS.
+    /// Photographie l'état des lampes, active le streaming sur la zone puis ouvre la session DTLS.
     pub async fn open(bridge: &BridgeCredentials, area: &EntertainmentArea) -> Result<Self> {
         if area.id.len() != AREA_ID_LEN {
             bail!("identifiant de zone inattendu : {}", area.id);
         }
-        api::set_streaming(bridge, &area.id, true).await?;
-        let conn = match connect(bridge).await {
+        let (snapshot, resumed) = Snapshot::take(bridge, area).await.context("photo de l'état des lampes")?;
+        let opened = match api::set_streaming(bridge, &area.id, true).await {
+            Ok(()) => connect(bridge).await,
+            Err(e) => Err(e),
+        };
+        let conn = match opened {
             Ok(conn) => conn,
             Err(e) => {
+                // Le flux n'a rien envoyé : les lampes n'ont pas bougé, la photo est inutile.
                 let _ = api::set_streaming(bridge, &area.id, false).await;
+                if !resumed {
+                    let _ = Snapshot::discard();
+                }
                 return Err(e);
             }
         };
-        Ok(Self { conn, bridge: bridge.clone(), area_id: area.id.clone(), packet: header(&area.id) })
+        Ok(Self { conn, bridge: bridge.clone(), area_id: area.id.clone(), packet: header(&area.id), snapshot, resumed })
     }
 
     pub async fn send(&mut self, channels: &[(u8, Rgb)]) -> Result<()> {
@@ -84,10 +97,14 @@ impl HueStream {
         Ok(())
     }
 
-    /// Ferme la session DTLS et rend la main à l'app Hue.
-    pub async fn close(self) -> Result<()> {
+    /// Ferme la session DTLS, rend la main à l'app Hue et rétablit l'état d'avant le flux.
+    pub async fn close(self) -> Result<Restored> {
         let _ = self.conn.close().await;
-        api::set_streaming(&self.bridge, &self.area_id, false).await
+        api::set_streaming(&self.bridge, &self.area_id, false).await?;
+        self.snapshot
+            .restore(&self.bridge)
+            .await
+            .context("état des lampes non rétabli, lance `dj-bridge restore`")
     }
 }
 
