@@ -17,7 +17,7 @@ use tokio::runtime::Runtime;
 use super::tui::{self, RawMode};
 use crate::audio::analysis::KICK_DETECTION_DELAY;
 use crate::audio::capture::Capture;
-use crate::audio::{AudioInput, Features, Grid};
+use crate::audio::{AudioInput, Backend, Features, Grid};
 use crate::config::Config;
 use crate::flash::{Action, CONFIRM_MARGIN, FlashMode, FlashPlanner};
 use crate::hue::api;
@@ -46,6 +46,7 @@ const MAX_TYPED: usize = 6;
 
 pub struct Options {
     pub input: Option<String>,
+    pub audio: Backend,
     pub threshold: f32,
     /// Tempo imposé au démarrage ; sinon détection automatique (ou tempo proposé à Link).
     pub bpm: Option<f64>,
@@ -128,7 +129,7 @@ pub fn run(rt: &Runtime, cfg: &Config, options: Options) -> Result<()> {
 
     let features = Arc::new(Features::new(options.threshold));
     let notes = Arc::new(Notes::default());
-    let audio = AudioInput::start(options.input.as_deref(), features.clone())?;
+    let audio = AudioInput::start(options.input.as_deref(), options.audio, features.clone())?;
     let midi = match &options.midi {
         Some(wanted) => Some(MidiListener::start(wanted.as_deref(), notes.clone())?),
         None => None,
@@ -157,9 +158,12 @@ pub fn run(rt: &Runtime, cfg: &Config, options: Options) -> Result<()> {
     };
 
     println!(
-        "Mode live : « {} » ({} Hz, {} canaux) → zone « {} ».",
-        audio.device, audio.sample_rate, audio.channels, area.metadata.name
+        "Mode live : « {} » en {} ({} Hz, {} canaux) → zone « {} ».",
+        audio.device, audio.backend, audio.sample_rate, audio.channels, area.metadata.name
     );
+    if let Some(reason) = &audio.fallback {
+        println!("ASIO indisponible ({reason}) : capture en WASAPI.");
+    }
     if let Some(midi) = &midi {
         println!("MIDI : « {} » ; chaque note flashe à sa couleur.", midi.port);
     }

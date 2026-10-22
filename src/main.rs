@@ -57,13 +57,26 @@ enum Command {
         #[arg(long, default_value_t = 1000)]
         period_ms: u64,
     },
-    /// Liste les entrées audio
-    Devices,
+    /// Liste les entrées audio et MIDI
+    Devices {
+        /// Ouvre l'entrée audio 3 s et rend compte de ce qu'elle reçoit
+        #[arg(long)]
+        test: bool,
+        /// Entrée à tester (morceau de son nom)
+        #[arg(long)]
+        input: Option<String>,
+        /// Pilote audio à tester
+        #[arg(long, value_enum, default_value_t = audio::Backend::Auto)]
+        audio: audio::Backend,
+    },
     /// Mode live : flashs sur les vrais kicks de l'entrée audio, anticipés grâce au tempo
     Live {
         /// Morceau du nom de l'entrée audio (voir `devices`) ; la Focusrite par défaut
         #[arg(long)]
         input: Option<String>,
+        /// Pilote audio : ASIO si libre (sinon WASAPI), ASIO seul, ou WASAPI seul
+        #[arg(long, value_enum, default_value_t = audio::Backend::Auto)]
+        audio: audio::Backend,
         /// Seuil de détection des kicks (plus haut = moins de détections)
         #[arg(long, default_value_t = audio::analysis::DEFAULT_THRESHOLD)]
         threshold: f32,
@@ -124,12 +137,14 @@ fn main() -> Result<()> {
         Command::Latency { period_ms } => {
             cmd::latency::run(&rt, &mut cfg, Duration::from_millis(period_ms))
         }
-        Command::Devices => cmd::setup::devices(),
-        Command::Live { input, threshold, bpm, bpm_min, bpm_max, flash, link, midi } => cmd::live::run(
+        Command::Devices { test: false, .. } => cmd::setup::devices(),
+        Command::Devices { test: true, input, audio } => cmd::setup::test_input(input, audio),
+        Command::Live { input, audio, threshold, bpm, bpm_min, bpm_max, flash, link, midi } => cmd::live::run(
             &rt,
             &cfg,
             cmd::live::Options {
                 input,
+                audio,
                 threshold,
                 bpm,
                 bpm_range: (bpm_min, bpm_max),

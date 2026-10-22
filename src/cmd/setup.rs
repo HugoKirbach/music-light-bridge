@@ -1,16 +1,22 @@
 //! Mise en place : découverte du bridge, appairage et choix de la zone de divertissement.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use tokio::runtime::Runtime;
 
-use crate::audio;
+use crate::audio::analysis::DEFAULT_THRESHOLD;
+use crate::audio::{self, AudioInput, Backend, Features};
 use crate::config::Config;
 use crate::hue::api;
 use crate::midi;
 
 const PAIR_WAIT: Duration = Duration::from_secs(30);
+const INPUT_TEST: Duration = Duration::from_secs(3);
+/// Au-dessus, la bande des basses porte un signal (niveau normalisé, le silence reste à 0).
+const SIGNAL_LEVEL: f32 = 0.2;
 
 pub fn devices() -> Result<()> {
     let inputs = audio::list_inputs()?;
@@ -28,6 +34,8 @@ pub fn devices() -> Result<()> {
         }
     }
 
+    println!("En ASIO, `live` ouvre le pilote « Focusrite USB ASIO » (ou celui choisi avec --input).");
+
     println!();
     let ports = midi::list_inputs()?;
     if ports.is_empty() {
@@ -37,6 +45,40 @@ pub fn devices() -> Result<()> {
         for (i, port) in ports.iter().enumerate() {
             println!("{} {port}", if i == 0 { "→" } else { " " });
         }
+    }
+    Ok(())
+}
+
+/// Ouvre l'entrée audio quelques secondes, sans le bridge, et rend compte de ce qu'elle reçoit.
+pub fn test_input(input: Option<String>, backend: Backend) -> Result<()> {
+    let features = Arc::new(Features::new(DEFAULT_THRESHOLD));
+    let audio = AudioInput::start(input.as_deref(), backend, features.clone())?;
+    if let Some(reason) = &audio.fallback {
+        println!("ASIO indisponible ({reason}) : repli sur WASAPI.");
+    }
+    println!(
+        "« {} » en {} ({} Hz, {} canaux) : écoute pendant {} s…",
+        audio.device,
+        audio.backend,
+        audio.sample_rate,
+        audio.channels,
+        INPUT_TEST.as_secs()
+    );
+    let end = Instant::now() + INPUT_TEST;
+    let mut loudest = 0.0f32;
+    while Instant::now() < end {
+        thread::sleep(Duration::from_millis(20));
+        loudest = loudest.max(features.levels().bass);
+    }
+    println!(
+        "Âge des blocs audio : {:.1} ms. Coupures : {}. Kicks détectés : {}. Signal dans les basses : {}.",
+        features.input_latency().as_secs_f64() * 1e3,
+        features.glitches(),
+        features.kicks(),
+        if loudest > SIGNAL_LEVEL { "oui" } else { "non (silence ?)" },
+    );
+    if features.input_lost() {
+        println!("L'entrée a été perdue pendant le test.");
     }
     Ok(())
 }

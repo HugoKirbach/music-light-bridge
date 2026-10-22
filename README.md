@@ -41,14 +41,19 @@ temps (roulements de montée, retour après un break) flashent immédiatement, e
 le tempo ni la phase. La lueur suit les basses et la teinte glisse du rouge (son grave) vers
 le bleu (son brillant).
 
-1. Lister les entrées audio (→ : celle utilisée par défaut, la Focusrite si elle est branchée) :
-   `.\target\release\dj-bridge.exe devices`
+1. Lister les entrées audio et MIDI (→ : celle utilisée par défaut, la Focusrite si elle est
+   branchée) : `.\target\release\dj-bridge.exe devices`. Avec `--test`, l'entrée est ouverte 3 s
+   (sans le bridge) pour vérifier qu'elle reçoit du son et lire l'âge de ses blocs audio.
 2. Lancer le mode live : `.\target\release\dj-bridge.exe live`
    - `--bpm 155` : démarrer avec un tempo imposé (sinon détection automatique).
    - `--bpm-min` / `--bpm-max` : plage de la détection (100-190 par défaut).
    - `--flash kicks|reactif|temps` : vrais kicks anticipés (par défaut), chaque kick sans
      anticipation (aucun flash annulé, mais ~55 ms de retard), ou chaque temps de l'horloge.
    - `--input "nom partiel"` : une autre entrée audio.
+   - `--audio auto|asio|wasapi` : pilote de capture. Par défaut, ASIO (« Focusrite USB ASIO »)
+     s'il est libre, sinon WASAPI ; un pilote ASIO n'accepte souvent qu'un logiciel à la fois,
+     d'où le repli quand Ableton l'utilise déjà. En ASIO, la latence d'entrée dépend de la taille
+     de tampon réglée dans Focusrite Control : 64 ou 128 échantillons pour la plus faible.
 3. Touches en direct :
    - `b` puis chiffres et Entrée : saisir le BPM ; `+` / `-` : BPM ±0,5 ; `a` : BPM automatique.
    - `m` : mode de flash, kicks → réactif → temps.
@@ -91,8 +96,9 @@ moins de la moitié des temps ont un kick sont signalées par ⚠. Options : `--
 Au premier lancement avec `--link`, Windows demande d'autoriser l'accès réseau de
 `dj-bridge.exe` : il faut accepter (réseau privé) pour voir les autres participants.
 
-La compilation d'Ableton Link utilise le CMake des Build Tools et le libclang de LLVM ; leurs
-chemins sur ce PC sont dans `.cargo/config.toml`.
+La compilation utilise le CMake des Build Tools (Ableton Link), le libclang de LLVM et le kit
+ASIO de Steinberg (`C:\Dev\ASIOSDK`, double licence GPLv3 / accord Steinberg) ; leurs chemins
+sur ce PC sont dans `.cargo/config.toml`.
 
 Les identifiants du bridge et l'avance calibrée sont stockés dans
 `%APPDATA%\dj-bridge\config.json`, hors du dépôt.
@@ -100,7 +106,7 @@ Les identifiants du bridge et l'avance calibrée sont stockés dans
 ## Feuille de route
 
 1. Sortie Hue + mesure de latence ✅
-2. Entrée audio : Focusrite 2i2 (WASAPI ✅, puis ASIO), banc de filtres, détection de kick ✅
+2. Entrée audio : Focusrite 2i2 (WASAPI ✅, ASIO ✅), banc de filtres, détection de kick ✅
 3. Mode synthé live : Ableton Link + MIDI, flashs anticipés de la latence mesurée ✅ (à tester)
 4. Mode DJ : détection de tempo sur l'audio + anticipation ; bonus : réseau de l'OPUS-QUAD
 5. Modes d'effets, palettes, interface `egui`

@@ -1,21 +1,37 @@
-//! Capture via le pilote audio de Windows (WASAPI). Le signal est mixé en mono et analysé
-//! directement dans le fil audio : aucune copie ni file d'attente entre capture et détection.
+//! Capture en ASIO (latence minimale) ou en WASAPI (pilote standard de Windows). Le signal est
+//! mixé en mono et analysé directement dans le fil audio : aucune copie ni file d'attente
+//! entre capture et détection.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{ErrorKind, FromSample, InputCallbackInfo, SampleFormat, SizedSample, Stream, StreamConfig};
+use cpal::{
+    ErrorKind, FromSample, HostId, I24, InputCallbackInfo, SampleFormat, SizedSample, Stream, StreamConfig,
+};
 
 use super::Features;
 use super::analysis::Analyzer;
 use super::capture::Capture;
 
-/// Entrée choisie quand aucune n'est demandée, si elle est branchée.
+/// Entrée WASAPI choisie quand aucune n'est demandée, si elle est branchée.
 const PREFERRED_INPUT: &str = "focusrite";
+/// Pilote ASIO choisi quand aucun n'est demandé.
+const PREFERRED_ASIO: &str = "focusrite usb";
 /// Durée gardée en mémoire pour la capture (touche `r` du mode live).
 const CAPTURE_SECONDS: u32 = 40;
+
+/// Pilote audio utilisé pour la capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Backend {
+    /// ASIO si le pilote est libre, sinon WASAPI
+    Auto,
+    /// ASIO : latence minimale, mais souvent un seul logiciel à la fois sur la carte
+    Asio,
+    /// WASAPI : pilote standard de Windows, partageable avec d'autres logiciels
+    Wasapi,
+}
 
 pub struct InputInfo {
     pub name: String,
@@ -54,6 +70,10 @@ pub fn list_inputs() -> Result<Vec<InputInfo>> {
 pub struct AudioInput {
     _stream: Stream,
     pub device: String,
+    /// « ASIO » ou « WASAPI ».
+    pub backend: &'static str,
+    /// En mode automatique, la raison pour laquelle l'ASIO n'a pas pu être utilisé.
+    pub fallback: Option<String>,
     pub sample_rate: u32,
     pub channels: u16,
     /// Dernières secondes reçues, en mono.
@@ -61,10 +81,26 @@ pub struct AudioInput {
 }
 
 impl AudioInput {
-    /// `wanted` : morceau du nom de l'entrée ; à défaut, la Focusrite si elle est branchée,
-    /// sinon l'entrée par défaut de Windows.
-    pub fn start(wanted: Option<&str>, features: Arc<Features>) -> Result<Self> {
-        let device = pick_device(wanted)?;
+    /// `wanted` : morceau du nom de l'entrée (ou du pilote ASIO) ; à défaut, la Focusrite,
+    /// et en WASAPI l'entrée par défaut de Windows si elle n'est pas branchée.
+    pub fn start(wanted: Option<&str>, backend: Backend, features: Arc<Features>) -> Result<Self> {
+        match backend {
+            Backend::Asio => Self::open(HostId::Asio, wanted, features),
+            Backend::Wasapi => Self::open(HostId::Wasapi, wanted, features),
+            Backend::Auto => match Self::open(HostId::Asio, wanted, features.clone()) {
+                Ok(input) => Ok(input),
+                Err(asio) => {
+                    let mut input = Self::open(HostId::Wasapi, wanted, features)?;
+                    input.fallback = Some(format!("{asio:#}"));
+                    Ok(input)
+                }
+            },
+        }
+    }
+
+    fn open(host_id: HostId, wanted: Option<&str>, features: Arc<Features>) -> Result<Self> {
+        let host = cpal::host_from_id(host_id)?;
+        let device = pick_device(&host, host_id, wanted)?;
         let supported = device.default_input_config()?;
         let format = supported.sample_format();
         let config: StreamConfig = supported.into();
@@ -74,25 +110,31 @@ impl AudioInput {
         let stream = match format {
             SampleFormat::F32 => build::<f32>(&device, config, features, recorder)?,
             SampleFormat::I16 => build::<i16>(&device, config, features, recorder)?,
+            SampleFormat::I24 => build::<I24>(&device, config, features, recorder)?,
             SampleFormat::I32 => build::<i32>(&device, config, features, recorder)?,
             other => bail!("format audio non géré : {other}"),
         };
         stream.play()?;
-        Ok(Self { _stream: stream, device: device.to_string(), sample_rate, channels, capture })
+        let backend = if host_id == HostId::Asio { "ASIO" } else { "WASAPI" };
+        Ok(Self { _stream: stream, device: device.to_string(), backend, fallback: None, sample_rate, channels, capture })
     }
 }
 
-fn pick_device(wanted: Option<&str>) -> Result<cpal::Device> {
-    let host = cpal::default_host();
+/// En ASIO, énumérer charge chaque pilote tour à tour : la recherche s'arrête au premier qui
+/// convient, sans aller jusqu'aux pilotes du matériel débranché (Pioneer, etc.).
+fn pick_device(host: &cpal::Host, host_id: HostId, wanted: Option<&str>) -> Result<cpal::Device> {
     let find = |needle: &str| -> Result<Option<cpal::Device>> {
         let needle = needle.to_lowercase();
         Ok(host.input_devices()?.find(|d| d.to_string().to_lowercase().contains(&needle)))
     };
-    match wanted {
-        Some(name) => find(name)?.with_context(|| {
+    match (wanted, host_id) {
+        (Some(name), _) => find(name)?.with_context(|| {
             format!("aucune entrée audio ne contient « {name} » : lance `dj-bridge devices`")
         }),
-        None => match find(PREFERRED_INPUT)? {
+        (None, HostId::Asio) => {
+            find(PREFERRED_ASIO)?.context("pilote ASIO « Focusrite USB » introuvable ou déjà utilisé")
+        }
+        (None, _) => match find(PREFERRED_INPUT)? {
             Some(device) => Ok(device),
             None => host.default_input_device().context("aucune entrée audio disponible"),
         },

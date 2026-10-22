@@ -6,7 +6,7 @@ mod input;
 #[cfg(test)]
 pub mod synth;
 
-pub use input::{AudioInput, list_inputs};
+pub use input::{AudioInput, Backend, list_inputs};
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
