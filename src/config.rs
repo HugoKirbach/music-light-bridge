@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio::Backend;
 use crate::audio::analysis::DEFAULT_THRESHOLD;
 use crate::flash::FlashMode;
-use crate::look::Palette;
+use crate::look::{Dynamics, Palette};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -24,6 +24,9 @@ pub struct Config {
     /// Couleurs du mode live.
     #[serde(default)]
     pub palette: Palette,
+    /// Allure des flashs du mode live.
+    #[serde(default)]
+    pub dynamics: Dynamics,
     /// Derniers réglages choisis dans la fenêtre.
     #[serde(default)]
     pub live: LiveSettings,

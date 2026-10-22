@@ -103,7 +103,11 @@ couleurs, le mode de flash et le seuil, puis le bouton **Lancer** démarre le mo
 - le mode de flash (kicks anticipés, réactif, chaque temps), le tempo imposé ou automatique, le
   seuil de détection et l'enregistrement d'une capture.
 
-Les couleurs sont enregistrées à la fermeture de la fenêtre et reprises par `live`. Limite
+La section **Flashs** règle leur allure, avant comme pendant le live : **intensité** (jusqu'où
+monte un flash au-dessus de la lueur), **redescente** (de 40 ms, sec, à 1,5 s, très doux) et
+**lueur de fond** (luminosité minimale gardée entre les kicks).
+
+Les couleurs et l'allure des flashs sont enregistrées à la fermeture de la fenêtre et reprises par `live`. Limite
 connue : un break qui retire toute la basse ressemble à un passe-haut et prend la couleur des
 filtres.
 

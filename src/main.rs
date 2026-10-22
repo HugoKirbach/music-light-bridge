@@ -24,7 +24,7 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
 use config::Config;
-use look::Palette;
+use look::{Dynamics, Palette};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -135,7 +135,7 @@ struct LiveArgs {
 }
 
 impl LiveArgs {
-    fn into_options(self, palette: Palette) -> engine::Options {
+    fn into_options(self, palette: Palette, dynamics: Dynamics) -> engine::Options {
         engine::Options {
             input: self.input,
             audio: self.audio,
@@ -146,6 +146,7 @@ impl LiveArgs {
             link: self.link,
             midi: self.midi.map(|name| (!name.is_empty()).then_some(name)),
             palette,
+            dynamics,
         }
     }
 }
@@ -171,7 +172,7 @@ fn main() -> Result<()> {
         Command::Devices { test: false, .. } => cmd::setup::devices(),
         Command::Devices { test: true, input, audio } => cmd::setup::test_input(input, audio),
         Command::Live(args) => {
-            let options = args.into_options(cfg.palette);
+            let options = args.into_options(cfg.palette, cfg.dynamics);
             cmd::live::run(rt, &cfg, options)
         }
         Command::Gui => gui::run(rt, cfg),

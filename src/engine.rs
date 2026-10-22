@@ -25,7 +25,7 @@ use crate::hue::api;
 use crate::hue::snapshot::Restored;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
 use crate::link::LinkSession;
-use crate::look::{Palette, ReactiveLook};
+use crate::look::{Dynamics, Palette, ReactiveLook};
 use crate::midi::{MidiListener, Notes, note_hue};
 use crate::tempo::{MANUAL_BPM_LIMITS, TempoSource, Tracker};
 use crate::timing;
@@ -54,6 +54,7 @@ pub struct Options {
     /// Écouter une entrée MIDI : `Some(None)` pour la première, `Some(Some(nom))` pour une autre.
     pub midi: Option<Option<String>>,
     pub palette: Palette,
+    pub dynamics: Dynamics,
 }
 
 /// Ce qui est connu au démarrage.
@@ -117,6 +118,7 @@ struct Shared {
     mode: AtomicU8,
     tracker: Mutex<Tracker>,
     palette: Mutex<Palette>,
+    dynamics: Mutex<Dynamics>,
     /// Le tempo vient d'Ableton Link : il ne se règle pas ici.
     link: bool,
     link_peers: AtomicU64,
@@ -139,6 +141,10 @@ impl Shared {
 
     fn palette(&self) -> Palette {
         *self.palette.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn dynamics(&self) -> Dynamics {
+        *self.dynamics.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn mode(&self) -> FlashMode {
@@ -217,6 +223,7 @@ impl Engine {
             mode: AtomicU8::new(options.flash.index()),
             tracker: Mutex::new(tracker),
             palette: Mutex::new(options.palette),
+            dynamics: Mutex::new(options.dynamics),
             link: options.link,
             link_peers: AtomicU64::new(0),
             flashes: AtomicU32::new(0),
@@ -312,6 +319,10 @@ impl Engine {
 
     pub fn set_palette(&self, palette: Palette) {
         *self.shared.palette.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = palette;
+    }
+
+    pub fn set_dynamics(&self, dynamics: Dynamics) {
+        *self.shared.dynamics.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = dynamics;
     }
 
     /// Impose un tempo (le phase reste calée sur les kicks).
@@ -541,6 +552,7 @@ fn light_loop(
             shared.last_note.store(features.seconds(now).to_bits(), Ordering::Relaxed);
         }
         look.palette = shared.palette();
+        look.dynamics = shared.dynamics();
         let color = look.render(now - last, features.levels());
         last = now;
         for (_, c) in frame.iter_mut() {

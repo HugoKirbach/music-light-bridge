@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio::analysis::Levels;
 use crate::hue::stream::Rgb;
 
-const FLASH_DECAY: f32 = 0.12;
-const AMBIENT: f32 = 0.04;
+/// Part de la lueur qui suit les basses, au-dessus du fond.
 const GLOW: f32 = 0.25;
 /// Part de blanc au sommet d'un flash de kick, pour un impact plus franc.
 const WHITE_PUNCH: f32 = 0.5;
@@ -46,6 +45,24 @@ impl Default for Palette {
     }
 }
 
+/// Allure des flashs, réglable.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dynamics {
+    /// Jusqu'où monte un flash, entre la lueur de fond (0) et la pleine luminosité (1).
+    pub flash: f32,
+    /// Temps de redescente d'un flash (s) : il a perdu ~63 % de son éclat au bout de ce temps.
+    pub decay: f32,
+    /// Lueur de fond minimale, que la lampe garde même sans son (0 à 1).
+    pub floor: f32,
+}
+
+impl Default for Dynamics {
+    fn default() -> Self {
+        Self { flash: 1.0, decay: 0.12, floor: 0.04 }
+    }
+}
+
 type Color = [f32; 3];
 
 fn color(srgb: [u8; 3]) -> Color {
@@ -64,6 +81,7 @@ fn approach(current: f32, target: f32, dt: f32, time: f32) -> f32 {
 #[derive(Debug, Default)]
 pub struct ReactiveLook {
     pub palette: Palette,
+    pub dynamics: Dynamics,
     flash: f32,
     /// Part de blanc du flash en cours.
     punch: f32,
@@ -118,7 +136,7 @@ impl ReactiveLook {
     pub fn render(&mut self, dt: Duration, levels: Levels) -> Rgb {
         let dt = dt.as_secs_f32();
         if !self.fresh {
-            self.flash *= (-dt / FLASH_DECAY).exp();
+            self.flash *= (-dt / self.dynamics.decay.max(0.01)).exp();
         }
         self.fresh = false;
         self.since_kick += dt;
@@ -134,10 +152,12 @@ impl ReactiveLook {
         );
         let base = self.note_color.unwrap_or(scene);
 
-        // Le flash part de la lueur de fond et monte jusqu'à son intensité.
-        let glow = (AMBIENT + GLOW * levels.bass).min(1.0);
-        let value = glow + (1.0 - glow) * self.flash;
-        let white = self.punch * self.flash;
+        // Le flash part de la lueur de fond et monte, selon l'intensité choisie, vers le plein.
+        let floor = self.dynamics.floor.clamp(0.0, 1.0);
+        let glow = (floor + GLOW * (1.0 - floor) * levels.bass).min(1.0);
+        let flash = self.flash * self.dynamics.flash.clamp(0.0, 1.0);
+        let value = glow + (1.0 - glow) * flash;
+        let white = self.punch * flash;
         let [r, g, b] = base.map(|c| ((c * (1.0 - white) + white) * value).clamp(0.0, 1.0));
         let quantize = |u: f32| (u * f32::from(u16::MAX)) as u16;
         Rgb { r: quantize(r), g: quantize(g), b: quantize(b) }
@@ -218,6 +238,36 @@ mod tests {
         // Passe-haut : les basses chutent.
         let high_pass = play(&mut look, 3.0, -3.0, true);
         assert!(high_pass.g > 10 * high_pass.r.max(high_pass.b).max(1), "passe-haut : {high_pass:?}");
+    }
+
+    /// Luminosité un temps après un flash, avec l'allure donnée (lampe blanche, quelle que soit
+    /// la scène, pour ne mesurer que la luminosité).
+    fn after_flash(dynamics: Dynamics, frames: usize) -> u16 {
+        let white = [255, 255, 255];
+        let palette = Palette { primary: white, calm: white, filtered: white };
+        let mut look = ReactiveLook { dynamics, palette, ..ReactiveLook::default() };
+        look.kick();
+        let mut color = look.render(FRAME, Levels::default());
+        for _ in 0..frames {
+            color = look.render(FRAME, Levels::default());
+        }
+        brightness(color)
+    }
+
+    #[test]
+    fn flash_intensity_decay_and_floor_are_adjustable() {
+        let soft = Dynamics { flash: 0.4, ..Dynamics::default() };
+        let peak = after_flash(soft, 0);
+        assert!(peak > u16::MAX / 3 && peak < u16::MAX / 2, "flash adouci : {peak}");
+
+        // Redescente lente : encore bien visible au bout de 0,3 s, contre presque rien par défaut.
+        let slow = Dynamics { decay: 0.6, ..Dynamics::default() };
+        assert!(after_flash(slow, 18) > 3 * after_flash(Dynamics::default(), 18));
+
+        // Avec une lueur de fond, la lampe ne retombe jamais sous ce niveau.
+        let floor = Dynamics { floor: 0.3, ..Dynamics::default() };
+        let rest = after_flash(floor, 120);
+        assert!(rest >= (0.3 * f32::from(u16::MAX)) as u16 - 1, "fond : {rest}");
     }
 
     #[test]

@@ -12,7 +12,7 @@ use crate::audio::{self, Backend};
 use crate::config::{Config, LiveSettings};
 use crate::engine::{self, Engine, Status, THRESHOLD_RANGE};
 use crate::flash::FlashMode;
-use crate::look::Palette;
+use crate::look::{Dynamics, Palette};
 use crate::midi;
 use crate::tempo::{DEFAULT_BPM_RANGE, TempoSource};
 
@@ -49,6 +49,7 @@ struct App {
     cfg: Config,
     settings: LiveSettings,
     palette: Palette,
+    dynamics: Dynamics,
     /// Mode live en cours, s'il est lancé.
     engine: Option<Engine>,
     inputs: Vec<String>,
@@ -70,6 +71,7 @@ impl App {
         let mut app = Self {
             rt,
             palette: cfg.palette,
+            dynamics: cfg.dynamics,
             bpm_input: settings.bpm.map(|bpm| format!("{bpm}")).unwrap_or_default(),
             settings,
             cfg,
@@ -106,6 +108,7 @@ impl App {
     fn save_config(&mut self) {
         self.cfg.live = self.settings.clone();
         self.cfg.palette = self.palette;
+        self.cfg.dynamics = self.dynamics;
         if let Err(e) = self.cfg.save() {
             self.show(format!("Réglages non enregistrés : {e:#}"));
         }
@@ -132,6 +135,7 @@ impl App {
             link: self.settings.link,
             midi: self.settings.midi.clone().map(Some),
             palette: self.palette,
+            dynamics: self.dynamics,
         };
         match Engine::start(self.rt.clone(), &self.cfg, options) {
             Ok(engine) => {
@@ -273,6 +277,23 @@ impl App {
         }
     }
 
+    fn flash_shape(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Flashs");
+        let mut intensity = self.dynamics.flash * 100.0;
+        let mut decay = self.dynamics.decay * 1000.0;
+        let mut floor = self.dynamics.floor * 100.0;
+        let changed = ui.add(egui::Slider::new(&mut intensity, 0.0..=100.0).suffix(" %").text("intensité")).changed()
+            | ui.add(egui::Slider::new(&mut decay, 40.0..=1500.0).logarithmic(true).suffix(" ms").text("redescente"))
+                .changed()
+            | ui.add(egui::Slider::new(&mut floor, 0.0..=60.0).suffix(" %").text("lueur de fond")).changed();
+        if changed {
+            self.dynamics = Dynamics { flash: intensity / 100.0, decay: decay / 1000.0, floor: floor / 100.0 };
+            if let Some(engine) = &self.engine {
+                engine.set_dynamics(self.dynamics);
+            }
+        }
+    }
+
     fn flash_mode(&mut self, ui: &mut egui::Ui) {
         ui.heading("Mode de flash");
         for mode in MODES {
@@ -367,6 +388,8 @@ impl eframe::App for App {
                 }
                 ui.separator();
                 self.colors(ui);
+                ui.separator();
+                self.flash_shape(ui);
                 ui.separator();
                 self.flash_mode(ui);
                 ui.separator();
