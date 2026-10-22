@@ -8,6 +8,7 @@ use tokio::runtime::Runtime;
 use crate::audio;
 use crate::config::Config;
 use crate::hue::api;
+use crate::midi;
 
 const PAIR_WAIT: Duration = Duration::from_secs(30);
 
@@ -15,16 +16,27 @@ pub fn devices() -> Result<()> {
     let inputs = audio::list_inputs()?;
     if inputs.is_empty() {
         println!("Aucune entrée audio trouvée.");
-        return Ok(());
+    } else {
+        println!("Entrées audio (→ : utilisée par `live` sans --input) :");
+        for input in &inputs {
+            let mark = if input.is_preferred { "→" } else { " " };
+            let default = if input.is_default { "  (défaut Windows)" } else { "" };
+            println!(
+                "{mark} {}  {} canaux, {} Hz{default}",
+                input.name, input.channels, input.sample_rate
+            );
+        }
     }
-    println!("Entrées audio (→ : utilisée par `live` sans --input) :");
-    for input in &inputs {
-        let mark = if input.is_preferred { "→" } else { " " };
-        let default = if input.is_default { "  (défaut Windows)" } else { "" };
-        println!(
-            "{mark} {}  {} canaux, {} Hz{default}",
-            input.name, input.channels, input.sample_rate
-        );
+
+    println!();
+    let ports = midi::list_inputs()?;
+    if ports.is_empty() {
+        println!("Aucune entrée MIDI trouvée.");
+    } else {
+        println!("Entrées MIDI (→ : utilisée par `live --midi` sans nom) :");
+        for (i, port) in ports.iter().enumerate() {
+            println!("{} {port}", if i == 0 { "→" } else { " " });
+        }
     }
     Ok(())
 }

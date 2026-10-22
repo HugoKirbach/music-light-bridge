@@ -168,6 +168,27 @@ impl BeatClock {
 pub enum TempoSource {
     Auto,
     Manual,
+    /// Tempo et phase imposés par la session Ableton Link.
+    Link,
+}
+
+impl TempoSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "automatique",
+            Self::Manual => "manuel",
+            Self::Link => "Ableton Link",
+        }
+    }
+
+    /// Libellé court de la ligne d'état.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "man.",
+            Self::Link => "link",
+        }
+    }
 }
 
 /// Suivi du tempo : mémorise les kicks récents, entretient l'horloge et la recale.
@@ -214,12 +235,18 @@ impl Tracker {
         let (Some(period), Some(beat)) = (self.clock.period, self.clock.nearest_beat(t)) else {
             return;
         };
-        // Le repère suit le dernier kick, pour qu'un changement de période ne décale pas la phase.
-        self.clock.anchor = beat;
         let offset = t - beat;
-        if offset.abs() < ON_BEAT * period {
-            self.clock.anchor += PHASE_GAIN * offset;
+        let on_beat = offset.abs() < ON_BEAT * period;
+        if on_beat {
             self.mean_offset += OFFSET_SMOOTHING * (offset.abs() - self.mean_offset);
+        }
+        // Avec Link, la phase de la session fait foi : les kicks ne la déplacent pas.
+        if self.source != TempoSource::Link {
+            // Le repère suit le dernier kick, pour qu'un changement de période ne décale pas la phase.
+            self.clock.anchor = beat;
+            if on_beat {
+                self.clock.anchor += PHASE_GAIN * offset;
+            }
         }
     }
 
@@ -228,10 +255,13 @@ impl Tracker {
     /// l'horloge continue au dernier tempo connu.
     pub fn update(&mut self, now: f64) {
         self.forget_before(now - WINDOW);
+        if self.source == TempoSource::Link {
+            return;
+        }
         let onsets = self.onsets.make_contiguous();
         let estimate = match self.source {
             TempoSource::Auto => estimate(onsets, self.bpm_range).filter(|e| e.confidence >= MIN_CONFIDENCE),
-            TempoSource::Manual => None,
+            TempoSource::Manual | TempoSource::Link => None,
         };
         if let Some(estimate) = estimate {
             self.adopt(estimate);
@@ -261,6 +291,13 @@ impl Tracker {
 
     pub fn set_auto(&mut self) {
         self.source = TempoSource::Auto;
+    }
+
+    /// Tempo et phase de la session Ableton Link : l'horloge les suit tels quels.
+    pub fn set_link(&mut self, bpm: f64, beat_time: f64) {
+        self.source = TempoSource::Link;
+        self.pending_jump = None;
+        self.clock = BeatClock { period: Some(60.0 / bpm), anchor: beat_time };
     }
 
     fn adopt(&mut self, estimate: TempoEstimate) {
@@ -412,6 +449,17 @@ mod tests {
         run(&mut tracker, &onsets, 32.0, 60.0);
         let later = tracker.clock().bpm().unwrap();
         assert!((later - 140.0).abs() < 0.2, "{later}");
+    }
+
+    #[test]
+    fn link_keeps_its_tempo_and_phase_whatever_the_kicks() {
+        let mut tracker = Tracker::new(DEFAULT_BPM_RANGE);
+        tracker.set_link(128.0, 0.0);
+        // Kicks à un autre tempo et décalés : ni le tempo ni la phase ne bougent.
+        let onsets = kicks(0.05, 20.0, 1.0, |_| 140.0, 0.002);
+        run(&mut tracker, &onsets, 0.0, 20.0);
+        assert_eq!(tracker.source(), TempoSource::Link);
+        assert_eq!(tracker.clock(), BeatClock::new(128.0, 0.0));
     }
 
     #[test]

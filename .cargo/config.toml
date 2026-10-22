@@ -1,0 +1,5 @@
+# Outils de compilation d'Ableton Link (rusty_link) sur ce PC : CMake fourni par les
+# Build Tools Visual Studio 2022, libclang fourni par LLVM (génération des liaisons C).
+[env]
+CMAKE = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe"
+LIBCLANG_PATH = "C:\\Program Files\\LLVM\\bin"

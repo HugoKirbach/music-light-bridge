@@ -1,6 +1,7 @@
 //! Mode live : seuls les vrais kicks captés sur l'entrée audio flashent. Ils alimentent aussi
 //! une horloge de tempo ; quand ils tombent régulièrement sur les temps, le flash du kick
-//! suivant part en avance de la latence Hue calibrée pour s'allumer avec lui.
+//! suivant part en avance de la latence Hue calibrée pour s'allumer avec lui. En option, le
+//! tempo et la phase viennent d'Ableton Link, et les notes d'un synthé MIDI flashent à leur couleur.
 
 use std::fs;
 use std::path::PathBuf;
@@ -20,39 +21,53 @@ use crate::audio::{AudioInput, Features, Grid};
 use crate::config::Config;
 use crate::flash::{Action, CONFIRM_MARGIN, FlashMode, FlashPlanner};
 use crate::hue::api;
-use crate::wav;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
+use crate::link::LinkSession;
 use crate::look::ReactiveLook;
-use crate::tempo::{MANUAL_BPM_LIMITS, TempoSource, Tracker};
+use crate::midi::{MidiListener, Notes, note_hue};
+use crate::tempo::{MANUAL_BPM_LIMITS, Tracker};
 use crate::timing;
+use crate::wav;
 
 const THRESHOLD_STEP: f32 = 0.05;
 const THRESHOLD_RANGE: (f32, f32) = (1.1, 4.0);
 const BPM_NUDGE: f64 = 0.5;
 const TEMPO_UPDATE: Duration = Duration::from_secs(1);
+/// Fréquence de lecture de la session Ableton Link (tempo et phase).
+const LINK_POLL: Duration = Duration::from_millis(20);
 /// Bornes de l'attente du kick d'un flash anticipé (âge des blocs audio + marge).
 const CONFIRM_RANGE: (f64, f64) = (0.03, 0.1);
 /// Durée d'affichage d'un message (capture enregistrée) sur la ligne d'état.
 const MESSAGE_DURATION: Duration = Duration::from_secs(6);
-/// Durée d'allumage du témoin de kick dans le terminal.
-const KICK_LIT: Duration = Duration::from_millis(100);
+/// Durée d'allumage des témoins de kick et de note dans le terminal.
+const LIT: Duration = Duration::from_millis(100);
 const METER_WIDTH: usize = 5;
 const MAX_TYPED: usize = 6;
 
 pub struct Options {
     pub input: Option<String>,
     pub threshold: f32,
-    /// Tempo imposé au démarrage ; sinon détection automatique.
+    /// Tempo imposé au démarrage ; sinon détection automatique (ou tempo proposé à Link).
     pub bpm: Option<f64>,
     pub bpm_range: (f64, f64),
     pub flash: FlashMode,
+    /// Rejoindre la session Ableton Link.
+    pub link: bool,
+    /// Écouter une entrée MIDI : `Some(None)` pour la première, `Some(Some(nom))` pour une autre.
+    pub midi: Option<Option<String>>,
 }
 
 struct Shared {
     stop: AtomicBool,
     mode: AtomicU8,
     tracker: Mutex<Tracker>,
+    /// Le tempo vient d'Ableton Link : les touches de tempo sont sans effet.
+    link: bool,
+    link_peers: AtomicU64,
     flashes: AtomicU32,
+    note_flashes: AtomicU32,
+    /// Instant (s, horloge commune) de la dernière note, en bits de `f64`.
+    last_note: AtomicU64,
     /// Statistiques de réaction des flashs déclenchés par un kick.
     kick_flashes: AtomicU32,
     total_reaction_us: AtomicU64,
@@ -83,6 +98,17 @@ impl Shared {
         let flashes = self.kick_flashes.load(Ordering::Relaxed).max(1);
         self.total_reaction_us.load(Ordering::Relaxed) as f64 / f64::from(flashes) / 1e3
     }
+
+    fn last_note(&self) -> f64 {
+        f64::from_bits(self.last_note.load(Ordering::Relaxed))
+    }
+}
+
+/// Effet d'une touche hors saisie du BPM.
+enum KeyOutcome {
+    Nothing,
+    TypeBpm,
+    Message(String),
 }
 
 pub fn run(rt: &Runtime, cfg: &Config, options: Options) -> Result<()> {
@@ -101,19 +127,30 @@ pub fn run(rt: &Runtime, cfg: &Config, options: Options) -> Result<()> {
     let channels: Vec<u8> = area.channels.iter().map(|c| c.channel_id).collect();
 
     let features = Arc::new(Features::new(options.threshold));
+    let notes = Arc::new(Notes::default());
     let audio = AudioInput::start(options.input.as_deref(), features.clone())?;
+    let midi = match &options.midi {
+        Some(wanted) => Some(MidiListener::start(wanted.as_deref(), notes.clone())?),
+        None => None,
+    };
     let mut stream = rt.block_on(HueStream::open(bridge, &area))?;
     let advance = Duration::from_millis(cfg.light_advance_ms.max(0).unsigned_abs());
 
     let mut tracker = Tracker::new(options.bpm_range);
-    if let Some(bpm) = options.bpm {
+    if let Some(bpm) = options.bpm
+        && !options.link
+    {
         tracker.set_manual(bpm, features.seconds(Instant::now()));
     }
     let shared = Shared {
         stop: AtomicBool::new(false),
         mode: AtomicU8::new(options.flash.index()),
         tracker: Mutex::new(tracker),
+        link: options.link,
+        link_peers: AtomicU64::new(0),
         flashes: AtomicU32::new(0),
+        note_flashes: AtomicU32::new(0),
+        last_note: AtomicU64::new(f64::NEG_INFINITY.to_bits()),
         kick_flashes: AtomicU32::new(0),
         total_reaction_us: AtomicU64::new(0),
         max_reaction_us: AtomicU64::new(0),
@@ -123,6 +160,12 @@ pub fn run(rt: &Runtime, cfg: &Config, options: Options) -> Result<()> {
         "Mode live : « {} » ({} Hz, {} canaux) → zone « {} ».",
         audio.device, audio.sample_rate, audio.channels, area.metadata.name
     );
+    if let Some(midi) = &midi {
+        println!("MIDI : « {} » ; chaque note flashe à sa couleur.", midi.port);
+    }
+    if options.link {
+        println!("Ableton Link : tempo et phase suivent la session (autorise l'accès réseau si Windows le demande).");
+    }
     println!();
     println!("  b        saisir le BPM (chiffres puis Entrée)   + / -   BPM ±{BPM_NUDGE}");
     println!("  a        BPM automatique                       m       mode : kicks → réactif → temps");
@@ -130,7 +173,8 @@ pub fn run(rt: &Runtime, cfg: &Config, options: Options) -> Result<()> {
     println!("  r        enregistre les 40 dernières secondes, pour `dj-bridge analyze`");
     println!("  Échap    quitte");
     println!();
-    println!("Ligne d'état : B/M/A = basses, médiums, aigus ; ● = kick détecté ; ♩ = tempo, auto ou man.");
+    println!("Ligne d'état : B/M/A = basses, médiums, aigus ; ● = kick ; ♪ = note MIDI ;");
+    println!("♩ = tempo (auto, man. ou link·participants) ; mode de flash :");
     println!(
         "« kicks » = flash sur les vrais kicks, anticipé de {} ms quand ils tombent sur les temps ;",
         advance.as_millis()
@@ -147,11 +191,15 @@ pub fn run(rt: &Runtime, cfg: &Config, options: Options) -> Result<()> {
             result
         });
         scope.spawn(|| tempo_loop(&shared, &features));
-        let light = light_loop(rt, &mut stream, &channels, &features, &shared, advance);
+        if options.link {
+            scope.spawn(|| link_loop(&shared, &features, options.bpm));
+        }
+        let light = light_loop(rt, &mut stream, &channels, &features, &notes, &shared, advance);
         shared.stop.store(true, Ordering::Relaxed);
         let status = status.join().unwrap_or_else(|_| Err(anyhow!("affichage interrompu")));
         (light, status)
     });
+    drop(midi);
     drop(audio);
     rt.block_on(stream.close())?;
     light?;
@@ -159,12 +207,9 @@ pub fn run(rt: &Runtime, cfg: &Config, options: Options) -> Result<()> {
 
     let tracker = shared.tracker();
     let tempo = tracker.clock().bpm().map_or("inconnu".to_owned(), |bpm| format!("{bpm:.1} BPM"));
-    let source = match tracker.source() {
-        TempoSource::Auto => "automatique",
-        TempoSource::Manual => "manuel",
-    };
     println!(
-        "Tempo final : {tempo} ({source}). Écart moyen kicks/temps : {:.1} ms. {} flashs.",
+        "Tempo final : {tempo} ({}). Écart moyen kicks/temps : {:.1} ms. {} flashs.",
+        tracker.source().label(),
         tracker.mean_offset() * 1e3,
         shared.flashes.load(Ordering::Relaxed),
     );
@@ -175,6 +220,12 @@ pub fn run(rt: &Runtime, cfg: &Config, options: Options) -> Result<()> {
             shared.max_reaction_us.load(Ordering::Relaxed) as f64 / 1e3,
             cfg.light_advance_ms,
         );
+    }
+    if options.midi.is_some() {
+        println!("Notes MIDI : {}.", shared.note_flashes.load(Ordering::Relaxed));
+    }
+    if options.link {
+        println!("Ableton Link : {} autre(s) participant(s).", shared.link_peers.load(Ordering::Relaxed));
     }
     println!(
         "Âge des blocs audio à leur arrivée (pilote) : {:.1} ms. Coupures audio : {}.",
@@ -190,13 +241,14 @@ pub fn run(rt: &Runtime, cfg: &Config, options: Options) -> Result<()> {
     Ok(())
 }
 
-/// Flashe selon le planificateur (vrais kicks, anticipés quand ils sont attendus) et entretient
-/// le flux à 60 Hz entre deux flashs.
+/// Flashe selon le planificateur (vrais kicks, anticipés quand ils sont attendus) et sur chaque
+/// note MIDI, et entretient le flux à 60 Hz entre deux flashs.
 fn light_loop(
     rt: &Runtime,
     stream: &mut HueStream,
     channels: &[u8],
     features: &Features,
+    notes: &Notes,
     shared: &Shared,
     advance: Duration,
 ) -> Result<()> {
@@ -204,6 +256,7 @@ fn light_loop(
     let mut look = ReactiveLook::default();
     let mut frame: Vec<(u8, Rgb)> = channels.iter().map(|&id| (id, Rgb::OFF)).collect();
     let mut seen = features.kicks();
+    let mut seen_notes = notes.count();
     let mut last = Instant::now();
     let mut next_frame = last;
     while !shared.stop.load(Ordering::Relaxed) {
@@ -216,7 +269,7 @@ fn light_loop(
             Some(event) => next_frame.min(features.instant(event)),
             None => next_frame,
         };
-        timing::sleep_until_or(deadline, || features.kicks() != seen);
+        timing::sleep_until_or(deadline, || features.kicks() != seen || notes.count() != seen_notes);
 
         let kicks = features.kicks();
         let kick = (kicks != seen).then(|| features.seconds(features.last_kick()) - KICK_DETECTION_DELAY);
@@ -224,6 +277,9 @@ fn light_loop(
         if let Some(at) = kick {
             shared.tracker().on_kick(at);
         }
+        let note_count = notes.count();
+        let note = (note_count != seen_notes).then(|| notes.last());
+        seen_notes = note_count;
 
         let now = Instant::now();
         let clock = shared.tracker().clock();
@@ -234,10 +290,17 @@ fn light_loop(
             anchor: clock.anchor(),
             groove: planner.in_groove(&clock, features.seconds(now)),
         });
-        if action == Action::Cancel {
-            look.cancel_flash();
+        match action {
+            Action::Flash { .. } => look.kick(),
+            Action::Cancel => look.cancel_flash(),
+            Action::None => {}
         }
-        let color = look.update(now - last, matches!(action, Action::Flash { .. }), features.levels());
+        if let Some((pitch, velocity)) = note {
+            look.note(note_hue(pitch), velocity);
+            shared.note_flashes.fetch_add(1, Ordering::Relaxed);
+            shared.last_note.store(features.seconds(now).to_bits(), Ordering::Relaxed);
+        }
+        let color = look.render(now - last, features.levels());
         last = now;
         for (_, c) in frame.iter_mut() {
             *c = color;
@@ -267,6 +330,17 @@ fn tempo_loop(shared: &Shared, features: &Features) {
     }
 }
 
+/// Suit la session Ableton Link et impose son tempo et sa phase à l'horloge.
+fn link_loop(shared: &Shared, features: &Features, bpm: Option<f64>) {
+    let mut session = LinkSession::join(bpm);
+    while !shared.stop.load(Ordering::Relaxed) {
+        let beat = session.read(features.seconds(Instant::now()));
+        shared.tracker().set_link(beat.bpm, beat.beat_time);
+        shared.link_peers.store(beat.peers, Ordering::Relaxed);
+        thread::sleep(LINK_POLL);
+    }
+}
+
 /// Affiche la ligne d'état et traite le clavier ; renvoie les captures enregistrées.
 fn status_loop(shared: &Shared, features: &Features, capture: &Mutex<Capture>) -> Result<Vec<PathBuf>> {
     let _raw = RawMode::enable()?;
@@ -278,22 +352,25 @@ fn status_loop(shared: &Shared, features: &Features, capture: &Mutex<Capture>) -
     while !shared.stop.load(Ordering::Relaxed) {
         if let Some(key) = tui::poll_key(Duration::from_millis(50))? {
             let now = features.seconds(Instant::now());
-            typing = match typing {
-                Some(text) => type_bpm(shared, &key, text, now),
-                None if key.code == KeyCode::Char('r') => {
-                    let text = match save_capture(capture) {
-                        Ok(path) => {
-                            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                            captures.push(path);
-                            format!("capture enregistrée : {name}")
-                        }
-                        Err(e) => format!("capture impossible : {e:#}"),
-                    };
-                    message = Some((Instant::now() + MESSAGE_DURATION, text));
-                    None
+            let mut show = |text: String| message = Some((Instant::now() + MESSAGE_DURATION, text));
+            if let Some(text) = typing.take() {
+                typing = type_bpm(shared, &key, text, now);
+            } else if key.code == KeyCode::Char('r') {
+                match save_capture(capture) {
+                    Ok(path) => {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                        captures.push(path);
+                        show(format!("capture enregistrée : {name}"));
+                    }
+                    Err(e) => show(format!("capture impossible : {e:#}")),
                 }
-                None => handle_key(shared, features, &key, now),
-            };
+            } else {
+                match handle_key(shared, features, &key, now) {
+                    KeyOutcome::Nothing => {}
+                    KeyOutcome::TypeBpm => typing = Some(String::new()),
+                    KeyOutcome::Message(text) => show(text),
+                }
+            }
         }
         let line = match (&typing, &message) {
             (Some(text), _) => format!("BPM : {text}_   Entrée = valider, Échap = annuler"),
@@ -343,14 +420,16 @@ fn type_bpm(shared: &Shared, key: &KeyEvent, mut text: String, now: f64) -> Opti
     Some(text)
 }
 
-/// Touche hors saisie ; renvoie `Some` si elle ouvre la saisie du BPM.
-fn handle_key(shared: &Shared, features: &Features, key: &KeyEvent, now: f64) -> Option<String> {
+fn handle_key(shared: &Shared, features: &Features, key: &KeyEvent, now: f64) -> KeyOutcome {
     if tui::is_quit(key) {
         shared.stop.store(true, Ordering::Relaxed);
-        return None;
+        return KeyOutcome::Nothing;
     }
     match key.code {
-        KeyCode::Char('b') => return Some(String::new()),
+        KeyCode::Char('b' | '+' | '-' | 'a') if shared.link => {
+            return KeyOutcome::Message("tempo piloté par Ableton Link : change-le depuis la session".to_owned());
+        }
+        KeyCode::Char('b') => return KeyOutcome::TypeBpm,
         KeyCode::Up | KeyCode::Down => {
             let step = if key.code == KeyCode::Up { THRESHOLD_STEP } else { -THRESHOLD_STEP };
             let threshold = (features.threshold() + step).clamp(THRESHOLD_RANGE.0, THRESHOLD_RANGE.1);
@@ -367,39 +446,42 @@ fn handle_key(shared: &Shared, features: &Features, key: &KeyEvent, now: f64) ->
         KeyCode::Char('m') => shared.cycle_mode(),
         _ => {}
     }
-    None
+    KeyOutcome::Nothing
 }
 
 fn status_text(shared: &Shared, features: &Features) -> String {
-    let lit = features.kicks() > 0
-        && Instant::now().saturating_duration_since(features.last_kick()) < KICK_LIT;
+    let now = Instant::now();
+    let kick_lit = features.kicks() > 0 && now.saturating_duration_since(features.last_kick()) < LIT;
+    let note_lit = features.seconds(now) - shared.last_note() < LIT.as_secs_f64();
     let levels = features.levels();
     let (bpm, source, offset) = {
         let tracker = shared.tracker();
         (tracker.clock().bpm(), tracker.source(), tracker.mean_offset())
     };
     let tempo = bpm.map_or("---.-".to_owned(), |bpm| format!("{bpm:.1}"));
-    let source = match source {
-        TempoSource::Auto => "auto",
-        TempoSource::Manual => "man.",
+    let source = if shared.link {
+        format!("link·{}", shared.link_peers.load(Ordering::Relaxed))
+    } else {
+        source.short_label().to_owned()
     };
     let mode = shared.mode();
     let metric = match mode {
         FlashMode::Reactive => format!("{:.1}ms", shared.average_reaction_ms()),
         FlashMode::Kicks | FlashMode::EveryBeat => format!("±{:.0}ms", offset * 1e3),
     };
-    let mode = mode.label();
     let alert = match features.glitches() {
         _ if features.input_lost() => " ⚠ entrée perdue".to_owned(),
         0 => String::new(),
         n => format!(" ⚠{n}"),
     };
     format!(
-        "B{} M{} A{} {} ♩{tempo} {source} {mode} s{:.2} {metric}{alert}",
+        "B{} M{} A{} {}{} ♩{tempo} {source} {} s{:.2} {metric}{alert}",
         tui::meter(levels.bass, METER_WIDTH),
         tui::meter(levels.mid, METER_WIDTH),
         tui::meter(levels.high, METER_WIDTH),
-        if lit { "●" } else { "○" },
+        if kick_lit { "●" } else { "○" },
+        if note_lit { "♪" } else { " " },
+        mode.label(),
         features.threshold(),
     )
 }

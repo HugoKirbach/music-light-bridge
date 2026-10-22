@@ -75,13 +75,38 @@ marqués par un kick, kicks hors temps et flashs (anticipés / réactifs / annul
 moins de la moitié des temps ont un kick sont signalées par ⚠. Options : `--bpm`, `--threshold`,
 `--slice` (durée des tranches).
 
+## Phase 3 : mode synthé (Ableton Link + MIDI)
+
+- `live --link` rejoint la session Ableton Link du réseau local (Live, Move, Push…) : le tempo
+  et la phase des temps viennent de la session, exacts, sans détection. Les flashs anticipés
+  tombent donc pile sur les temps de la session ; avec `--flash temps`, la lampe bat chaque temps
+  même sans kick (synthé seul). Les touches de tempo sont alors sans effet : le tempo se change
+  depuis la session. `--bpm` ne sert que si l'on crée la session.
+- `live --midi` (ou `--midi "nom partiel"`, voir `devices`) écoute les notes du synthé : chaque
+  note-on flashe à sa couleur, plus fort quand la vélocité est élevée, et la lueur garde la
+  couleur de la dernière note. Les 12 notes suivent le cercle des quintes (do rouge, sol orange,
+  ré jaune…), pour que des notes harmoniquement proches aient des couleurs voisines.
+- Les deux se combinent avec l'entrée audio : `live --link --midi`.
+
+Au premier lancement avec `--link`, Windows demande d'autoriser l'accès réseau de
+`dj-bridge.exe` : il faut accepter (réseau privé) pour voir les autres participants.
+
+La compilation d'Ableton Link utilise le CMake des Build Tools et le libclang de LLVM ; leurs
+chemins sur ce PC sont dans `.cargo/config.toml`.
+
 Les identifiants du bridge et l'avance calibrée sont stockés dans
 `%APPDATA%\dj-bridge\config.json`, hors du dépôt.
 
 ## Feuille de route
 
 1. Sortie Hue + mesure de latence ✅
-2. Entrée audio : Focusrite 2i2 (WASAPI ✅, puis ASIO), banc de filtres, détection de kick ← *en cours*
-3. Mode synthé live : Ableton Link + MIDI, flashs anticipés de la latence mesurée
+2. Entrée audio : Focusrite 2i2 (WASAPI ✅, puis ASIO), banc de filtres, détection de kick ✅
+3. Mode synthé live : Ableton Link + MIDI, flashs anticipés de la latence mesurée ✅ (à tester)
 4. Mode DJ : détection de tempo sur l'audio + anticipation ; bonus : réseau de l'OPUS-QUAD
 5. Modes d'effets, palettes, interface `egui`
+
+## Licence
+
+Ableton Link est distribué sous GPLv2 (ou licence commerciale d'Ableton). DJ-Bridge l'intègre :
+l'usage personnel ne pose aucun problème, mais distribuer le programme imposerait de le publier
+sous une licence compatible GPL, ou d'obtenir une licence auprès d'Ableton.

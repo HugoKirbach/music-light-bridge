@@ -6,8 +6,10 @@ mod cmd;
 mod config;
 mod flash;
 mod hue;
+mod link;
 mod look;
 mod metronome;
+mod midi;
 mod tempo;
 mod timing;
 mod wav;
@@ -77,6 +79,13 @@ enum Command {
         /// Quand flasher : sur les vrais kicks (anticipés), sur chaque kick, ou sur chaque temps
         #[arg(long, value_enum, default_value_t = flash::FlashMode::Kicks)]
         flash: flash::FlashMode,
+        /// Rejoint la session Ableton Link : tempo et phase viennent de la session
+        #[arg(long)]
+        link: bool,
+        /// Écoute une entrée MIDI (morceau de son nom, voir `devices` ; la première si vide) :
+        /// chaque note flashe à sa couleur
+        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "NOM")]
+        midi: Option<String>,
     },
     /// Rejoue une capture audio (touche `r` du mode live) et résume la détection tranche par tranche
     Analyze {
@@ -116,10 +125,18 @@ fn main() -> Result<()> {
             cmd::latency::run(&rt, &mut cfg, Duration::from_millis(period_ms))
         }
         Command::Devices => cmd::setup::devices(),
-        Command::Live { input, threshold, bpm, bpm_min, bpm_max, flash } => cmd::live::run(
+        Command::Live { input, threshold, bpm, bpm_min, bpm_max, flash, link, midi } => cmd::live::run(
             &rt,
             &cfg,
-            cmd::live::Options { input, threshold, bpm, bpm_range: (bpm_min, bpm_max), flash },
+            cmd::live::Options {
+                input,
+                threshold,
+                bpm,
+                bpm_range: (bpm_min, bpm_max),
+                flash,
+                link,
+                midi: midi.map(|name| (!name.is_empty()).then_some(name)),
+            },
         ),
         Command::Analyze { path, threshold, bpm, bpm_min, bpm_max, slice } => cmd::analyze::run(
             &cfg,

@@ -11,7 +11,7 @@ use crate::audio::Grid;
 use crate::audio::analysis::{Analyzer, KICK_DETECTION_DELAY};
 use crate::config::Config;
 use crate::flash::{Action, CONFIRM_MARGIN, FlashMode, FlashPlanner};
-use crate::tempo::{TempoSource, Tracker};
+use crate::tempo::Tracker;
 use crate::wav;
 
 /// Délai simulé entre un kick et son arrivée dans la boucle d'éclairage (bloc audio + détection).
@@ -99,13 +99,7 @@ pub fn run(cfg: &Config, options: Options) -> Result<()> {
 
     println!();
     match replay.tracker.clock().bpm() {
-        Some(bpm) => {
-            let source = match replay.tracker.source() {
-                TempoSource::Auto => "automatique",
-                TempoSource::Manual => "manuel",
-            };
-            println!("Tempo final : {bpm:.1} BPM ({source}).");
-        }
+        Some(bpm) => println!("Tempo final : {bpm:.1} BPM ({}).", replay.tracker.source().label()),
         None => println!("Aucun tempo trouvé."),
     }
     let weak: Vec<String> =
