@@ -1,0 +1,22 @@
+[package]
+name = "dj-bridge"
+version = "0.1.0"
+edition = "2024"
+description = "Lumières Philips Hue pilotées par le son et le tempo, latence minimale"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+cpal = "0.18.2"
+crossterm = "0.29.0"
+dirs = "7.0.0"
+hex = "0.4.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "native-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time"] }
+webrtc-dtls = "0.12.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
