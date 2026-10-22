@@ -82,8 +82,11 @@ moins de la moitié des temps ont un kick sont signalées par ⚠. Options : `--
 
 ## Fenêtre et couleurs
 
-`.\target\release\dj-bridge.exe gui` lance le mode live dans une fenêtre (mêmes options que
-`live`) :
+`.\target\release\dj-bridge.exe gui` ouvre une fenêtre sans toucher aux lampes. On y règle
+l'entrée audio (pilote et entrée), le tempo (automatique, imposé ou Ableton Link), le MIDI, les
+couleurs, le mode de flash et le seuil, puis le bouton **Lancer** démarre le mode live et
+**Arrêter** le stoppe (lampes rétablies, bilan affiché). Les réglages sont enregistrés et repris
+à l'ouverture suivante. Pendant le live :
 
 - au centre, le tempo reconnu en BPM, mis à jour chaque seconde, et sa source (automatique,
   manuel ou Ableton Link) ; au-dessus, un aperçu de la couleur envoyée à la lampe et un témoin

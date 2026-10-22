@@ -8,6 +8,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::audio::Backend;
+use crate::audio::analysis::DEFAULT_THRESHOLD;
+use crate::flash::FlashMode;
 use crate::look::Palette;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -21,6 +24,39 @@ pub struct Config {
     /// Couleurs du mode live.
     #[serde(default)]
     pub palette: Palette,
+    /// Derniers réglages choisis dans la fenêtre.
+    #[serde(default)]
+    pub live: LiveSettings,
+}
+
+/// Réglages du mode live choisis dans la fenêtre avant de lancer, repris à l'ouverture suivante.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LiveSettings {
+    /// Entrée audio ; `None` : la Focusrite si elle est branchée.
+    pub input: Option<String>,
+    pub audio: Backend,
+    /// Tempo imposé au lancement ; `None` : détection automatique.
+    pub bpm: Option<f64>,
+    pub link: bool,
+    /// Port MIDI écouté ; `None` : pas de MIDI.
+    pub midi: Option<String>,
+    pub flash: FlashMode,
+    pub threshold: f32,
+}
+
+impl Default for LiveSettings {
+    fn default() -> Self {
+        Self {
+            input: None,
+            audio: Backend::Auto,
+            bpm: None,
+            link: false,
+            midi: None,
+            flash: FlashMode::Kicks,
+            threshold: DEFAULT_THRESHOLD,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

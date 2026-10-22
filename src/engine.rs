@@ -310,10 +310,6 @@ impl Engine {
         self.features.set_threshold(threshold.clamp(THRESHOLD_RANGE.0, THRESHOLD_RANGE.1));
     }
 
-    pub fn palette(&self) -> Palette {
-        self.shared.palette()
-    }
-
     pub fn set_palette(&self, palette: Palette) {
         *self.shared.palette.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = palette;
     }

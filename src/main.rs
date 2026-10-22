@@ -77,8 +77,8 @@ enum Command {
     },
     /// Mode live dans le terminal : flashs sur les vrais kicks, anticipés grâce au tempo
     Live(LiveArgs),
-    /// Mode live dans une fenêtre : tempo, couleurs et mode de flash à la souris
-    Gui(LiveArgs),
+    /// Fenêtre : régler le mode live puis le lancer d'un clic
+    Gui,
     /// Rejoue une capture audio (touche `r` du mode live) et résume la détection tranche par tranche
     Analyze {
         /// Fichier WAV à analyser
@@ -174,10 +174,7 @@ fn main() -> Result<()> {
             let options = args.into_options(cfg.palette);
             cmd::live::run(rt, &cfg, options)
         }
-        Command::Gui(args) => {
-            let options = args.into_options(cfg.palette);
-            gui::run(rt, cfg, options)
-        }
+        Command::Gui => gui::run(rt, cfg),
         Command::Analyze { path, threshold, bpm, bpm_min, bpm_max, slice } => cmd::analyze::run(
             &cfg,
             cmd::analyze::Options { path, threshold, bpm, bpm_range: (bpm_min, bpm_max), slice },

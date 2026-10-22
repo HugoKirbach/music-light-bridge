@@ -21,7 +21,8 @@ const LATE_LIMIT: f64 = 0.25;
 /// audio) : dans un mix chargé, un kick peut être détecté une vingtaine de ms après le temps.
 pub const CONFIRM_MARGIN: f64 = 0.035;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FlashMode {
     /// Sur chaque vrai kick, anticipé quand le kick est attendu sur le temps
     #[value(name = "kicks")]

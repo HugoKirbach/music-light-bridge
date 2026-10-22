@@ -23,7 +23,8 @@ const PREFERRED_ASIO: &str = "focusrite usb";
 const CAPTURE_SECONDS: u32 = 40;
 
 /// Pilote audio utilisé pour la capture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Backend {
     /// ASIO si le pilote est libre, sinon WASAPI
     Auto,
