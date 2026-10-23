@@ -15,8 +15,13 @@ const KICK_RATE_WINDOW: f32 = 2.0;
 /// ne monte pendant 4 s.
 const BUILD_MIN: f32 = 1.5;
 const BUILD_STALL: f32 = 4.0;
-/// Temps pour qu'une montée atteigne son plein.
+/// Temps pour qu'une montée atteigne son plein, faute de structure connue.
 const BUILD_RAMP: f32 = 8.0;
+/// Le drop d'une montée tombe sur une tête de phrase (16 temps), au moins 8 temps après son
+/// début ; passé d'un demi-temps sans drop, il est attendu à la tête suivante.
+const BEATS_PER_PHRASE: f32 = 16.0;
+const BUILD_MIN_BEATS: f32 = 8.0;
+const DROP_LATE: f32 = 0.5;
 /// Le drop : un kick aux basses fortes, après une seconde de basses faibles.
 const DROP_BASS: f32 = 0.6;
 const DROP_QUIET_BASS: f32 = 0.35;
@@ -97,6 +102,11 @@ pub(super) struct PhaseTracker {
     pub(super) grid_held: f32,
     /// Durée depuis laquelle la grille ne les confirme plus.
     pub(super) grid_lost: f32,
+    /// Structure connue : période du temps (s) et temps restant avant la prochaine tête de phrase.
+    pub(super) structure: Option<(f32, f32)>,
+    /// Début de la montée en cours, et instant prévu de son drop (une tête de phrase).
+    pub(super) build_start: f32,
+    pub(super) drop_at: Option<f32>,
 }
 
 /// Ce que la phase sait des kicks : secondes depuis le dernier détecté, et si la grille de temps
@@ -162,16 +172,52 @@ impl PhaseTracker {
             _ => Phase::Calm,
         };
         if next != self.phase {
+            if next == Phase::BuildUp {
+                self.build_start = self.time;
+                self.drop_at = None;
+            }
             self.phase = next;
             self.phase_time = 0.0;
         }
         self.build = if self.phase == Phase::BuildUp {
+            self.aim_drop();
             let surge = ((rise - BUILD_RISE_DB) / 10.0).clamp(0.0, 1.0);
-            (self.build + dt / BUILD_RAMP).max(surge).min(1.0)
+            // Vers le drop prévu quand la structure est connue, sinon au fil du temps.
+            let progress = match self.drop_at {
+                Some(at) => self.build.max((self.time - self.build_start) / (at - self.build_start).max(1e-3)),
+                None => self.build + dt / BUILD_RAMP,
+            };
+            progress.max(surge).min(1.0)
         } else {
+            self.drop_at = None;
             approach(self.build, 0.0, dt, MOTION_FADE)
         };
         dropped
+    }
+
+    /// Prévoit le drop de la montée : la première tête de phrase au moins `BUILD_MIN_BEATS` après
+    /// son début, puis la suivante chaque fois qu'il ne vient pas.
+    fn aim_drop(&mut self) {
+        let Some((period, to_head)) = self.structure else { return };
+        let missed = self.drop_at.is_some_and(|at| self.time > at + DROP_LATE * period);
+        if self.drop_at.is_some() && !missed {
+            return;
+        }
+        let earliest = match self.drop_at {
+            Some(at) => at + DROP_LATE * period,
+            None => self.build_start + BUILD_MIN_BEATS * period,
+        };
+        let phrase = BEATS_PER_PHRASE * period;
+        let mut head = self.time + to_head * period;
+        while head < earliest {
+            head += phrase;
+        }
+        self.drop_at = Some(head);
+    }
+
+    /// Secondes avant le drop prévu de la montée en cours.
+    pub(super) fn drop_in(&self) -> Option<f32> {
+        (self.phase == Phase::BuildUp).then_some(self.drop_at?).map(|at| at - self.time)
     }
 }
 

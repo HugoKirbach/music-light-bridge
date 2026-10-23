@@ -164,16 +164,19 @@ fn status_text(status: &Status) -> String {
         0 => String::new(),
         n => format!(" ●rec{n}"),
     };
+    let phase = match status.build {
+        Some(build) => format!("{} {build}%", status.phase.label()),
+        None => status.phase.label().to_owned(),
+    };
     let levels = status.levels;
     format!(
-        "B{} M{} A{} {}{} ♩{tempo} {source} {} {} s{:.2} {metric}{alert}{auto}",
+        "B{} M{} A{} {}{} ♩{tempo} {source} {} {phase} s{:.2} {metric}{alert}{auto}",
         tui::meter(levels.bass, METER_WIDTH),
         tui::meter(levels.mid, METER_WIDTH),
         tui::meter(levels.high, METER_WIDTH),
         if status.kick_lit { "●" } else { "○" },
         if status.note_lit { "♪" } else { " " },
         status.mode.label(),
-        status.phase.label(),
         status.threshold,
     )
 }

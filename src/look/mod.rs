@@ -269,6 +269,22 @@ impl ReactiveLook {
         self.phases.phase
     }
 
+    /// Structure du morceau, quand elle est connue : période du temps (s) et temps restant avant
+    /// la prochaine tête de phrase. Une montée vise son drop sur une tête de phrase.
+    pub fn set_structure(&mut self, structure: Option<(f32, f32)>) {
+        self.phases.structure = structure;
+    }
+
+    /// Avancement de la montée en cours, de 0 à 1.
+    pub fn build_progress(&self) -> Option<f32> {
+        (self.phases.phase == Phase::BuildUp).then_some(self.phases.build)
+    }
+
+    /// Secondes avant le drop prévu de la montée en cours.
+    pub fn drop_in(&self) -> Option<f32> {
+        self.phases.drop_in()
+    }
+
     /// Animation effectivement jouée : celle choisie, ou celle de la phase en mode Auto.
     pub fn active_motion(&self) -> Motion {
         match (self.motion, self.phases.phase) {
@@ -570,6 +586,37 @@ mod tests {
         // Les charlestons entrent d'un coup : la présence bondit, mais les basses sont là.
         perform(&mut look, 4.0, |_| sound(0.8, -15.0), Some(24));
         assert_eq!(look.phase(), Phase::Groove);
+    }
+
+    #[test]
+    fn a_build_up_aims_its_drop_at_a_phrase_head() {
+        let mut look = white_look(Motion::Auto);
+        // 150 BPM : une phrase de 16 temps dure 6,4 s, têtes à 0, 6,4, 12,8 et 19,2 s.
+        let (period, phrase) = (0.4f32, 6.4f32);
+        let progress_at = |look: &mut ReactiveLook, from: f32, until: f32, kick_every: usize| {
+            for frame in (from * 60.0) as usize..(until * 60.0) as usize {
+                let t = frame as f32 / 60.0;
+                look.set_structure(Some((period, (phrase - t.rem_euclid(phrase)) / period)));
+                if frame % kick_every == 0 {
+                    look.kick_detected();
+                    look.kick();
+                }
+                look.render(FRAME, sound(0.8, -20.0));
+            }
+            (look.build_progress(), look.drop_in())
+        };
+        progress_at(&mut look, 0.0, 4.0, 24);
+        // Un roulement de kicks à 4 s : la montée vise la tête de 12,8 s (celle de 6,4 s est trop
+        // proche de son début).
+        let (early, drop_in) = progress_at(&mut look, 4.0, 6.0, 6);
+        assert!(early.is_some_and(|p| p < 0.3), "{early:?}");
+        assert!(drop_in.is_some_and(|s| (s - 6.8).abs() < 0.3), "{drop_in:?}");
+        let (late, _) = progress_at(&mut look, 6.0, 11.0, 6);
+        assert!(late.is_some_and(|p| (0.6..0.9).contains(&p)), "{late:?}");
+        // Pas de drop à 12,8 s : il est attendu à la tête suivante, la tension reste au plein.
+        let (full, drop_in) = progress_at(&mut look, 11.0, 13.2, 6);
+        assert_eq!(full, Some(1.0));
+        assert!(drop_in.is_some_and(|s| (s - 6.0).abs() < 0.3), "{drop_in:?}");
     }
 
     #[test]

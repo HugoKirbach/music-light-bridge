@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::f64::consts::TAU;
 
 use crate::audio::analysis::Onset;
-use crate::phrase::{PhraseTracker, Position};
+use crate::phrase::{BEATS_PER_PHRASE, PhraseTracker, Position};
 
 /// Plage de la détection automatique : exclut les octaves trompeuses (77,5 ou 310 pour 155 BPM).
 pub const DEFAULT_BPM_RANGE: (f64, f64) = (100.0, 190.0);
@@ -362,6 +362,19 @@ impl Tracker {
     /// reconnue.
     pub fn position(&self, t: f64) -> Option<Position> {
         self.phrase.position(t, &self.clock)
+    }
+
+    /// Période du temps (s) et nombre de temps, fractionnaire, jusqu'à la prochaine tête de
+    /// phrase, quand la structure est reconnue.
+    pub fn structure(&self, t: f64) -> Option<(f32, f32)> {
+        let period = self.clock.period()?;
+        let beat = self.clock.nearest_beat(t)?;
+        let phrase = u64::from(self.position(beat)?.phrase);
+        let mut to_head = ((BEATS_PER_PHRASE - phrase) % BEATS_PER_PHRASE) as f64 - (t - beat) / period;
+        if to_head <= 0.0 {
+            to_head += BEATS_PER_PHRASE as f64;
+        }
+        Some((period as f32, to_head as f32))
     }
 
     /// Écart moyen (s) entre les kicks sur le temps et les temps de l'horloge.

@@ -84,10 +84,15 @@ impl App {
         ui.add_space(((height - content) / 2.0).max(0.0));
         ui.vertical_centered(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            let phase = match status.phrase {
+            let phase = match (status.build, status.phrase) {
+                // Avancement de la montée vers son drop.
+                (Some(build), _) => match status.drop_beats {
+                    Some(beats) => format!("{} · {build} % · DROP DANS {beats} T", status.phase.label().to_uppercase()),
+                    None => format!("{} · {build} %", status.phase.label().to_uppercase()),
+                },
                 // Mesure dans la phrase de quatre, quand la structure est reconnue.
-                Some(phrase) => format!("{} · MESURE {}/4", status.phase.label().to_uppercase(), phrase / 4 + 1),
-                None => status.phase.label().to_uppercase(),
+                (None, Some(phrase)) => format!("{} · MESURE {}/4", status.phase.label().to_uppercase(), phrase / 4 + 1),
+                (None, None) => status.phase.label().to_uppercase(),
             };
             theme::pill(ui, theme::spaced(&phase, theme::font(13.0, BOLD), Color32::WHITE, 3.9), theme::black(0.45), None);
             ui.add_space(20.0);

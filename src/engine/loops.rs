@@ -59,9 +59,9 @@ pub(super) fn light_loop(
         seen_notes = note_count;
 
         let now = Instant::now();
-        let (clock, locked) = {
+        let (clock, locked, structure) = {
             let tracker = shared.tracker();
-            (tracker.clock(), tracker.locked(features.seconds(now)))
+            (tracker.clock(), tracker.locked(features.seconds(now)), tracker.structure(features.seconds(now)))
         };
         let action = planner.poll(&clock, features.seconds(now), kick);
         // La détection cherche les kicks sur les temps dès que le tempo est sûr, et se méfie de
@@ -75,6 +75,7 @@ pub(super) fn light_loop(
         let grooving = planner.in_groove(&clock, features.seconds(now));
         shared.grooving.store(grooving, Ordering::Relaxed);
         look.set_grid_groove(clock.period().map(|_| grooving));
+        look.set_structure(structure);
         match action {
             Action::Flash { reactive } => {
                 // Place du temps flashé dans la structure : tête de phrase ou de mesure.
@@ -115,6 +116,9 @@ pub(super) fn light_loop(
         let brightest = colors.iter().copied().max_by_key(|c| c.r.max(c.g).max(c.b)).unwrap_or(Rgb::OFF);
         shared.color.store(pack(brightest), Ordering::Relaxed);
         shared.phase.store(look.phase().index(), Ordering::Relaxed);
+        shared.build.store(look.build_progress().map_or(NO_BUILD, |p| (p * 100.0).round() as u8), Ordering::Relaxed);
+        let drop_beats = look.drop_in().zip(structure).map(|(seconds, (period, _))| (seconds / period).ceil().clamp(0.0, 254.0) as u8);
+        shared.drop_beats.store(drop_beats.unwrap_or(NO_BUILD), Ordering::Relaxed);
         shared.active_motion.store(look.active_motion().index(), Ordering::Relaxed);
         shared.active_spread.store(look.active_spread().index(), Ordering::Relaxed);
         last = now;

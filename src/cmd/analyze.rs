@@ -213,6 +213,7 @@ pub fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Re
         }
         if t >= next_frame {
             look.set_grid_groove(tracker.clock().period().map(|_| groove));
+            look.set_structure(tracker.structure(t));
             look.render(Duration::from_secs_f64(FRAME), analyzer.levels());
             slice.phase_frames[usize::from(look.phase().index())] += 1;
             timeline.phases.push((t, look.phase()));

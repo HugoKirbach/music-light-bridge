@@ -46,6 +46,7 @@ const LINK_POLL: Duration = Duration::from_millis(20);
 const CONFIRM_RANGE: (f64, f64) = (0.03, 0.1);
 /// Durée d'allumage des témoins de kick et de note.
 const LIT: Duration = Duration::from_millis(100);
+const NO_BUILD: u8 = u8::MAX;
 pub const THRESHOLD_RANGE: (f32, f32) = (1.1, 4.0);
 /// Retard propre maximal d'une lampe (ms) : au-delà, c'est un réglage d'avance générale.
 pub const MAX_LAMP_DELAY_MS: f32 = 150.0;
@@ -120,6 +121,10 @@ pub struct Status {
     /// Phase reconnue et animation effectivement jouée.
     pub phase: Phase,
     pub active_motion: Motion,
+    /// Avancement de la montée en cours, en %.
+    pub build: Option<u8>,
+    /// Temps restants avant le drop prévu de la montée (tête de phrase).
+    pub drop_beats: Option<u8>,
     /// Disposition effectivement jouée, et couleur envoyée à chaque lampe (canaux de la zone).
     pub active_spread: Spread,
     pub lamp_colors: Vec<[u8; 3]>,
@@ -164,6 +169,9 @@ struct Shared {
     sync_test: AtomicBool,
     /// Publiés par la boucle d'éclairage.
     phase: AtomicU8,
+    /// Avancement de la montée en cours (%) et temps avant son drop prévu, `NO_BUILD` sinon.
+    build: AtomicU8,
+    drop_beats: AtomicU8,
     active_motion: AtomicU8,
     tracker: Mutex<Tracker>,
     palette: Mutex<Palette>,
@@ -324,6 +332,8 @@ impl Engine {
             lamp_lags: channel_lags.iter().map(|lag| AtomicU32::new(lag.to_bits())).collect(),
             sync_test: AtomicBool::new(false),
             phase: AtomicU8::new(Phase::default().index()),
+            build: AtomicU8::new(NO_BUILD),
+            drop_beats: AtomicU8::new(NO_BUILD),
             active_motion: AtomicU8::new(options.motion.index()),
             tracker: Mutex::new(tracker),
             palette: Mutex::new(options.palette),
@@ -432,6 +442,8 @@ impl Engine {
             link_peers: self.shared.link.then(|| self.shared.link_peers.load(Ordering::Relaxed)),
             color: unpack(color),
             phase: Phase::from_index(self.shared.phase.load(Ordering::Relaxed)),
+            build: Some(self.shared.build.load(Ordering::Relaxed)).filter(|&p| p != NO_BUILD),
+            drop_beats: Some(self.shared.drop_beats.load(Ordering::Relaxed)).filter(|&b| b != NO_BUILD),
             active_motion: Motion::from_index(self.shared.active_motion.load(Ordering::Relaxed)),
             active_spread: Spread::from_index(self.shared.active_spread.load(Ordering::Relaxed)),
             lamp_colors: self.shared.lamp_colors.iter().map(|c| unpack(c.load(Ordering::Relaxed))).collect(),
