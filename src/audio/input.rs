@@ -218,9 +218,12 @@ where
                 if let Some(recording) = recording.as_mut() {
                     recording.push(mono);
                 }
-                let expectation = grid.expectation(first_seconds + step * i as f64);
-                if analyzer.process(mono, expectation) {
+                let t = first_seconds + step * i as f64;
+                if analyzer.process(mono, grid.expectation(t)) {
                     features.publish_kick(first + sample_period * i as u32);
+                }
+                if let Some(strength) = analyzer.take_onset() {
+                    features.publish_onset(t, strength);
                 }
             }
             features.publish_levels(analyzer.levels());

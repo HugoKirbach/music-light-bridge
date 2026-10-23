@@ -71,11 +71,19 @@ le bleu (son brillant).
 Si les barres restent vides : vérifier le gain d'entrée de la 2i2 et, dans Windows,
 Paramètres > Confidentialité > Microphone > « Autoriser les applications de bureau ».
 
-La détection suit une grille de temps, comme celle d'un logiciel de DJ. Dès que le tempo est sûr
-(estimation confirmée dans les 4 dernières secondes, tempo imposé ou Ableton Link), elle cherche
-le kick sur chaque temps : près d'un temps, ses seuils se relâchent (kick noyé dans une basse
-dense), et un kick qui remonte du creux creusé par le sidechain compte même si sa montée est
-lente. Une fois le groove établi (kicks sur 4 temps de suite), les seuils se durcissent aussi
+La détection suit une grille de temps, comme celle d'un logiciel de DJ. Toutes les 10 ms, le
+moteur mesure une force d'attaque de kick : le bond d'énergie autour de 160 Hz (le punch du kick,
+net même quand le sidechain efface la sous-basse au même instant), renforcé par un clic. Chaque
+seconde, un peigne range cette force sur la grille des 6 dernières secondes : la position des
+temps qui en concentre le plus recale la grille (même décalée d'un demi-temps après un break),
+et si les kicks détectés un à un ne suffisent pas à estimer le tempo, le peigne le trouve seul
+(à 1 BPM près, affiné ensuite par les kicks).
+
+Dès que le tempo est sûr (estimation confirmée dans la dernière minute et jamais contredite
+depuis, tempo imposé ou Ableton Link : la grille tient à travers un long break), la détection
+cherche le kick sur chaque temps : près d'un temps, ses seuils se relâchent (kick noyé dans une
+basse dense), et un kick qui remonte du creux creusé par le sidechain compte même si sa montée
+est lente. Un seul kick compte par temps. Une fois le groove établi (kicks sur 4 temps de suite), les seuils se durcissent aussi
 entre les temps (une note de basse ne passe pas pour un kick), et chaque temps flashe en avance :
 un kick manqué garde son flash, seuls deux temps sans kick de suite signent un break (un flash
 de trop, puis un annulé).

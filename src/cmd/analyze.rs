@@ -166,6 +166,9 @@ fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay
             }
         }
 
+        if let Some(strength) = analyzer.take_onset() {
+            tracker.on_onset(t, strength);
+        }
         let arrived = arrivals.front().is_some_and(|&(at, _)| at <= t);
         if t >= next_poll || arrived {
             let kick = if arrived { arrivals.pop_front().map(|(_, kick)| kick) } else { None };

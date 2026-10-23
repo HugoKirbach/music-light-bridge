@@ -620,11 +620,17 @@ fn light_loop(
     Ok(())
 }
 
-/// Réestime le tempo une fois par seconde, hors de la boucle d'éclairage.
+/// Transmet la force d'attaque au suivi du tempo et réestime le tempo une fois par seconde, hors
+/// de la boucle d'éclairage.
 fn tempo_loop(shared: &Shared, features: &Features) {
     let mut next = Instant::now() + TEMPO_UPDATE;
+    let mut seen = 0;
     while !shared.stopped() {
         thread::sleep(Duration::from_millis(50));
+        {
+            let mut tracker = shared.tracker();
+            features.read_onsets(&mut seen, |t, strength| tracker.on_onset(t, strength));
+        }
         let now = Instant::now();
         if now >= next {
             shared.tracker().update(features.seconds(now));

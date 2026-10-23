@@ -80,6 +80,15 @@ const PEAK_RELEASE: f32 = 1.0;
 /// suit le minimum des basses et n'en remonte qu'en 60 ms.
 const VALLEY_RISE: f32 = 0.06;
 const EXPECTED_VALLEY_RATIO: f32 = 1.5;
+/// Punch d'un kick : son attaque autour de 160 Hz, qui reste nette quand le sidechain efface la
+/// sous-basse au même instant (la bande des basses, elle, s'effondre puis ne remonte que 50 à
+/// 60 ms plus tard). Juste après un clic, le punch doit gagner 30 % sur sa référence et
+/// dépasser son fond du seuil de détection.
+const PUNCH_CENTER: f32 = 160.0;
+const PUNCH_Q: f32 = 0.8;
+const PUNCH_RISE_RATIO: f32 = 1.3;
+/// -52 dBFS.
+const PUNCH_FLOOR: f32 = 0.005;
 
 /// Ce que l'horloge de tempo attend à l'instant d'un échantillon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,9 +221,14 @@ pub struct KickDetector {
     body_reference: Envelope,
     peak: Envelope,
     valley: Envelope,
+    punch: Envelope,
+    punch_reference: Envelope,
+    punch_background: Envelope,
     threshold: f32,
     since_kick: u32,
     since_click: u32,
+    /// Le dernier kick est tombé sur un temps attendu : le suivant ne peut pas être sur le même.
+    last_on_beat: bool,
     refractory: u32,
     expected_refractory: u32,
     click_window: u32,
@@ -232,9 +246,13 @@ impl KickDetector {
             body_reference: Envelope::new(rate, KICK_RISE_TIME, KICK_RELEASE),
             peak: Envelope::new(rate, KICK_ATTACK, PEAK_RELEASE),
             valley: Envelope::new(rate, VALLEY_RISE, KICK_ATTACK),
+            punch: Envelope::new(rate, KICK_ATTACK, KICK_RELEASE),
+            punch_reference: Envelope::new(rate, KICK_RISE_TIME, KICK_RELEASE),
+            punch_background: Envelope::new(rate, KICK_FLOOR_RISE, KICK_FLOOR_FALL),
             threshold,
             since_kick: u32::MAX,
             since_click: u32::MAX,
+            last_on_beat: false,
             refractory: (rate * KICK_REFRACTORY) as u32,
             expected_refractory: (rate * EXPECTED_REFRACTORY) as u32,
             click_window: (rate * CLICK_WINDOW) as u32,
@@ -244,12 +262,15 @@ impl KickDetector {
     /// Traite un échantillon filtré dans les basses, sous 100 Hz (corps du kick) et autour de
     /// 2,5 kHz (clic) ; `true` à l'instant où un kick est détecté.
     #[inline]
-    pub fn process(&mut self, bass: f32, body: f32, treble: f32, expectation: Expectation) -> bool {
+    pub fn process(&mut self, bass: f32, body: f32, punch: f32, treble: f32, expectation: Expectation) -> bool {
         let level = self.fast.process(bass.abs());
         let reference = self.reference.process(level);
         let background = self.background.process(level);
         let peak = self.peak.process(level);
         let valley = self.valley.process(level);
+        let punch = self.punch.process(punch.abs());
+        let punch_reference = self.punch_reference.process(punch);
+        let punch_background = self.punch_background.process(punch);
         let click = self.click.process(treble.abs());
         let click_reference = self.click_reference.process(click);
         let body = self.body.process(body.abs());
@@ -262,7 +283,11 @@ impl KickDetector {
         let excess = self.threshold - 1.0;
         let (threshold, rise, refractory) = match expectation {
             Expectation::Free => (self.threshold, KICK_RISE_RATIO, self.refractory),
-            Expectation::Kick => (1.0 + excess * EXPECTED_RELAX, EXPECTED_RISE_RATIO, self.expected_refractory),
+            // Attente courte seulement si le kick précédent n'était pas déjà celui de ce temps.
+            Expectation::Kick => {
+                let refractory = if self.last_on_beat { self.refractory } else { self.expected_refractory };
+                (1.0 + excess * EXPECTED_RELAX, EXPECTED_RISE_RATIO, refractory)
+            }
             Expectation::Offbeat => (1.0 + excess * OFFBEAT_STRICT, OFFBEAT_RISE_RATIO, self.refractory),
         };
         // Loin d'un temps en plein groove, le clic n'excuse rien : charleston et basse y tombent.
@@ -276,10 +301,19 @@ impl KickDetector {
             && self.since_kick >= self.refractory
             && level > valley * EXPECTED_VALLEY_RATIO
             && level > background * self.threshold;
+        // Punch : un clic, puis un bond autour de 160 Hz. Pas entre les temps en plein groove, où
+        // tombent les claps.
+        let punched = expectation != Expectation::Offbeat
+            && self.since_kick >= self.refractory
+            && self.since_click <= self.click_window
+            && punch > PUNCH_FLOOR
+            && punch > punch_reference * PUNCH_RISE_RATIO
+            && punch > punch_background * self.threshold;
         let kick = self.since_kick >= refractory
             && level > KICK_FLOOR
-            && (fused || from_valley || (level > reference * rise && level > background * threshold));
+            && (fused || from_valley || punched || (level > reference * rise && level > background * threshold));
         if kick {
+            self.last_on_beat = expectation == Expectation::Kick;
             self.since_kick = 0;
         }
         kick
@@ -310,6 +344,75 @@ fn tilt(bass: f32, high: f32) -> Option<f32> {
     (bass.max(high) > GAIN_FLOOR).then(|| (bass.max(TILT_FLOOR) / high.max(TILT_FLOOR)).ln())
 }
 
+/// Force d'attaque de kick, une valeur toutes les 10 ms : le bond d'énergie du punch (autour de
+/// 160 Hz, où vit l'attaque d'un kick même quand le sidechain efface la sous-basse), renforcé
+/// quand un clic l'accompagne. Notes de basse, claps et bosses de sous-basse en font nettement
+/// moins : sommée sur la grille, elle désigne la position des temps.
+#[derive(Debug, Clone)]
+pub struct OnsetStrength {
+    punch: Envelope,
+    click: Envelope,
+    hop: u32,
+    count: u32,
+    punch_peak: f32,
+    click_peak: f32,
+    previous_punch: f32,
+    previous_click: f32,
+    /// Bonds de clic des dernières trames : le clic précède le punch de 10 à 40 ms.
+    recent_clicks: [f32; ONSET_CLICK_FRAMES],
+    ready: Option<f32>,
+}
+
+/// Durée d'une trame de force d'attaque (s).
+pub const ONSET_HOP: f64 = 0.01;
+const ONSET_CLICK_FRAMES: usize = 4;
+/// Poids du clic : un punch précédé d'un clic franc (×e) compte double.
+const ONSET_CLICK_WEIGHT: f32 = 1.0;
+/// En dessous (-80 dBFS), le bond n'a pas de sens.
+const ONSET_FLOOR: f32 = 1e-4;
+
+impl OnsetStrength {
+    pub fn new(rate: f32) -> Self {
+        Self {
+            punch: Envelope::new(rate, 0.002, 0.03),
+            click: Envelope::new(rate, CLICK_ATTACK, CLICK_RELEASE),
+            hop: (rate * ONSET_HOP as f32).round() as u32,
+            count: 0,
+            punch_peak: 0.0,
+            click_peak: 0.0,
+            previous_punch: ONSET_FLOOR,
+            previous_click: ONSET_FLOOR,
+            recent_clicks: [0.0; ONSET_CLICK_FRAMES],
+            ready: None,
+        }
+    }
+
+    /// Traite un échantillon filtré autour de 160 Hz et le même autour de 2,5 kHz.
+    #[inline]
+    pub fn process(&mut self, punch: f32, click: f32) {
+        self.punch_peak = self.punch_peak.max(self.punch.process(punch.abs()));
+        self.click_peak = self.click_peak.max(self.click.process(click.abs()));
+        self.count += 1;
+        if self.count < self.hop {
+            return;
+        }
+        let punch = self.punch_peak.max(ONSET_FLOOR);
+        let click = self.click_peak.max(ONSET_FLOOR);
+        let rise = (punch / self.previous_punch).ln().max(0.0);
+        self.recent_clicks.rotate_right(1);
+        self.recent_clicks[0] = (click / self.previous_click).ln().max(0.0);
+        let clicked = self.recent_clicks.iter().copied().fold(0.0, f32::max);
+        self.ready = Some(rise * (1.0 + ONSET_CLICK_WEIGHT * clicked));
+        (self.previous_punch, self.previous_click) = (punch, click);
+        (self.count, self.punch_peak, self.click_peak) = (0, 0.0, 0.0);
+    }
+
+    /// Valeur de la trame qui vient de se terminer, une seule fois.
+    pub fn take(&mut self) -> Option<f32> {
+        self.ready.take()
+    }
+}
+
 /// Chaîne complète : séparation en bandes, niveaux normalisés et détection de kick.
 #[derive(Debug, Clone)]
 pub struct Analyzer {
@@ -318,12 +421,14 @@ pub struct Analyzer {
     high_filter: Biquad,
     click_filter: Biquad,
     body_filter: Biquad,
+    punch_filter: Biquad,
     envelopes: [Envelope; 3],
     gains: [AutoGain; 3],
     /// Enveloppes brutes et normalisées des trois bandes, au dernier échantillon.
     raw: [f32; 3],
     normalized: [f32; 3],
     kick: KickDetector,
+    onset: OnsetStrength,
 }
 
 impl Analyzer {
@@ -334,16 +439,23 @@ impl Analyzer {
             high_filter: Biquad::high_pass(rate, HIGH_CUTOFF, FRAC_1_SQRT_2),
             click_filter: Biquad::band_pass(rate, CLICK_CENTER, CLICK_Q),
             body_filter: Biquad::low_pass(rate, BODY_CUTOFF, FRAC_1_SQRT_2),
+            punch_filter: Biquad::band_pass(rate, PUNCH_CENTER, PUNCH_Q),
             envelopes: [Envelope::new(rate, BAND_ATTACK, BAND_RELEASE); 3],
             gains: [AutoGain::new(rate, GAIN_MEMORY); 3],
             raw: [0.0; 3],
             normalized: [0.0; 3],
             kick: KickDetector::new(rate, threshold),
+            onset: OnsetStrength::new(rate),
         }
     }
 
     pub fn set_threshold(&mut self, threshold: f32) {
         self.kick.threshold = threshold;
+    }
+
+    /// Force d'attaque de la trame de 10 ms qui vient de se terminer, s'il y en a une.
+    pub fn take_onset(&mut self) -> Option<f32> {
+        self.onset.take()
     }
 
     pub fn levels(&self) -> Levels {
@@ -366,7 +478,9 @@ impl Analyzer {
         self.normalized = std::array::from_fn(|i| self.gains[i].process(self.raw[i]));
         let treble = self.click_filter.process(x);
         let body = self.body_filter.process(x);
-        self.kick.process(bass, body, treble, expectation)
+        let punch = self.punch_filter.process(x);
+        self.onset.process(punch, treble);
+        self.kick.process(bass, body, punch, treble, expectation)
     }
 }
 

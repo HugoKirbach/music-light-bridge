@@ -35,9 +35,20 @@ const TEMPO_GAIN: f64 = 0.3;
 /// Au-delà de 3 % d'écart, un nouveau tempo doit se confirmer avant d'être adopté.
 const TEMPO_JUMP: f64 = 0.03;
 const JUMP_CONFIRMATIONS: u32 = 4;
-/// Une estimation qui confirme le tempo de l'horloge le rend sûr pour 4 s.
-const LOCK_HOLD: f64 = 4.0;
+/// Une estimation qui confirme le tempo de l'horloge le rend sûr pour 60 s : la grille tient
+/// à travers un long break, comme celle d'un logiciel de DJ. Une estimation confiante qui le
+/// contredit (nouveau morceau) la libère aussitôt.
+const LOCK_HOLD: f64 = 60.0;
 const OFFSET_SMOOTHING: f64 = 0.1;
+/// Peigne : cases de 10 ms (une trame), au moins 3 s de trames, et une position qui porte
+/// 2,5 fois la moyenne (avec ses voisines) pour recaler la grille.
+const COMB_BIN: f64 = 0.01;
+const COMB_MIN_SPAN: f64 = 3.0;
+const COMB_CONTRAST: f64 = 2.5;
+/// Un autre tempo ne remplace celui de l'horloge que si son peigne contraste 1,25 fois plus.
+const COMB_SWITCH: f64 = 1.25;
+/// Tempos dont le peigne contraste à 2 % près du meilleur : le plateau dont on prend le milieu.
+const COMB_PLATEAU: f64 = 0.98;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TempoEstimate {
@@ -129,6 +140,64 @@ fn dominant_beat(onsets: &[f64], period: f64) -> Option<f64> {
     (concentration >= MIN_PHASE_CONCENTRATION).then(|| reference + sin.atan2(cos) / TAU * period)
 }
 
+/// Instant d'un temps d'après le peigne : la force d'attaque des trames, rangée par position
+/// dans le temps (cases de 10 ms), s'accumule là où tombent les kicks. Rien si les trames
+/// couvrent moins de 3 s ou si la meilleure position ne domine pas assez la moyenne.
+fn comb_beat(frames: &[(f64, f32)], period: f64) -> Option<f64> {
+    comb(frames, period).filter(|&(_, contrast)| contrast > COMB_CONTRAST).map(|(beat, _)| beat)
+}
+
+/// Tempo d'après le peigne : celui, entre `bpm_range`, dont la grille concentre le mieux la force
+/// d'attaque (pas de 0,25 BPM, affiné à 0,05). Il ne dépend pas des kicks détectés un à un, que
+/// les fausses détections d'un mix chargé brouillent. Le tempo `current` de l'horloge garde la
+/// main tant qu'un autre ne le bat pas nettement : un rythme en 3/16 ou des croches font aussi
+/// ressortir les 2/3 ou les 3/2 du tempo.
+fn comb_tempo(frames: &[(f64, f32)], bpm_range: (f64, f64), current: Option<f64>) -> Option<TempoEstimate> {
+    let best_of = |bpms: &mut dyn Iterator<Item = f64>| {
+        bpms.filter_map(|bpm| comb(frames, 60.0 / bpm).map(|(beat, contrast)| (bpm, beat, contrast)))
+            .max_by(|a, b| a.2.total_cmp(&b.2))
+    };
+    let steps = ((bpm_range.1 - bpm_range.0) / 0.25) as usize;
+    let (coarse, _, _) = best_of(&mut (0..=steps).map(|i| bpm_range.0 + 0.25 * i as f64))?;
+    // Sur quelques secondes, les tempos voisins concentrent presque aussi bien les attaques :
+    // on prend le milieu de ce plateau plutôt que son bord.
+    let fine: Vec<(f64, f64)> = (-20..=20)
+        .map(|i| coarse + 0.05 * f64::from(i))
+        .filter_map(|bpm| comb(frames, 60.0 / bpm).map(|(_, contrast)| (bpm, contrast)))
+        .collect();
+    let top = fine.iter().map(|&(_, contrast)| contrast).fold(f64::MIN, f64::max);
+    let plateau: Vec<f64> = fine.iter().filter(|&&(_, c)| c >= COMB_PLATEAU * top).map(|&(bpm, _)| bpm).collect();
+    let center = plateau.iter().sum::<f64>() / plateau.len().max(1) as f64;
+    let (mut bpm, mut anchor, mut contrast) = best_of(&mut std::iter::once(center))?;
+    if let Some(current) = current
+        && let Some((beat, held)) = comb(frames, 60.0 / current)
+        && held * COMB_SWITCH >= contrast
+    {
+        (bpm, anchor, contrast) = (current, beat, held);
+    }
+    (contrast > COMB_CONTRAST).then_some(TempoEstimate { bpm, anchor, confidence: 1.0 })
+}
+
+/// Instant d'un temps et contraste du peigne (meilleure position sur la moyenne).
+fn comb(frames: &[(f64, f32)], period: f64) -> Option<(f64, f64)> {
+    let (&(first, _), &(last, _)) = (frames.first()?, frames.last()?);
+    if last - first < COMB_MIN_SPAN {
+        return None;
+    }
+    let bins = ((period / COMB_BIN).round() as usize).max(4);
+    let mut sums = vec![0.0f64; bins];
+    for &(t, strength) in frames {
+        let position = (t - last).rem_euclid(period) / period;
+        sums[((position * bins as f64) as usize).min(bins - 1)] += f64::from(strength);
+    }
+    // Une case et ses deux voisines : un kick peut tomber à cheval sur deux trames.
+    let smoothed: Vec<f64> = (0..bins).map(|i| sums[(i + bins - 1) % bins] + sums[i] + sums[(i + 1) % bins]).collect();
+    let mean = smoothed.iter().sum::<f64>() / bins as f64;
+    let (best, &peak) = smoothed.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1))?;
+    // La trame qui porte le bond finit ~10 ms après l'attaque : on vise le début de la case.
+    (mean > 0.0).then(|| (last + best as f64 / bins as f64 * period - COMB_BIN, peak / mean))
+}
+
 /// Grille des temps : un temps toutes les `period` secondes, calée sur `anchor`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BeatClock {
@@ -208,6 +277,8 @@ pub struct Tracker {
     /// Instant jusqu'où le tempo de l'horloge reste sûr en mode automatique : une estimation
     /// l'a confirmé il y a moins de `LOCK_HOLD`.
     locked_until: f64,
+    /// Force d'attaque des dernières secondes, trame par trame : (fin de trame, valeur).
+    frames: VecDeque<(f64, f32)>,
 }
 
 impl Tracker {
@@ -220,6 +291,7 @@ impl Tracker {
             pending_jump: None,
             mean_offset: 0.0,
             locked_until: f64::NEG_INFINITY,
+            frames: VecDeque::new(),
         }
     }
 
@@ -286,23 +358,43 @@ impl Tracker {
                 estimate(&onsets[recent_start..], self.bpm_range)
                     .filter(|e| confident(e) && differs(e))
                     .or_else(|| estimate(onsets, self.bpm_range).filter(confident))
+                    .or_else(|| comb_tempo(self.frames.make_contiguous(), self.bpm_range, self.clock.bpm()))
             }
             TempoSource::Manual | TempoSource::Link => None,
         };
-        if estimate.is_some_and(|e| self.clock.period.is_some_and(|p| (60.0 / e.bpm - p).abs() / p < TEMPO_JUMP)) {
-            self.locked_until = now + LOCK_HOLD;
+        if let (Some(e), Some(period)) = (estimate, self.clock.period) {
+            let agrees = (60.0 / e.bpm - period).abs() / period < TEMPO_JUMP;
+            self.locked_until = if agrees { now + LOCK_HOLD } else { f64::NEG_INFINITY };
         }
         if let Some(estimate) = estimate {
             self.adopt(estimate);
         }
 
+        let Some(period) = self.clock.period else { return };
+        // Position des temps : d'abord le peigne sur la force d'attaque des dernières secondes,
+        // qui somme chaque temps et ne se laisse pas tromper par quelques kicks manqués ou par
+        // les croches d'une montée ; sinon la phase dominante des kicks récents.
         let onsets = self.onsets.make_contiguous();
-        if let Some(period) = self.clock.period
-            && let Some(dominant) = dominant_beat(onsets, period)
-            && let Some(beat) = self.clock.nearest_beat(dominant)
-            && (dominant - beat).abs() > ON_BEAT * period
+        let recent = &onsets[onsets.partition_point(|&t| t < now - RECENT_WINDOW)..];
+        let frames = self.frames.make_contiguous();
+        let target = comb_beat(frames, period).or_else(|| dominant_beat(recent, period));
+        if let Some(target) = target
+            && let Some(beat) = self.clock.nearest_beat(target)
+            && (target - beat).abs() > ON_BEAT * period
         {
-            self.clock.anchor = dominant;
+            self.clock.anchor = target;
+        }
+    }
+
+    /// Force d'attaque (voir `OnsetStrength`) de la trame de 10 ms qui finit à l'instant `t`.
+    pub fn on_onset(&mut self, t: f64, strength: f32) {
+        self.frames.push_back((t, strength));
+        self.forget_frames_before(t - RECENT_WINDOW);
+    }
+
+    fn forget_frames_before(&mut self, t: f64) {
+        while self.frames.front().is_some_and(|&(first, _)| first < t) {
+            self.frames.pop_front();
         }
     }
 
@@ -480,6 +572,54 @@ mod tests {
         assert!((later - 140.0).abs() < 0.2, "{later}");
     }
 
+
+    /// Force d'attaque synthétique : un bond par temps (`strong`), un plus faible à chaque
+    /// contretemps (`weak`), rien ailleurs, une trame toutes les 10 ms de `from` à `until`.
+    fn frames(tracker: &mut Tracker, bpm: f64, first_beat: f64, strong: f32, weak: f32, from: f64, until: f64) {
+        let period = 60.0 / bpm;
+        let mut t = from;
+        while t < until {
+            let position = (t - first_beat).rem_euclid(period);
+            let strength = if position < 0.01 {
+                strong
+            } else if (position - period / 2.0).abs() < 0.005 {
+                weak
+            } else {
+                0.0
+            };
+            tracker.on_onset(t, strength);
+            t += 0.01;
+        }
+    }
+
+    /// Après un break, la grille est restée d'un demi-temps en avance sur les kicks qui
+    /// reprennent ; le peigne, qui somme leurs attaques sur les temps, la recale.
+    #[test]
+    fn the_comb_puts_back_a_grid_shifted_by_half_a_beat() {
+        let bpm = 154.0;
+        let period = 60.0 / bpm;
+        let mut tracker = Tracker::new(DEFAULT_BPM_RANGE);
+        tracker.set_manual(bpm, 0.0);
+        tracker.clock.anchor = period / 2.0;
+        frames(&mut tracker, bpm, 0.0, 1.0, 0.5, 0.0, 6.0);
+        tracker.update(6.0);
+        let error = grid_error(&tracker, (6.0 / period).round() * period);
+        assert!(error < 0.015, "écart {error}");
+    }
+
+    /// Aucun kick détecté un à un (mix trop chargé) : la force d'attaque seule donne le tempo.
+    #[test]
+    fn the_comb_finds_the_tempo_without_detected_kicks() {
+        let mut tracker = Tracker::new(DEFAULT_BPM_RANGE);
+        frames(&mut tracker, 152.4, 0.13, 1.0, 0.4, 0.0, 6.0);
+        tracker.update(6.0);
+        let bpm = tracker.clock().bpm().unwrap();
+        // Trames de 10 ms : à 1 BPM près, la phase se recale ensuite chaque seconde.
+        assert!((bpm - 152.4).abs() < 1.0, "{bpm}");
+        let period: f64 = 60.0 / 152.4;
+        let true_beat = 0.13 + ((6.0 - 0.13) / period).round() * period;
+        assert!(grid_error(&tracker, true_beat) < 0.03, "écart {}", grid_error(&tracker, true_beat));
+    }
     /// Changement de morceau : 188 BPM puis 152, avec un kick sur trois perdu dans le second. Les
     /// kicks du premier restent 16 s dans la fenêtre ; les dernières secondes suffisent à trouver
     /// le nouveau tempo en moins de 10 s.
