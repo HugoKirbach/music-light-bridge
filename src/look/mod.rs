@@ -11,6 +11,14 @@ use serde::{Deserialize, Serialize};
 use crate::audio::analysis::Levels;
 use crate::hue::stream::Rgb;
 
+mod lamps;
+mod phases;
+
+pub use lamps::{Accent, Spread};
+pub use phases::Phase;
+use lamps::Lamp;
+use phases::PhaseTracker;
+
 /// Part de la lueur qui suit les basses, au-dessus du fond.
 const GLOW: f32 = 0.25;
 /// Part de blanc au sommet d'un flash de kick, pour un impact plus franc.
@@ -30,25 +38,6 @@ const TILT_MEMORY: f32 = 30.0;
 const FILTER_START: f32 = 1.6;
 const FILTER_FULL: f32 = 3.0;
 
-/// Une montée s'annonce quand la présence (médiums et aigus) dépasse de 4 dB sa moyenne des
-/// 6 dernières secondes alors que les basses sont faibles…
-const BUILD_RISE_DB: f32 = 4.0;
-const PRESENCE_FAST: f32 = 1.0;
-const PRESENCE_SLOW: f32 = 6.0;
-const BUILD_MAX_BASS: f32 = 0.5;
-/// … ou quand les kicks roulent : plus de 4,5 par seconde.
-const ROLL_RATE: f32 = 4.5;
-const KICK_RATE_WINDOW: f32 = 2.0;
-/// Une montée dure au moins 1,5 s avant qu'un drop puisse la conclure, et retombe si plus rien
-/// ne monte pendant 4 s.
-const BUILD_MIN: f32 = 1.5;
-const BUILD_STALL: f32 = 4.0;
-/// Temps pour qu'une montée atteigne son plein.
-const BUILD_RAMP: f32 = 8.0;
-/// Le drop : un kick aux basses fortes, après une seconde de basses faibles.
-const DROP_BASS: f32 = 0.6;
-const DROP_QUIET_BASS: f32 = 0.35;
-const BASS_MEMORY: f32 = 1.0;
 /// Respiration : la luminosité suit l'énergie, vite en montée et lentement en descente ; un
 /// kick n'y ajoute qu'une légère houle.
 const BREATH_ATTACK: f32 = 0.35;
@@ -97,40 +86,6 @@ impl Motion {
 
     pub fn from_index(index: u8) -> Self {
         Self::ALL.get(usize::from(index)).copied().unwrap_or(Self::Auto)
-    }
-}
-
-/// Phase du morceau, reconnue à l'écoute.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Phase {
-    /// Kicks réguliers.
-    #[default]
-    Groove,
-    /// Plus de kick : break, passage calme.
-    Calm,
-    /// Montée vers un drop.
-    BuildUp,
-}
-
-impl Phase {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Groove => "groove",
-            Self::Calm => "break",
-            Self::BuildUp => "montée",
-        }
-    }
-
-    pub fn index(self) -> u8 {
-        self as u8
-    }
-
-    pub fn from_index(index: u8) -> Self {
-        match index {
-            1 => Self::Calm,
-            2 => Self::BuildUp,
-            _ => Self::Groove,
-        }
     }
 }
 
@@ -185,164 +140,8 @@ fn approach(current: f32, target: f32, dt: f32, time: f32) -> f32 {
     current + (target - current) * (1.0 - (-dt / time).exp())
 }
 
-/// Ce qui permet de reconnaître la phase du morceau.
-#[derive(Debug, Default)]
-struct PhaseTracker {
-    phase: Phase,
-    /// Durée passée dans la phase actuelle (s).
-    phase_time: f32,
-    /// Horloge propre (s) et instants des derniers kicks, pour leur cadence.
-    time: f32,
-    kick_times: std::collections::VecDeque<f32>,
-    /// Un kick a été détecté depuis le dernier rendu.
-    kicked: bool,
-    presence_fast: Option<f32>,
-    presence_slow: Option<f32>,
-    bass_memory: f32,
-    /// Temps écoulé sans que rien ne monte, pendant une montée.
-    stall: f32,
-    /// Avancement de la montée, de 0 à 1.
-    build: f32,
-}
-
-impl PhaseTracker {
-    fn kick(&mut self) {
-        self.kicked = true;
-        self.kick_times.push_back(self.time);
-    }
-
-    /// Met la phase à jour ; `true` au drop qui conclut une montée.
-    fn update(&mut self, dt: f32, levels: Levels, grooving: bool) -> bool {
-        self.time += dt;
-        self.phase_time += dt;
-        while self.kick_times.front().is_some_and(|&t| self.time - t > KICK_RATE_WINDOW) {
-            self.kick_times.pop_front();
-        }
-        let rolling = self.kick_times.len() as f32 / KICK_RATE_WINDOW > ROLL_RATE;
-        let rise = match levels.presence {
-            Some(db) => {
-                let fast = approach(*self.presence_fast.get_or_insert(db), db, dt, PRESENCE_FAST);
-                let slow = approach(*self.presence_slow.get_or_insert(db), db, dt, PRESENCE_SLOW);
-                self.presence_fast = Some(fast);
-                self.presence_slow = Some(slow);
-                fast - slow
-            }
-            None => 0.0,
-        };
-        let quiet_bass_before = self.bass_memory < DROP_QUIET_BASS;
-        self.bass_memory = approach(self.bass_memory, levels.bass, dt, BASS_MEMORY);
-        let kicked = std::mem::take(&mut self.kicked);
-        // Une simple hausse de présence ne suffit pas quand les basses sont là : c'est un drop
-        // ou l'entrée d'un élément, pas une montée.
-        let building = (rise > BUILD_RISE_DB && self.bass_memory < BUILD_MAX_BASS) || rolling;
-        self.stall = if building { 0.0 } else { self.stall + dt };
-
-        let mut dropped = false;
-        let next = match self.phase {
-            Phase::BuildUp
-                if kicked
-                    && self.phase_time > BUILD_MIN
-                    && quiet_bass_before
-                    && levels.bass > DROP_BASS
-                    && !rolling =>
-            {
-                dropped = true;
-                Phase::Groove
-            }
-            Phase::BuildUp if self.stall > BUILD_STALL => {
-                if grooving { Phase::Groove } else { Phase::Calm }
-            }
-            Phase::BuildUp => Phase::BuildUp,
-            _ if building => Phase::BuildUp,
-            _ if grooving => Phase::Groove,
-            _ => Phase::Calm,
-        };
-        if next != self.phase {
-            self.phase = next;
-            self.phase_time = 0.0;
-        }
-        self.build = if self.phase == Phase::BuildUp {
-            let surge = ((rise - BUILD_RISE_DB) / 10.0).clamp(0.0, 1.0);
-            (self.build + dt / BUILD_RAMP).max(surge).min(1.0)
-        } else {
-            approach(self.build, 0.0, dt, MOTION_FADE)
-        };
-        dropped
-    }
-}
 
 /// Répartition des flashs entre les lampes de la zone, selon leur place dans la pièce.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum Spread {
-    /// Suit les phases : alternance sur le groove, vague en montée, ondulation en break
-    #[default]
-    Auto,
-    /// Toutes les lampes ensemble
-    Together,
-    /// Le flash traverse la pièce, d'un côté puis de l'autre
-    Wave,
-    /// Gauche et droite à tour de rôle, toutes ensemble en tête de mesure
-    Alternate,
-    /// Une lampe sur deux flashe sur les kicks, les autres respirent avec médiums et aigus
-    Split,
-}
-
-impl Spread {
-    pub const ALL: [Self; 5] = [Self::Auto, Self::Together, Self::Wave, Self::Alternate, Self::Split];
-
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Auto => "Auto : alternance sur le groove, vague en montée, ondulation en break",
-            Self::Together => "Ensemble : toutes les lampes à chaque kick",
-            Self::Wave => "Vague : le flash traverse la pièce, d'un côté puis de l'autre",
-            Self::Alternate => "Alternance : gauche et droite à tour de rôle, toutes en tête de mesure",
-            Self::Split => "Graves / aigus : une lampe sur deux sur les kicks, les autres respirent",
-        }
-    }
-
-    pub fn index(self) -> u8 {
-        self as u8
-    }
-
-    pub fn from_index(index: u8) -> Self {
-        Self::ALL.get(usize::from(index)).copied().unwrap_or(Self::Auto)
-    }
-}
-
-/// Place d'un kick dans la musique : un temps quelconque, le premier d'une mesure (l'alternance y
-/// flashe toutes les lampes) ou celui qui ouvre une phrase (toutes les lampes, en blanc plus franc).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Accent {
-    Beat,
-    Bar,
-    Phrase,
-}
-
-/// Une lampe (ou un segment de ruban) et son flash.
-#[derive(Debug, Clone, Default)]
-struct Lamp {
-    /// Place de gauche (0) à droite (1), par rang : deux lampes ne sont jamais confondues.
-    place: f32,
-    /// Moitié droite de la pièce (alternance) ; une lampe sur deux par rang (graves / aigus).
-    right: bool,
-    odd: bool,
-    flash: f32,
-    /// Part de blanc du flash en cours.
-    punch: f32,
-    /// Flash déclenché depuis le dernier rendu : il s'affiche sans décroissance.
-    fresh: bool,
-    /// Flash qui part dans quelques ms (vague) : délai restant (s), force, part de blanc.
-    pending: Option<(f32, f32, f32)>,
-}
-
-impl Lamp {
-    fn fire(&mut self, strength: f32, punch: f32) {
-        if strength >= self.flash {
-            (self.flash, self.punch, self.fresh) = (strength, punch, true);
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct ReactiveLook {
