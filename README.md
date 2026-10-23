@@ -71,10 +71,14 @@ le bleu (son brillant).
 Si les barres restent vides : vérifier le gain d'entrée de la 2i2 et, dans Windows,
 Paramètres > Confidentialité > Microphone > « Autoriser les applications de bureau ».
 
-Une fois le groove établi (kicks sur 4 temps de suite), la détection attend les kicks sur les
-temps : près d'un temps, ses seuils se relâchent (kick noyé dans une basse dense) ; entre les
-temps, ils se durcissent (une note de basse ne passe pas pour un kick). Dès qu'un kick manque,
-le groove tombe et les seuils redeviennent normaux, pour les breaks et les montées.
+La détection suit une grille de temps, comme celle d'un logiciel de DJ. Dès que le tempo est sûr
+(estimation confirmée dans les 4 dernières secondes, tempo imposé ou Ableton Link), elle cherche
+le kick sur chaque temps : près d'un temps, ses seuils se relâchent (kick noyé dans une basse
+dense), et un kick qui remonte du creux creusé par le sidechain compte même si sa montée est
+lente. Une fois le groove établi (kicks sur 4 temps de suite), les seuils se durcissent aussi
+entre les temps (une note de basse ne passe pas pour un kick), et chaque temps flashe en avance :
+un kick manqué garde son flash, seuls deux temps sans kick de suite signent un break (un flash
+de trop, puis un annulé).
 
 Dans un mix dense (kick-bass, sous-basse roulante aussi forte que les kicks), le grave ne fait
 plus que gonfler de 30 à 50 % à chaque kick, comme à chaque note de basse. Ce qui trahit alors le

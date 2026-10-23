@@ -92,6 +92,8 @@ pub struct FlashPlanner {
     /// Dernier temps confirmé par un kick, et nombre de temps consécutifs confirmés.
     last_confirmed: Option<f64>,
     streak: u32,
+    /// Le dernier temps anticipé est passé sans kick, mais le groove a été gardé.
+    missed: bool,
     /// Temps dont le flash est parti en avance et dont on attend le kick.
     pending: Option<f64>,
     /// Temps anticipé dont le flash a été annulé faute de kick : s'il arrive en retard, il reflashe.
@@ -112,6 +114,7 @@ impl FlashPlanner {
             confirm_window,
             last_confirmed: None,
             streak: 0,
+            missed: false,
             pending: None,
             cancelled: None,
             last_flashed: None,
@@ -151,12 +154,20 @@ impl FlashPlanner {
         if let Some(beat) = self.pending
             && now >= beat + self.confirm_window
         {
-            // Le kick prévu n'est pas venu (début de break) : on éteint. Sans confirmation de ce
-            // temps, l'anticipation s'arrête d'elle-même ; un kick en retard reflashera.
             self.pending = None;
-            self.cancelled = Some(beat);
-            if action == Action::None {
-                action = Action::Cancel;
+            if self.streak >= GROOVE_STREAK && !self.missed {
+                // Un seul kick manqué en plein groove : sans doute noyé dans le mix. Le flash
+                // reste, et le temps compte comme confirmé pour garder l'anticipation.
+                self.missed = true;
+                self.last_confirmed = Some(beat);
+            } else {
+                // Second kick manqué de suite, ou pas de groove (début de break) : on éteint. Sans
+                // confirmation de ce temps, l'anticipation s'arrête d'elle-même ; un kick en retard
+                // reflashera.
+                self.cancelled = Some(beat);
+                if action == Action::None {
+                    action = Action::Cancel;
+                }
             }
         }
         action
@@ -200,6 +211,7 @@ impl FlashPlanner {
             _ => 1,
         };
         self.last_confirmed = Some(beat);
+        self.missed = false;
         if self.pending.is_some_and(|pending| same_beat(pending, beat, period)) {
             self.pending = None;
         }
@@ -291,13 +303,24 @@ mod tests {
         }
     }
 
+    /// En plein groove, le premier temps sans kick garde son flash (kick peut-être noyé) ; le
+    /// second, anticipé lui aussi, est annulé, puis la lumière reste éteinte.
     #[test]
-    fn a_break_costs_one_cancelled_flash_then_stays_dark() {
+    fn a_break_costs_one_extra_flash_and_one_cancelled_then_stays_dark() {
         let kicks: Vec<f64> = (1..=10).map(|n| beats(n as f64)).collect();
         let actions = simulate(FlashMode::Kicks, &kicks, beats(30.0));
-        assert_eq!(after(&actions, beats(10.5)), [ANTICIPATED, Action::Cancel]);
+        assert_eq!(after(&actions, beats(10.5)), [ANTICIPATED, ANTICIPATED, Action::Cancel]);
         let cancel = actions.last().unwrap().0;
-        assert!((cancel - (beats(11.0) + CONFIRM)).abs() < 1e-9);
+        assert!((cancel - (beats(12.0) + CONFIRM)).abs() < 1e-9);
+    }
+
+    /// Un kick noyé dans le mix, non détecté : son temps flashe quand même et le groove continue.
+    #[test]
+    fn a_kick_missed_in_the_groove_still_flashes() {
+        let kicks: Vec<f64> = (1..=12).filter(|&n| n != 7).map(|n| beats(n as f64)).collect();
+        let actions = simulate(FlashMode::Kicks, &kicks, beats(12.5));
+        let flashes = after(&actions, beats(2.5));
+        assert_eq!(flashes, [ANTICIPATED; 10], "un flash par temps, du 3e au 12e : {actions:?}");
     }
 
     #[test]
@@ -320,22 +343,28 @@ mod tests {
     }
 
     /// Mix chargé : le kick du 6e temps est détecté après la fin de l'attente de confirmation.
+    /// En plein groove, son flash n'a pas été coupé et rien ne flashe deux fois.
     #[test]
-    fn a_late_kick_flashes_again_and_keeps_the_groove() {
+    fn a_late_kick_in_the_groove_keeps_its_flash() {
         let kicks: Vec<(f64, f64)> = (1..=10)
             .map(|n| (beats(n as f64), if n == 6 { CONFIRM + 0.02 } else { ARRIVAL }))
             .collect();
         let (actions, _) = simulate_arrivals(FlashMode::Kicks, &kicks, beats(10.5));
-        let around = after(&actions, beats(5.5));
-        assert_eq!(
-            around,
-            [ANTICIPATED, Action::Cancel, REACTIVE, ANTICIPATED, ANTICIPATED, ANTICIPATED, ANTICIPATED],
-            "le 7e temps reste anticipé : {actions:?}"
-        );
+        assert_eq!(after(&actions, beats(5.5)), [ANTICIPATED; 5], "{actions:?}");
+    }
+
+    /// Hors groove (trois temps confirmés seulement), un kick en retard rallume son flash annulé.
+    #[test]
+    fn a_late_kick_before_the_groove_flashes_again() {
+        let kicks: Vec<(f64, f64)> = (1..=6)
+            .map(|n| (beats(n as f64), if n == 4 { CONFIRM + 0.02 } else { ARRIVAL }))
+            .collect();
+        let (actions, _) = simulate_arrivals(FlashMode::Kicks, &kicks, beats(6.5));
+        assert_eq!(after(&actions, beats(3.5)), [ANTICIPATED, Action::Cancel, REACTIVE, ANTICIPATED, ANTICIPATED]);
     }
 
     #[test]
-    fn groove_needs_four_beats_and_ends_after_a_missed_kick() {
+    fn groove_needs_four_beats_and_ends_after_two_missed_kicks() {
         let clock = BeatClock::new(BPM, 0.0);
         let three: Vec<(f64, f64)> = (1..=3).map(|n| (beats(n as f64), ARRIVAL)).collect();
         let (_, planner) = simulate_arrivals(FlashMode::Kicks, &three, beats(3.2));
@@ -345,7 +374,10 @@ mod tests {
         let (_, planner) = simulate_arrivals(FlashMode::Kicks, &six, beats(6.2));
         assert!(planner.in_groove(&clock, beats(6.2)));
         assert!(planner.in_groove(&clock, beats(7.0)), "le kick du temps suivant est attendu");
-        assert!(!planner.in_groove(&clock, beats(7.6)), "kick du 7e temps manqué");
+        let (_, planner) = simulate_arrivals(FlashMode::Kicks, &six, beats(7.6));
+        assert!(planner.in_groove(&clock, beats(7.6)), "un seul kick manqué : le groove tient");
+        let (_, planner) = simulate_arrivals(FlashMode::Kicks, &six, beats(8.6));
+        assert!(!planner.in_groove(&clock, beats(8.6)), "deux kicks manqués de suite");
     }
 
     #[test]

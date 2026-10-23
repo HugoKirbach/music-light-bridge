@@ -573,12 +573,17 @@ fn light_loop(
         seen_notes = note_count;
 
         let now = Instant::now();
-        let clock = shared.tracker().clock();
+        let (clock, locked) = {
+            let tracker = shared.tracker();
+            (tracker.clock(), tracker.locked(features.seconds(now)))
+        };
         let action = planner.poll(&clock, features.seconds(now), kick);
-        // La détection attend les kicks sur les temps tant que le groove tient.
+        // La détection cherche les kicks sur les temps dès que le tempo est sûr, et se méfie de
+        // ce qui tombe entre eux tant que le groove tient.
         features.set_grid(Grid {
             period: clock.period().unwrap_or(0.0),
             anchor: clock.anchor(),
+            locked,
             groove: planner.in_groove(&clock, features.seconds(now)),
         });
         match action {

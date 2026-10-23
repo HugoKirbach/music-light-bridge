@@ -41,22 +41,28 @@ pub struct Grid {
     pub period: f64,
     /// Instant d'un temps (s depuis l'origine commune).
     pub anchor: f64,
+    /// Le tempo et la phase sont sûrs (estimation confirmée, tempo imposé ou Link) : les kicks
+    /// sont cherchés sur les temps même avant que le groove soit établi.
+    pub locked: bool,
     /// Les kicks tombent régulièrement sur les temps.
     pub groove: bool,
 }
 
 impl Grid {
-    /// Ce que la grille attend à l'instant `t` : un kick près des temps, rien entre eux, tant
-    /// que le groove tient ; sinon (break, montée, tempo inconnu) aucune attente.
+    /// Ce que la grille attend à l'instant `t` : un kick près des temps dès que le tempo est sûr
+    /// ou que le groove tient, et rien entre les temps tant que le groove tient ; sinon (tempo
+    /// inconnu) aucune attente.
     pub fn expectation(&self, t: f64) -> Expectation {
-        if !self.groove || self.period <= 0.0 {
+        if !(self.groove || self.locked) || self.period <= 0.0 {
             return Expectation::Free;
         }
         let beats = (t - self.anchor) / self.period;
         if (beats - beats.round()).abs() * self.period < KICK_WINDOW {
             Expectation::Kick
-        } else {
+        } else if self.groove {
             Expectation::Offbeat
+        } else {
+            Expectation::Free
         }
     }
 }
@@ -84,6 +90,7 @@ pub struct Features {
     input_lost: AtomicBool,
     grid_period: AtomicU64,
     grid_anchor: AtomicU64,
+    grid_locked: AtomicBool,
     grid_groove: AtomicBool,
 }
 
@@ -104,6 +111,7 @@ impl Features {
             input_lost: AtomicBool::new(false),
             grid_period: AtomicU64::new(0),
             grid_anchor: AtomicU64::new(0),
+            grid_locked: AtomicBool::new(false),
             grid_groove: AtomicBool::new(false),
         }
     }
@@ -163,6 +171,7 @@ impl Features {
     pub fn set_grid(&self, grid: Grid) {
         self.grid_period.store(grid.period.to_bits(), Ordering::Relaxed);
         self.grid_anchor.store(grid.anchor.to_bits(), Ordering::Relaxed);
+        self.grid_locked.store(grid.locked, Ordering::Relaxed);
         self.grid_groove.store(grid.groove, Ordering::Relaxed);
     }
 
@@ -170,6 +179,7 @@ impl Features {
         Grid {
             period: f64::from_bits(self.grid_period.load(Ordering::Relaxed)),
             anchor: f64::from_bits(self.grid_anchor.load(Ordering::Relaxed)),
+            locked: self.grid_locked.load(Ordering::Relaxed),
             groove: self.grid_groove.load(Ordering::Relaxed),
         }
     }
@@ -199,5 +209,21 @@ impl Features {
 
     fn record_input_lost(&self) {
         self.input_lost.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sure_tempo_expects_kicks_on_the_beats_before_the_groove() {
+        let grid = |locked, groove| Grid { period: 0.4, anchor: 0.0, locked, groove };
+        let (on_beat, between) = (4.01, 4.2);
+        assert_eq!(grid(false, false).expectation(on_beat), Expectation::Free, "tempo pas encore sûr");
+        assert_eq!(grid(true, false).expectation(on_beat), Expectation::Kick);
+        assert_eq!(grid(true, false).expectation(between), Expectation::Free, "pas de méfiance sans groove");
+        assert_eq!(grid(true, true).expectation(between), Expectation::Offbeat);
+        assert_eq!(grid(false, true).expectation(on_beat), Expectation::Kick);
     }
 }

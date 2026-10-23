@@ -35,6 +35,8 @@ const TEMPO_GAIN: f64 = 0.3;
 /// Au-delà de 3 % d'écart, un nouveau tempo doit se confirmer avant d'être adopté.
 const TEMPO_JUMP: f64 = 0.03;
 const JUMP_CONFIRMATIONS: u32 = 4;
+/// Une estimation qui confirme le tempo de l'horloge le rend sûr pour 4 s.
+const LOCK_HOLD: f64 = 4.0;
 const OFFSET_SMOOTHING: f64 = 0.1;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -203,6 +205,9 @@ pub struct Tracker {
     /// Nouveau tempo en attente de confirmation, et nombre de confirmations.
     pending_jump: Option<(f64, u32)>,
     mean_offset: f64,
+    /// Instant jusqu'où le tempo de l'horloge reste sûr en mode automatique : une estimation
+    /// l'a confirmé il y a moins de `LOCK_HOLD`.
+    locked_until: f64,
 }
 
 impl Tracker {
@@ -214,6 +219,7 @@ impl Tracker {
             bpm_range,
             pending_jump: None,
             mean_offset: 0.0,
+            locked_until: f64::NEG_INFINITY,
         }
     }
 
@@ -223,6 +229,12 @@ impl Tracker {
 
     pub fn source(&self) -> TempoSource {
         self.source
+    }
+
+    /// Tempo sûr à l'instant `now` : confirmé récemment par une estimation, imposé, ou suivi
+    /// via Link. Les kicks peuvent alors être cherchés sur les temps.
+    pub fn locked(&self, now: f64) -> bool {
+        self.clock.period.is_some() && (self.source != TempoSource::Auto || now < self.locked_until)
     }
 
     /// Écart moyen (s) entre les kicks sur le temps et les temps de l'horloge.
@@ -277,6 +289,9 @@ impl Tracker {
             }
             TempoSource::Manual | TempoSource::Link => None,
         };
+        if estimate.is_some_and(|e| self.clock.period.is_some_and(|p| (60.0 / e.bpm - p).abs() / p < TEMPO_JUMP)) {
+            self.locked_until = now + LOCK_HOLD;
+        }
         if let Some(estimate) = estimate {
             self.adopt(estimate);
         }

@@ -73,6 +73,13 @@ const BODY_CUTOFF: f32 = 100.0;
 /// dépassent plus leur fond de 2,2 fois. Ailleurs, les kicks se détachent assez sans lui.
 const DENSE_CONTRAST: f32 = 2.2;
 const PEAK_RELEASE: f32 = 1.0;
+/// Sur un temps où un kick est attendu, il peut aussi remonter du creux que le sidechain creuse
+/// dans la basse juste avant lui : une montée en 30 à 40 ms, trop lente pour le critère de
+/// montée, mais qui gagne plus de 50 % sur le creux et dépasse le fond du seuil entier (non
+/// relâché : les bosses d'une sous-basse roulante ne doivent pas confirmer une grille). Le creux
+/// suit le minimum des basses et n'en remonte qu'en 60 ms.
+const VALLEY_RISE: f32 = 0.06;
+const EXPECTED_VALLEY_RATIO: f32 = 1.5;
 
 /// Ce que l'horloge de tempo attend à l'instant d'un échantillon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +211,7 @@ pub struct KickDetector {
     body: Envelope,
     body_reference: Envelope,
     peak: Envelope,
+    valley: Envelope,
     threshold: f32,
     since_kick: u32,
     since_click: u32,
@@ -223,6 +231,7 @@ impl KickDetector {
             body: Envelope::new(rate, KICK_ATTACK, KICK_RELEASE),
             body_reference: Envelope::new(rate, KICK_RISE_TIME, KICK_RELEASE),
             peak: Envelope::new(rate, KICK_ATTACK, PEAK_RELEASE),
+            valley: Envelope::new(rate, VALLEY_RISE, KICK_ATTACK),
             threshold,
             since_kick: u32::MAX,
             since_click: u32::MAX,
@@ -240,6 +249,7 @@ impl KickDetector {
         let reference = self.reference.process(level);
         let background = self.background.process(level);
         let peak = self.peak.process(level);
+        let valley = self.valley.process(level);
         let click = self.click.process(treble.abs());
         let click_reference = self.click_reference.process(click);
         let body = self.body.process(body.abs());
@@ -261,9 +271,14 @@ impl KickDetector {
             && self.since_click <= self.click_window
             && body > body_reference * FUSED_RISE_RATIO
             && level > background * (1.0 + excess * FUSED_RELAX);
+        // Le niveau reste au-dessus du creux pendant toute la montée : un seul kick par temps.
+        let from_valley = expectation == Expectation::Kick
+            && self.since_kick >= self.refractory
+            && level > valley * EXPECTED_VALLEY_RATIO
+            && level > background * self.threshold;
         let kick = self.since_kick >= refractory
             && level > KICK_FLOOR
-            && (fused || (level > reference * rise && level > background * threshold));
+            && (fused || from_valley || (level > reference * rise && level > background * threshold));
         if kick {
             self.since_kick = 0;
         }
@@ -517,6 +532,42 @@ mod tests {
         println!("kick-bass (kicks, fausses détections) : sans clic {blind:?}, avec {clicked:?}");
         assert!(blind.0 <= 2, "sans clic, les gonflements ne sont pas des kicks : {blind:?}");
         assert_eq!(clicked, (kicks.len(), 0));
+    }
+
+    /// Sidechain : la basse s'efface 40 ms avant chaque temps, puis le kick la ramène au double
+    /// en 40 ms. Trop lent pour le critère de montée : sans tempo, rien n'est détecté ; avec un
+    /// tempo sûr, chaque temps a son kick, et rien entre eux.
+    #[test]
+    fn a_sure_tempo_finds_kicks_rising_from_the_sidechain_dip() {
+        let beat = 60.0 / 152.0;
+        let beats: Vec<f32> = (1..16).map(|n| beat * n as f32).collect();
+        let amplitude = |t: f32| {
+            let phase = (t + 0.04).rem_euclid(beat) - 0.04;
+            match phase {
+                p if p < 0.0 => 0.22 - 0.12 * (p + 0.04) / 0.04,
+                p if p < 0.04 => 0.1 + 0.22 * p / 0.04,
+                p => 0.32 - 0.1 * ((p - 0.04) / (beat - 0.08)).min(1.0),
+            }
+        };
+        let signal: Vec<f32> = (0..(6.5 * RATE) as usize)
+            .map(|i| {
+                let t = i as f32 / RATE;
+                amplitude(t) * (TAU * 55.0 * t).sin()
+            })
+            .collect();
+        let near = |h: f32| beats.iter().any(|&b| (-0.01..0.05).contains(&(h - b)));
+        let count = |found: &[f32]| {
+            let late: Vec<f32> = found.iter().copied().filter(|&h| h > 1.0).collect();
+            (late.iter().filter(|&&h| near(h)).count(), late.iter().filter(|&&h| !near(h)).count())
+        };
+        let blind = count(&detections(&signal));
+        let sure = count(&detections_with(&signal, |t| {
+            if beats.iter().any(|&b| (t - b).abs() < 0.035) { Expectation::Kick } else { Expectation::Free }
+        }));
+        println!("sidechain (kicks, hors temps) : sans tempo {blind:?}, tempo sûr {sure:?}");
+        assert_eq!(blind.0, 0, "sans tempo, la montée est trop lente : {blind:?}");
+        let expected = beats.iter().filter(|&&b| b > 1.0).count();
+        assert_eq!(sure, (expected, 0));
     }
     #[test]
     fn bands_follow_their_frequencies() {

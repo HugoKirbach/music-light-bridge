@@ -147,7 +147,8 @@ fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay
         let t = i as f64 * step;
         let clock = tracker.clock();
         let groove = planner.in_groove(&clock, t);
-        let grid = Grid { period: clock.period().unwrap_or(0.0), anchor: clock.anchor(), groove };
+        let grid =
+            Grid { period: clock.period().unwrap_or(0.0), anchor: clock.anchor(), locked: tracker.locked(t), groove };
         slice.samples += 1;
         slice.groove_samples += u64::from(groove);
 
