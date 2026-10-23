@@ -137,6 +137,10 @@ struct LiveArgs {
     /// Animation : auto (suit les phases du morceau), pulse, breath (respiration) ou build-up (montée)
     #[arg(long, value_enum, default_value_t = look::Motion::Auto)]
     motion: look::Motion,
+    /// Répartition des flashs entre les lampes : auto, together (ensemble), wave (vague),
+    /// alternate (alternance gauche/droite) ou split (graves / aigus)
+    #[arg(long, value_enum, default_value_t = look::Spread::Auto)]
+    spread: look::Spread,
     /// Rejoint la session Ableton Link : tempo et phase viennent de la session
     #[arg(long)]
     link: bool,
@@ -160,6 +164,7 @@ impl LiveArgs {
             palette,
             dynamics,
             motion: self.motion,
+            spread: self.spread,
         }
     }
 }

@@ -44,6 +44,14 @@ pub struct Channel {
     /// Services de divertissement (segments de lampe) éclairés par ce canal.
     #[serde(default)]
     pub members: Vec<ChannelMember>,
+    /// Place dans la pièce, réglée dans l'app Hue (seul x sert : de -1 à gauche à 1 à droite).
+    #[serde(default)]
+    pub position: Position,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct Position {
+    pub x: f32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -350,7 +358,10 @@ mod tests {
             id: "zone".into(),
             metadata: Metadata { name: "Zone".into() },
             status: "inactive".into(),
-            channels: channels.iter().map(|&channel_id| Channel { channel_id, members: Vec::new() }).collect(),
+            channels: channels
+                .iter()
+                .map(|&channel_id| Channel { channel_id, members: Vec::new(), position: Position::default() })
+                .collect(),
             light_services: Vec::new(),
         }
     }

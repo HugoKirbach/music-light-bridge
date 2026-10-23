@@ -176,6 +176,25 @@ La section **Animation** choisit le mouvement de la lumière (`--motion` dans le
   Le passage d'une animation à l'autre se fait en fondu ; la phase reconnue s'affiche au-dessus
   du BPM, et la carte Auto du dock indique l'animation jouée en ce moment.
 
+La section **Disposition** répartit les flashs entre les lampes de la zone (`--spread` dans le
+terminal), selon leur place dans la pièce :
+
+- **Ensemble** : toutes les lampes à chaque kick ;
+- **Vague** : le flash traverse la pièce en 120 ms, d'un côté puis de l'autre (aller-retour) ;
+- **Alternance** : la moitié gauche puis la moitié droite, à tour de rôle, et toutes ensemble en
+  tête de mesure ;
+- **Graves / aigus** : une lampe sur deux flashe sur les kicks, les autres respirent avec les
+  médiums et les aigus ;
+- **Auto** (par défaut) : alternance sur le groove, vague en montée, ondulation lente qui traverse
+  la pièce pendant les breaks, éclat général au drop.
+
+La place de chaque lampe vient de la zone de divertissement (`dj-bridge areas` l'affiche, de -1 à
+gauche à 1 à droite) : pour qu'une vague traverse vraiment la pièce, positionne les lampes dans
+l'app Hue (Paramètres > Zones de divertissement > la zone > positionner les lampes). Sans
+position, elles se suivent dans l'ordre de la zone. Avec une seule lampe, toutes les dispositions
+reviennent à « Ensemble ». Pendant le live, la scène montre la couleur de chaque lampe en haut à
+droite.
+
 La section **Flashs** règle leur allure, avant comme pendant le live : **intensité** (jusqu'où
 monte un flash au-dessus de la lueur), **redescente** (de 40 ms, sec, à 1,5 s, très doux) et
 **lueur de fond** (luminosité minimale gardée entre les kicks).

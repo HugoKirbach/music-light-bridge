@@ -18,7 +18,7 @@ use crate::config::{Config, LiveSettings};
 use crate::engine::{self, Engine, THRESHOLD_RANGE};
 use crate::flash::FlashMode;
 use crate::hue::api;
-use crate::look::{Dynamics, Motion, Palette};
+use crate::look::{Dynamics, Motion, Palette, Spread};
 use crate::midi;
 use crate::tempo::{DEFAULT_BPM_RANGE, TempoSource};
 
@@ -223,6 +223,7 @@ impl App {
             bpm_range: DEFAULT_BPM_RANGE,
             flash: self.settings.flash,
             motion: self.settings.motion,
+            spread: self.settings.spread,
             link: self.settings.link,
             midi: self.settings.midi.clone().map(Some),
             palette: self.palette,
@@ -260,6 +261,13 @@ impl App {
         self.settings.motion = motion;
         if let Some(engine) = &self.engine {
             engine.set_motion(motion);
+        }
+    }
+
+    fn set_spread(&mut self, spread: Spread) {
+        self.settings.spread = spread;
+        if let Some(engine) = &self.engine {
+            engine.set_spread(spread);
         }
     }
 
@@ -414,6 +422,17 @@ fn motion_text(motion: Motion) -> (&'static str, &'static str) {
         Motion::Pulse => ("Pulse", "Un flash par kick"),
         Motion::Breath => ("Respiration", "Suit l'énergie"),
         Motion::BuildUp => ("Montée", "S'intensifie, blanchit"),
+    }
+}
+
+/// Titre court et explication d'une disposition des lampes.
+fn spread_text(spread: Spread) -> (&'static str, &'static str) {
+    match spread {
+        Spread::Auto => ("Auto", "Suit les phases"),
+        Spread::Together => ("Ensemble", "Toutes à chaque kick"),
+        Spread::Wave => ("Vague", "Traverse la pièce"),
+        Spread::Alternate => ("Alternance", "Gauche, puis droite"),
+        Spread::Split => ("Graves / aigus", "Kicks et ambiance"),
     }
 }
 

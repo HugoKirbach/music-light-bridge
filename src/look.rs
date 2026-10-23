@@ -3,6 +3,7 @@
 //! passe-bas qui déséquilibre fortement grave et aigu). La musique dose la luminosité : flash
 //! sur chaque kick ou note MIDI, lueur qui suit les basses.
 
+use std::f32::consts::TAU;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,13 @@ const BREATH_RELEASE: f32 = 0.9;
 const BREATH_KICK: f32 = 0.25;
 /// Fondu d'une animation à l'autre.
 const MOTION_FADE: f32 = 0.4;
+/// Vague : le flash met 120 ms à traverser la pièce.
+const WAVE_SWEEP: f32 = 0.12;
+/// Ondulation des breaks en vague : elle traverse la pièce en 4 s et creuse la respiration de 35 %.
+const RIPPLE_PERIOD: f32 = 4.0;
+const RIPPLE_DEPTH: f32 = 0.35;
+/// Lampes « aigus » (graves / aigus) : jusqu'à 70 % de luminosité avec médiums et aigus.
+const TREBLE_GLOW: f32 = 0.7;
 
 /// Animation de la lumière.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
@@ -261,21 +269,96 @@ impl PhaseTracker {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ReactiveLook {
-    pub palette: Palette,
-    pub dynamics: Dynamics,
-    pub motion: Motion,
-    phases: PhaseTracker,
-    /// Part de chaque animation (pulse, respiration, montée) dans le rendu, en fondu.
-    weights: [f32; 3],
-    /// Luminosité de la respiration.
-    breath: f32,
+/// Répartition des flashs entre les lampes de la zone, selon leur place dans la pièce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Spread {
+    /// Suit les phases : alternance sur le groove, vague en montée, ondulation en break
+    #[default]
+    Auto,
+    /// Toutes les lampes ensemble
+    Together,
+    /// Le flash traverse la pièce, d'un côté puis de l'autre
+    Wave,
+    /// Gauche et droite à tour de rôle, toutes ensemble en tête de mesure
+    Alternate,
+    /// Une lampe sur deux flashe sur les kicks, les autres respirent avec médiums et aigus
+    Split,
+}
+
+impl Spread {
+    pub const ALL: [Self; 5] = [Self::Auto, Self::Together, Self::Wave, Self::Alternate, Self::Split];
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto : alternance sur le groove, vague en montée, ondulation en break",
+            Self::Together => "Ensemble : toutes les lampes à chaque kick",
+            Self::Wave => "Vague : le flash traverse la pièce, d'un côté puis de l'autre",
+            Self::Alternate => "Alternance : gauche et droite à tour de rôle, toutes en tête de mesure",
+            Self::Split => "Graves / aigus : une lampe sur deux sur les kicks, les autres respirent",
+        }
+    }
+
+    pub fn index(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_index(index: u8) -> Self {
+        Self::ALL.get(usize::from(index)).copied().unwrap_or(Self::Auto)
+    }
+}
+
+/// Place d'un kick dans la musique : un temps quelconque, ou le premier d'une mesure (l'alternance
+/// y flashe toutes les lampes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Accent {
+    Beat,
+    Bar,
+}
+
+/// Une lampe (ou un segment de ruban) et son flash.
+#[derive(Debug, Clone, Default)]
+struct Lamp {
+    /// Place de gauche (0) à droite (1), par rang : deux lampes ne sont jamais confondues.
+    place: f32,
+    /// Moitié droite de la pièce (alternance) ; une lampe sur deux par rang (graves / aigus).
+    right: bool,
+    odd: bool,
     flash: f32,
     /// Part de blanc du flash en cours.
     punch: f32,
     /// Flash déclenché depuis le dernier rendu : il s'affiche sans décroissance.
     fresh: bool,
+    /// Flash qui part dans quelques ms (vague) : délai restant (s), force, part de blanc.
+    pending: Option<(f32, f32, f32)>,
+}
+
+impl Lamp {
+    fn fire(&mut self, strength: f32, punch: f32) {
+        if strength >= self.flash {
+            (self.flash, self.punch, self.fresh) = (strength, punch, true);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ReactiveLook {
+    pub palette: Palette,
+    pub dynamics: Dynamics,
+    pub motion: Motion,
+    pub spread: Spread,
+    phases: PhaseTracker,
+    /// Part de chaque animation (pulse, respiration, montée) dans le rendu, en fondu.
+    weights: [f32; 3],
+    /// Luminosité de la respiration, et énergie des médiums et aigus (lampes « aigus »).
+    breath: f32,
+    treble: f32,
+    lamps: Vec<Lamp>,
+    colors: Vec<Rgb>,
+    /// Kicks flashés : leur parité fait alterner gauche et droite, et le sens de la vague.
+    kicks: u64,
+    /// Horloge propre (s), pour l'ondulation des breaks.
+    time: f32,
     /// Secondes écoulées depuis le dernier kick détecté.
     since_kick: f32,
     /// Part des couleurs « temps creux » et « filtres » dans la scène, en fondu.
@@ -287,16 +370,81 @@ pub struct ReactiveLook {
     note_color: Option<Color>,
 }
 
+impl Default for ReactiveLook {
+    fn default() -> Self {
+        Self {
+            palette: Palette::default(),
+            dynamics: Dynamics::default(),
+            motion: Motion::default(),
+            spread: Spread::default(),
+            phases: PhaseTracker::default(),
+            weights: [0.0; 3],
+            breath: 0.0,
+            treble: 0.0,
+            lamps: vec![Lamp::default()],
+            colors: vec![Rgb::OFF],
+            kicks: 0,
+            time: 0.0,
+            since_kick: 0.0,
+            calm: 0.0,
+            filtered: 0.0,
+            tilt_reference: None,
+            note_color: None,
+        }
+    }
+}
+
 impl ReactiveLook {
     pub fn new(palette: Palette) -> Self {
         Self { palette, ..Self::default() }
     }
 
-    /// Flash de kick, à pleine intensité.
+    /// Place des lampes dans la pièce, de gauche à droite (x de la zone Hue, de -1 à 1), dans
+    /// l'ordre où `render_lamps` rendra leurs couleurs.
+    pub fn set_lamps(&mut self, positions: &[f32]) {
+        let count = positions.len().max(1);
+        let x = |i: usize| positions.get(i).copied().unwrap_or(0.0);
+        let mut order: Vec<usize> = (0..count).collect();
+        order.sort_by(|&a, &b| x(a).total_cmp(&x(b)).then(a.cmp(&b)));
+        self.lamps = vec![Lamp::default(); count];
+        for (rank, &i) in order.iter().enumerate() {
+            let lamp = &mut self.lamps[i];
+            lamp.place = if count > 1 { rank as f32 / (count - 1) as f32 } else { 0.0 };
+            lamp.right = count > 1 && rank >= count / 2;
+            lamp.odd = rank % 2 == 1;
+        }
+        self.colors = vec![Rgb::OFF; count];
+    }
+
+    /// Flash de kick, à pleine intensité, sans savoir où il tombe dans la mesure : un kick sur
+    /// quatre compte comme une tête de mesure.
     pub fn kick(&mut self) {
-        self.flash = 1.0;
-        self.punch = WHITE_PUNCH;
-        self.fresh = true;
+        let accent = if self.kicks.is_multiple_of(4) { Accent::Bar } else { Accent::Beat };
+        self.kick_at(accent);
+    }
+
+    /// Flash de kick, réparti entre les lampes selon la disposition et la place du kick.
+    pub fn kick_at(&mut self, accent: Accent) {
+        let spread = self.active_spread();
+        let single = self.lamps.len() == 1;
+        let parity = self.kicks % 2 == 1;
+        self.kicks += 1;
+        for lamp in &mut self.lamps {
+            match spread {
+                _ if single => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::Auto | Spread::Together => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::Wave => {
+                    let distance = if parity { 1.0 - lamp.place } else { lamp.place };
+                    lamp.pending = Some((WAVE_SWEEP * distance, 1.0, WHITE_PUNCH));
+                }
+                Spread::Alternate if accent != Accent::Beat || lamp.right == parity => {
+                    lamp.fire(1.0, WHITE_PUNCH);
+                }
+                Spread::Alternate => {}
+                Spread::Split if !lamp.odd => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::Split => {}
+            }
+        }
     }
 
     /// Un kick vient d'être détecté (flashé ou non) : la musique n'est pas dans un temps creux.
@@ -320,37 +468,64 @@ impl ReactiveLook {
         }
     }
 
-    /// Flash de note, à sa couleur (teinte dans [0, 1[) ; la lueur garde ensuite cette couleur.
+    /// Disposition effectivement jouée : celle choisie, ou celle de la phase en mode Auto.
+    pub fn active_spread(&self) -> Spread {
+        match (self.spread, self.phases.phase) {
+            (Spread::Auto, Phase::Groove) => Spread::Alternate,
+            (Spread::Auto, Phase::BuildUp | Phase::Calm) => Spread::Wave,
+            (spread, _) => spread,
+        }
+    }
+
+    /// Flash de note, à sa couleur (teinte dans [0, 1[), sur toutes les lampes ; la lueur garde
+    /// ensuite cette couleur.
     pub fn note(&mut self, hue: f32, velocity: u8) {
         let strength = NOTE_MIN_STRENGTH + (1.0 - NOTE_MIN_STRENGTH) * f32::from(velocity.min(127)) / 127.0;
         let rgb = Rgb::from_hsv(hue, 1.0, 1.0);
         self.note_color = Some([rgb.r, rgb.g, rgb.b].map(|c| f32::from(c) / f32::from(u16::MAX)));
-        if strength >= self.flash {
-            self.flash = strength;
-            self.punch = 0.0;
-            self.fresh = true;
+        for lamp in &mut self.lamps {
+            lamp.fire(strength, 0.0);
         }
     }
 
-    /// Éteint le flash en cours (kick anticipé qui n'est pas venu).
+    /// Éteint les flashs en cours (kick anticipé qui n'est pas venu).
     pub fn cancel_flash(&mut self) {
-        self.flash = 0.0;
+        for lamp in &mut self.lamps {
+            (lamp.flash, lamp.pending) = (0.0, None);
+        }
     }
 
-    /// Couleur à afficher, `dt` après le rendu précédent.
+    /// Couleur de la première lampe, `dt` après le rendu précédent.
     pub fn render(&mut self, dt: Duration, levels: Levels) -> Rgb {
+        self.render_lamps(dt, levels)[0]
+    }
+
+    /// Couleur de chaque lampe, dans l'ordre de `set_lamps`, `dt` après le rendu précédent.
+    pub fn render_lamps(&mut self, dt: Duration, levels: Levels) -> &[Rgb] {
         let dt = dt.as_secs_f32();
-        if !self.fresh {
-            self.flash *= (-dt / self.dynamics.decay.max(0.01)).exp();
-        }
-        self.fresh = false;
+        self.time += dt;
         self.since_kick += dt;
+        let decay = (-dt / self.dynamics.decay.max(0.01)).exp();
+        for lamp in &mut self.lamps {
+            if !std::mem::take(&mut lamp.fresh) {
+                lamp.flash *= decay;
+            }
+            if let Some((delay, strength, punch)) = lamp.pending {
+                if delay - dt <= 0.0 {
+                    lamp.pending = None;
+                    lamp.fire(strength, punch);
+                } else {
+                    lamp.pending = Some((delay - dt, strength, punch));
+                }
+            }
+        }
 
         let dropped = self.phases.update(dt, levels, self.since_kick <= CALM_AFTER);
         if dropped && matches!(self.motion, Motion::Auto | Motion::BuildUp) {
-            // Le drop : un éclat blanc à pleine puissance.
-            self.flash = 1.0;
-            self.punch = 1.0;
+            // Le drop : un éclat blanc à pleine puissance, partout.
+            for lamp in &mut self.lamps {
+                lamp.fire(1.0, 1.0);
+            }
         }
         let target = match self.active_motion() {
             Motion::Breath => 1,
@@ -374,33 +549,53 @@ impl ReactiveLook {
             self.filtered,
         );
         let base = self.note_color.unwrap_or(scene);
-
         let floor = self.dynamics.floor.clamp(0.0, 1.0);
-        let flash = self.flash * self.dynamics.flash.clamp(0.0, 1.0);
-
-        // Pulse : le flash part de la lueur de fond et monte, selon l'intensité choisie.
+        let intensity = self.dynamics.flash.clamp(0.0, 1.0);
         let glow = (floor + GLOW * (1.0 - floor) * levels.bass).min(1.0);
-        let pulse = (glow + (1.0 - glow) * flash, self.punch * flash);
-
-        // Respiration : suit l'énergie, un kick n'ajoute qu'une houle.
         let energy = 0.5 * levels.bass + 0.3 * levels.mid + 0.2 * levels.high;
         let breath_time = if energy > self.breath { BREATH_ATTACK } else { BREATH_RELEASE };
         self.breath = approach(self.breath, energy, dt, breath_time);
-        let breath = ((floor + (1.0 - floor) * (0.8 * self.breath + BREATH_KICK * flash)).min(1.0), 0.0);
-
-        // Montée : la lumière s'intensifie et blanchit, les flashs gagnent en force.
+        let treble = 0.5 * (levels.mid + levels.high);
+        let treble_time = if treble > self.treble { BREATH_ATTACK } else { BREATH_RELEASE };
+        self.treble = approach(self.treble, treble, dt, treble_time);
         let build = self.phases.build;
-        let tension = floor + (1.0 - floor) * (0.15 + 0.55 * build);
-        let strength = flash * (0.4 + 0.6 * build);
-        let build_up = (tension + (1.0 - tension) * strength, (self.punch * strength + 0.4 * build).min(1.0));
-
+        let spread = self.active_spread();
         let [w_pulse, w_breath, w_build] = self.weights;
         let total = (w_pulse + w_breath + w_build).max(1e-6);
-        let value = (w_pulse * pulse.0 + w_breath * breath.0 + w_build * build_up.0) / total;
-        let white = (w_pulse * pulse.1 + w_breath * breath.1 + w_build * build_up.1) / total;
-        let [r, g, b] = base.map(|c| ((c * (1.0 - white) + white) * value).clamp(0.0, 1.0));
-        let quantize = |u: f32| (u * f32::from(u16::MAX)) as u16;
-        Rgb { r: quantize(r), g: quantize(g), b: quantize(b) }
+        let several = self.lamps.len() > 1;
+
+        for (lamp, out) in self.lamps.iter().zip(&mut self.colors) {
+            let flash = lamp.flash * intensity;
+            // Pulse : le flash part de la lueur de fond et monte, selon l'intensité choisie.
+            let pulse = (glow + (1.0 - glow) * flash, lamp.punch * flash);
+            // Respiration : suit l'énergie, un kick n'ajoute qu'une houle. En vague, une
+            // ondulation lente traverse la pièce.
+            let ripple = if several && spread == Spread::Wave {
+                1.0 - RIPPLE_DEPTH * (0.5 + 0.5 * (TAU * (self.time / RIPPLE_PERIOD - lamp.place)).sin())
+            } else {
+                1.0
+            };
+            let breathing = 0.8 * self.breath * ripple + BREATH_KICK * flash;
+            let breath = ((floor + (1.0 - floor) * breathing).min(1.0), 0.0);
+            // Montée : la lumière s'intensifie et blanchit, les flashs gagnent en force.
+            let tension = floor + (1.0 - floor) * (0.15 + 0.55 * build);
+            let strength = flash * (0.4 + 0.6 * build);
+            let build_up = (tension + (1.0 - tension) * strength, (lamp.punch * strength + 0.4 * build).min(1.0));
+
+            let (mut value, mut white) = (
+                (w_pulse * pulse.0 + w_breath * breath.0 + w_build * build_up.0) / total,
+                (w_pulse * pulse.1 + w_breath * breath.1 + w_build * build_up.1) / total,
+            );
+            if several && spread == Spread::Split && lamp.odd {
+                // Lampes « aigus » : elles suivent médiums et aigus, sans flash de kick.
+                value = (floor + (1.0 - floor) * (TREBLE_GLOW * self.treble + 0.6 * flash)).min(1.0);
+                white = 0.0;
+            }
+            let [r, g, b] = base.map(|c| ((c * (1.0 - white) + white) * value).clamp(0.0, 1.0));
+            let quantize = |u: f32| (u * f32::from(u16::MAX)) as u16;
+            *out = Rgb { r: quantize(r), g: quantize(g), b: quantize(b) };
+        }
+        &self.colors
     }
 
     /// Part visée de la couleur « filtres » : écart entre l'équilibre grave/aigu actuel et
@@ -610,5 +805,70 @@ mod tests {
         let mut soft = ReactiveLook::default();
         soft.note(1.0 / 12.0, 20);
         assert!(brightness(soft.render(FRAME, Levels::default())) < u16::MAX / 2);
+    }
+
+    /// Quatre lampes de gauche à droite, données dans le désordre ; flash de 1 s pour bien voir
+    /// lesquelles sont allumées.
+    fn room(spread: Spread) -> ReactiveLook {
+        let mut look = ReactiveLook::new(PALETTE);
+        look.motion = Motion::Pulse;
+        look.spread = spread;
+        look.dynamics = Dynamics { flash: 1.0, decay: 1.0, floor: 0.0 };
+        look.set_lamps(&[0.3, -1.0, 1.0, -0.3]);
+        look
+    }
+
+    /// Lampes allumées (au-dessus de la moitié), de gauche à droite.
+    fn lit(look: &mut ReactiveLook, dt: Duration) -> [bool; 4] {
+        let quiet = Levels::default();
+        let colors = look.render_lamps(dt, quiet).to_vec();
+        // Ordre donné : 0.3, -1.0, 1.0, -0.3 ; de gauche à droite : 1, 3, 0, 2.
+        [1, 3, 0, 2].map(|i| brightness(colors[i]) > u16::MAX / 2)
+    }
+
+    #[test]
+    fn alternate_lights_left_then_right_and_every_lamp_on_the_bar() {
+        let mut look = room(Spread::Alternate);
+        look.kick_at(Accent::Bar);
+        assert_eq!(lit(&mut look, FRAME), [true; 4], "tête de mesure");
+        look.cancel_flash();
+        look.kick_at(Accent::Beat);
+        assert_eq!(lit(&mut look, FRAME), [false, false, true, true], "droite");
+        look.cancel_flash();
+        look.kick_at(Accent::Beat);
+        assert_eq!(lit(&mut look, FRAME), [true, true, false, false], "gauche");
+    }
+
+    #[test]
+    fn the_wave_crosses_the_room_then_comes_back() {
+        let mut look = room(Spread::Wave);
+        look.kick_at(Accent::Beat);
+        assert_eq!(lit(&mut look, FRAME), [true, false, false, false], "départ à gauche");
+        assert_eq!(lit(&mut look, Duration::from_millis(130)), [true; 4], "arrivée à droite");
+        look.cancel_flash();
+        look.kick_at(Accent::Beat);
+        assert_eq!(lit(&mut look, FRAME), [false, false, false, true], "retour depuis la droite");
+    }
+
+    #[test]
+    fn split_keeps_every_other_lamp_for_the_treble() {
+        let mut look = room(Spread::Split);
+        look.kick_at(Accent::Beat);
+        assert_eq!(lit(&mut look, FRAME), [true, false, true, false]);
+    }
+
+    #[test]
+    fn a_single_lamp_flashes_on_every_kick_whatever_the_spread() {
+        for spread in Spread::ALL {
+            let mut look = ReactiveLook::new(PALETTE);
+            look.motion = Motion::Pulse;
+            look.spread = spread;
+            for _ in 0..3 {
+                look.kick_at(Accent::Beat);
+                let color = look.render(FRAME, Levels::default());
+                assert!(brightness(color) > u16::MAX / 2, "{spread:?}");
+                look.cancel_flash();
+            }
+        }
     }
 }

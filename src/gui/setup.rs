@@ -6,9 +6,9 @@ use std::sync::PoisonError;
 use eframe::egui::{self, Align, Frame, Layout, Margin, Sense, Stroke, Ui, pos2, vec2};
 
 use super::theme::{self, ACCENT, BG, BOLD, BORDER, CARD, DANGER, Icon, LABEL, LIVE, MUTED, PANEL, RAISED, SEMIBOLD, TEXT};
-use super::{App, Bridge, MODES, TempoChoice, flash_text, motion_text};
+use super::{App, Bridge, MODES, TempoChoice, flash_text, motion_text, spread_text};
 use crate::audio::Backend;
-use crate::look::Motion;
+use crate::look::{Motion, Spread};
 use crate::tempo::DEFAULT_BPM_RANGE;
 
 const ASIDE_WIDTH: f32 = 360.0;
@@ -416,6 +416,21 @@ impl App {
                     let card = theme::card(ui, vec2(half, 48.0), &theme::SETUP_CARD, selected, None, title, "");
                     if card.on_hover_text(motion.description()).clicked() {
                         self.set_motion(motion);
+                    }
+                }
+            });
+        }
+
+        ui.add_space(12.0);
+        theme::section(ui, "DISPOSITION");
+        for row in Spread::ALL.chunks(2) {
+            ui.horizontal(|ui| {
+                for &spread in row {
+                    let (title, _) = spread_text(spread);
+                    let selected = self.settings.spread == spread;
+                    let card = theme::card(ui, vec2(half, 44.0), &theme::SETUP_CARD, selected, None, title, "");
+                    if card.on_hover_text(spread.description()).clicked() {
+                        self.set_spread(spread);
                     }
                 }
             });

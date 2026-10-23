@@ -26,7 +26,7 @@ use crate::hue::api;
 use crate::hue::snapshot::Restored;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
 use crate::link::LinkSession;
-use crate::look::{Dynamics, Motion, Palette, Phase, ReactiveLook};
+use crate::look::{Dynamics, Motion, Palette, Phase, ReactiveLook, Spread};
 use crate::midi::{MidiListener, Notes, note_hue};
 use crate::tempo::{MANUAL_BPM_LIMITS, TempoSource, Tracker};
 use crate::timing;
@@ -67,6 +67,8 @@ pub struct Options {
     pub palette: Palette,
     pub dynamics: Dynamics,
     pub motion: Motion,
+    /// Répartition des flashs entre les lampes.
+    pub spread: Spread,
 }
 
 /// Ce qui est connu au démarrage.
@@ -109,6 +111,9 @@ pub struct Status {
     /// Phase reconnue et animation effectivement jouée.
     pub phase: Phase,
     pub active_motion: Motion,
+    /// Disposition effectivement jouée, et couleur envoyée à chaque lampe (canaux de la zone).
+    pub active_spread: Spread,
+    pub lamp_colors: Vec<[u8; 3]>,
     /// Temps en cours dans une mesure de 4 (0 à 3), si le tempo est connu. La grille ne sait pas
     /// où tombe le premier temps : la mesure affichée peut commencer sur n'importe lequel.
     pub beat: Option<u8>,
@@ -139,6 +144,10 @@ struct Shared {
     stop: AtomicBool,
     mode: AtomicU8,
     motion: AtomicU8,
+    spread: AtomicU8,
+    active_spread: AtomicU8,
+    /// Dernière couleur de chaque lampe, `0x00RRGGBB`.
+    lamp_colors: Vec<AtomicU32>,
     /// Publiés par la boucle d'éclairage.
     phase: AtomicU8,
     active_motion: AtomicU8,
@@ -234,6 +243,11 @@ impl Engine {
         if channels.is_empty() {
             bail!("aucune lampe à piloter : coche au moins une lampe de la zone");
         }
+        // Canaux pilotés et leur place dans la pièce, de gauche à droite.
+        let lamps_in_room: Vec<(u8, f32)> = channels
+            .iter()
+            .map(|&id| (id, area.channels.iter().find(|c| c.channel_id == id).map_or(0.0, |c| c.position.x)))
+            .collect();
         let piloted: Vec<String> = lamps
             .iter()
             .filter(|lamp| !cfg.excluded_lights.contains(&lamp.id))
@@ -261,6 +275,9 @@ impl Engine {
             stop: AtomicBool::new(false),
             mode: AtomicU8::new(options.flash.index()),
             motion: AtomicU8::new(options.motion.index()),
+            spread: AtomicU8::new(options.spread.index()),
+            active_spread: AtomicU8::new(options.spread.index()),
+            lamp_colors: channels.iter().map(|_| AtomicU32::new(0)).collect(),
             phase: AtomicU8::new(Phase::default().index()),
             active_motion: AtomicU8::new(options.motion.index()),
             tracker: Mutex::new(tracker),
@@ -283,7 +300,7 @@ impl Engine {
             let (rt, features, notes, shared) = (rt.clone(), features.clone(), notes.clone(), shared.clone());
             let mut stream = stream;
             thread::Builder::new().name("lumière".into()).spawn(move || {
-                let result = light_loop(&rt, &mut stream, &channels, &features, &notes, &shared, advance);
+                let result = light_loop(&rt, &mut stream, &lamps_in_room, &features, &notes, &shared, advance);
                 shared.stop.store(true, Ordering::Relaxed);
                 (stream, result)
             })?
@@ -361,9 +378,11 @@ impl Engine {
             glitches: features.glitches(),
             input_lost: features.input_lost(),
             link_peers: self.shared.link.then(|| self.shared.link_peers.load(Ordering::Relaxed)),
-            color: [(color >> 16) as u8, (color >> 8) as u8, color as u8],
+            color: unpack(color),
             phase: Phase::from_index(self.shared.phase.load(Ordering::Relaxed)),
             active_motion: Motion::from_index(self.shared.active_motion.load(Ordering::Relaxed)),
+            active_spread: Spread::from_index(self.shared.active_spread.load(Ordering::Relaxed)),
+            lamp_colors: self.shared.lamp_colors.iter().map(|c| unpack(c.load(Ordering::Relaxed))).collect(),
             beat,
             auto_captures: self.shared.auto_captures.load(Ordering::Relaxed),
         }
@@ -371,6 +390,10 @@ impl Engine {
 
     pub fn set_motion(&self, motion: Motion) {
         self.shared.motion.store(motion.index(), Ordering::Relaxed);
+    }
+
+    pub fn set_spread(&self, spread: Spread) {
+        self.shared.spread.store(spread.index(), Ordering::Relaxed);
     }
 
     pub fn set_mode(&self, mode: FlashMode) {
@@ -555,7 +578,7 @@ impl fmt::Display for Summary {
 fn light_loop(
     rt: &Runtime,
     stream: &mut HueStream,
-    channels: &[u8],
+    lamps: &[(u8, f32)],
     features: &Features,
     notes: &Notes,
     shared: &Shared,
@@ -563,7 +586,8 @@ fn light_loop(
 ) -> Result<()> {
     let mut planner = FlashPlanner::new(shared.mode(), advance.as_secs_f64(), CONFIRM_RANGE.1);
     let mut look = ReactiveLook::new(shared.palette());
-    let mut frame: Vec<(u8, Rgb)> = channels.iter().map(|&id| (id, Rgb::OFF)).collect();
+    look.set_lamps(&lamps.iter().map(|&(_, x)| x).collect::<Vec<f32>>());
+    let mut frame: Vec<(u8, Rgb)> = lamps.iter().map(|&(id, _)| (id, Rgb::OFF)).collect();
     let mut seen = features.kicks();
     let mut seen_notes = notes.count();
     let mut last = Instant::now();
@@ -619,16 +643,20 @@ fn light_loop(
         look.palette = shared.palette();
         look.dynamics = shared.dynamics();
         look.motion = Motion::from_index(shared.motion.load(Ordering::Relaxed));
-        let color = look.render(now - last, features.levels());
+        look.spread = Spread::from_index(shared.spread.load(Ordering::Relaxed));
+        let colors = look.render_lamps(now - last, features.levels());
+        for ((_, c), (color, published)) in frame.iter_mut().zip(colors.iter().zip(&shared.lamp_colors)) {
+            *c = *color;
+            published.store(pack(*color), Ordering::Relaxed);
+        }
+        // Couleur résumée (aperçu, fond de la scène) : la plus lumineuse des lampes.
+        let brightest = colors.iter().copied().max_by_key(|c| c.r.max(c.g).max(c.b)).unwrap_or(Rgb::OFF);
+        shared.color.store(pack(brightest), Ordering::Relaxed);
         shared.phase.store(look.phase().index(), Ordering::Relaxed);
         shared.active_motion.store(look.active_motion().index(), Ordering::Relaxed);
+        shared.active_spread.store(look.active_spread().index(), Ordering::Relaxed);
         last = now;
-        for (_, c) in frame.iter_mut() {
-            *c = color;
-        }
         rt.block_on(stream.send(&frame))?;
-        let packed = u32::from(color.r >> 8) << 16 | u32::from(color.g >> 8) << 8 | u32::from(color.b >> 8);
-        shared.color.store(packed, Ordering::Relaxed);
         if let Action::Flash { reactive } = action {
             shared.flashes.fetch_add(1, Ordering::Relaxed);
             if reactive {
@@ -668,6 +696,15 @@ fn link_loop(shared: &Shared, features: &Features, bpm: Option<f64>) {
         shared.link_peers.store(beat.peers, Ordering::Relaxed);
         thread::sleep(LINK_POLL);
     }
+}
+
+/// Couleur `0x00RRGGBB` en sRGB 8 bits.
+fn unpack(color: u32) -> [u8; 3] {
+    [(color >> 16) as u8, (color >> 8) as u8, color as u8]
+}
+
+fn pack(color: Rgb) -> u32 {
+    u32::from(color.r >> 8) << 16 | u32::from(color.g >> 8) << 8 | u32::from(color.b >> 8)
 }
 
 /// Écrit les dernières secondes de l'entrée audio dans le dossier des captures, avec une fiche

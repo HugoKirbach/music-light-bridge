@@ -188,6 +188,19 @@ pub fn areas(rt: &Runtime, cfg: &mut Config, select: Option<String>) -> Result<(
             area.channels.len(),
             area.status
         );
+        // Lampes de la zone et leur place, de gauche (-1) à droite (1) : les vagues et
+        // l'alternance s'en servent.
+        let lamps = rt.block_on(api::area_lamps(cfg.bridge()?, area)).unwrap_or_default();
+        for lamp in lamps {
+            let places: Vec<String> = lamp
+                .channels
+                .iter()
+                .filter_map(|id| area.channels.iter().find(|c| c.channel_id == *id))
+                .map(|c| format!("{:+.2}", c.position.x))
+                .collect();
+            let excluded = if cfg.excluded_lights.contains(&lamp.id) { "  (écartée du live)" } else { "" };
+            println!("      {:<24} place {}{excluded}", lamp.name, places.join(" "));
+        }
     }
     Ok(())
 }

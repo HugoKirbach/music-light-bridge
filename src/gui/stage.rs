@@ -4,9 +4,9 @@
 use eframe::egui::{self, Align, Color32, CornerRadius, Frame, Layout, Margin, Sense, Stroke, Ui, pos2, vec2};
 
 use super::theme::{self, BOLD, Icon, LIVE, MONO_BOLD, SEMIBOLD, STAGE_BG};
-use super::{App, MODES, Tab, flash_text, format_bpm, motion_text};
+use super::{App, MODES, Tab, flash_text, format_bpm, motion_text, spread_text};
 use crate::engine::Status;
-use crate::look::Motion;
+use crate::look::{Motion, Spread};
 use crate::tempo::TempoSource;
 
 const DOCK_WIDTH: f32 = 1040.0;
@@ -31,7 +31,7 @@ impl App {
         egui::Panel::top("scène-haut")
             .frame(Frame::NONE.inner_margin(Margin::symmetric(28, 20)))
             .show_separator_line(false)
-            .show(ui, |ui| stop = self.stage_header(ui));
+            .show(ui, |ui| stop = self.stage_header(ui, status));
         egui::Panel::bottom("dock")
             .frame(Frame::NONE.inner_margin(Margin { left: 16, right: 16, top: 0, bottom: 24 }))
             .show_separator_line(false)
@@ -44,7 +44,7 @@ impl App {
     }
 
     /// En-tête : nom, durée du live, source captée et bouton d'arrêt ; rend vrai si on arrête.
-    fn stage_header(&self, ui: &mut Ui) -> bool {
+    fn stage_header(&self, ui: &mut Ui, status: &Status) -> bool {
         let Some(engine) = &self.engine else { return false };
         let mut stop = false;
         ui.horizontal(|ui| {
@@ -65,6 +65,9 @@ impl App {
                     .clicked();
                 let source = format!("{} · {}", engine.info.device, engine.info.area);
                 theme::pill(ui, theme::spaced(&source, theme::regular(13.0), SOFT, 0.0), theme::black(0.45), None);
+                if status.lamp_colors.len() > 1 {
+                    lamp_dots(ui, &status.lamp_colors);
+                }
             });
         });
         stop
@@ -187,6 +190,20 @@ impl App {
                 let card = theme::card(ui, size, &theme::STAGE_CARD, selected, None, title, &subtitle);
                 if card.on_hover_text(motion.description()).clicked() {
                     self.set_motion(motion);
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            let size = vec2((width - 40.0) / 5.0, 58.0);
+            for spread in Spread::ALL {
+                let (title, mut subtitle) = (spread_text(spread).0, spread_text(spread).1.to_owned());
+                if spread == Spread::Auto && self.settings.spread == Spread::Auto {
+                    subtitle = format!("En ce moment : {}", spread_text(status.active_spread).0.to_lowercase());
+                }
+                let selected = self.settings.spread == spread;
+                let card = theme::card(ui, size, &theme::STAGE_CARD, selected, None, title, &subtitle);
+                if card.on_hover_text(spread.description()).clicked() {
+                    self.set_spread(spread);
                 }
             }
         });
@@ -339,3 +356,16 @@ fn meter(ui: &mut Ui, name: &str, level: f32) {
     });
 }
 
+
+/// Couleur de chaque lampe, en pastilles (au plus 12), de droite à gauche dans l'en-tête.
+fn lamp_dots(ui: &mut Ui, colors: &[[u8; 3]]) {
+    let shown = colors.len().min(12);
+    let (rect, response) = ui.allocate_exact_size(vec2(shown as f32 * 18.0 + 16.0, 30.0), Sense::hover());
+    ui.painter().rect_filled(rect, 15.0, theme::black(0.45));
+    for (i, color) in colors.iter().take(shown).enumerate() {
+        let center = pos2(rect.left() + 17.0 + i as f32 * 18.0, rect.center().y);
+        ui.painter().circle_filled(center, 6.0, theme::rgb(*color));
+        ui.painter().circle_stroke(center, 6.0, Stroke::new(1.0, theme::white(0.25)));
+    }
+    response.on_hover_text("Couleur envoyée à chaque lampe de la zone");
+}
