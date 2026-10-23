@@ -96,6 +96,9 @@ pub struct Status {
     /// Phase reconnue et animation effectivement jouée.
     pub phase: Phase,
     pub active_motion: Motion,
+    /// Temps en cours dans une mesure de 4 (0 à 3), si le tempo est connu. La grille ne sait pas
+    /// où tombe le premier temps : la mesure affichée peut commencer sur n'importe lequel.
+    pub beat: Option<u8>,
 }
 
 /// Bilan affiché à l'arrêt.
@@ -298,13 +301,16 @@ impl Engine {
     pub fn status(&self) -> Status {
         let now = Instant::now();
         let features = &self.features;
-        let (bpm, source, offset) = {
+        let (clock, source, offset) = {
             let tracker = self.shared.tracker();
-            (tracker.clock().bpm(), tracker.source(), tracker.mean_offset())
+            (tracker.clock(), tracker.source(), tracker.mean_offset())
         };
+        let beat = clock
+            .period()
+            .map(|period| ((features.seconds(now) - clock.anchor()) / period).floor().rem_euclid(4.0) as u8);
         let color = self.shared.color.load(Ordering::Relaxed);
         Status {
-            bpm,
+            bpm: clock.bpm(),
             source,
             mode: self.shared.mode(),
             levels: features.levels(),
@@ -319,6 +325,7 @@ impl Engine {
             color: [(color >> 16) as u8, (color >> 8) as u8, color as u8],
             phase: Phase::from_index(self.shared.phase.load(Ordering::Relaxed)),
             active_motion: Motion::from_index(self.shared.active_motion.load(Ordering::Relaxed)),
+            beat,
         }
     }
 

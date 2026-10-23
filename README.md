@@ -86,22 +86,28 @@ moins de la moitié des temps ont un kick sont signalées par ⚠. Options : `--
 
 ## Fenêtre et couleurs
 
-`.\target\release\dj-bridge.exe gui` ouvre une fenêtre sans toucher aux lampes. On y règle
-l'entrée audio (pilote et entrée), le tempo (automatique, imposé ou Ableton Link), le MIDI, les
-couleurs, le mode de flash et le seuil, puis le bouton **Lancer** démarre le mode live et
-**Arrêter** le stoppe (lampes rétablies, bilan affiché). Les réglages sont enregistrés et repris
-à l'ouverture suivante. Pendant le live :
+`.\target\release\dj-bridge.exe gui` ouvre une fenêtre sans toucher aux lampes : l'écran
+**Préparer la session**. L'en-tête dit si le bridge répond et quelle zone sera pilotée. Au
+centre : la source audio (**Carte son**, avec l'appareil et le pilote, ou **Sortie du PC**), le
+tempo (**Détection auto**, **BPM imposé** ou **Ableton Link**), le MIDI, puis le bouton **Lancer
+le live**. À droite : un aperçu de la couleur principale, l'animation, les couleurs, l'allure des
+flashs, leur déclenchement (kicks anticipés, réactif, chaque temps) et le seuil des kicks. Les
+réglages sont enregistrés et repris à l'ouverture suivante ; après l'arrêt, le bilan de la
+session s'affiche sous le bouton.
 
-- au centre, le tempo reconnu en BPM, mis à jour chaque seconde, et sa source (automatique,
-  manuel ou Ableton Link) ; au-dessus, un aperçu de la couleur envoyée à la lampe et un témoin
-  qui s'allume à chaque kick ;
-- trois sélecteurs de couleur : **principale** (groove), **temps creux** (plus de kick depuis
-  1,5 s : break, passage calme) et **filtres** (passe-haut ou passe-bas : l'équilibre grave/aigu
-  s'écarte d'au moins ~14 dB de l'habitude du morceau, mémorisée sur 30 s). La lampe passe de
-  l'une à l'autre en fondu ; la luminosité de chaque couleur plafonne celle de la scène (du noir
-  en temps creux éteint la lampe pendant les breaks) ;
-- le mode de flash (kicks anticipés, réactif, chaque temps), le tempo imposé ou automatique, le
-  seuil de détection et l'enregistrement d'une capture.
+Pendant le live, la fenêtre devient une scène : le fond prend la couleur envoyée à la lampe, la
+phase reconnue s'affiche en haut, le tempo en très grand au centre (mis à jour chaque seconde,
+avec sa source) et quatre points marquent les temps de la mesure (le premier temps n'étant pas
+repéré, la mesure peut commencer sur n'importe lequel). En haut à droite, l'entrée captée et le
+bouton rond qui arrête le live (lampes rétablies). Le dock du bas garde tout réglable en onglets :
+**Animation**, **Couleurs**, **Flashs** (allure et déclenchement), **Tempo** (imposer un BPM ou
+revenir à la détection) et **Source** (entrée, niveaux, seuil, capture des 40 dernières secondes).
+
+Les trois couleurs : **Groove** (couleur principale), **Creux** (plus de kick depuis 1,5 s :
+break, passage calme) et **Filtres** (passe-haut ou passe-bas : l'équilibre grave/aigu s'écarte
+d'au moins ~14 dB de l'habitude du morceau, mémorisée sur 30 s). Un clic sur une pastille ouvre
+son nuancier. La lampe passe de l'une à l'autre en fondu ; la luminosité de chaque couleur
+plafonne celle de la scène (du noir en temps creux éteint la lampe pendant les breaks).
 
 La section **Animation** choisit le mouvement de la lumière (`--motion` dans le terminal) :
 
@@ -112,7 +118,8 @@ La section **Animation** choisit le mouvement de la lumière (`--motion` dans le
   réguliers) → pulse, **break** (plus de kick depuis 1,5 s) → respiration, **montée** (médiums et
   aigus qui enflent de plus de 4 dB sans basse, ou kicks qui roulent à plus de 4,5 par seconde)
   → montée, puis **drop** (premier gros kick après la montée) → éclat blanc et retour au pulse.
-  Le passage d'une animation à l'autre se fait en fondu ; la phase reconnue s'affiche sous le BPM.
+  Le passage d'une animation à l'autre se fait en fondu ; la phase reconnue s'affiche au-dessus
+  du BPM, et la carte Auto du dock indique l'animation jouée en ce moment.
 
 La section **Flashs** règle leur allure, avant comme pendant le live : **intensité** (jusqu'où
 monte un flash au-dessus de la lueur), **redescente** (de 40 ms, sec, à 1,5 s, très doux) et
