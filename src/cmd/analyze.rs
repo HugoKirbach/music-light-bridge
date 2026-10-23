@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -11,6 +12,7 @@ use crate::audio::Grid;
 use crate::audio::analysis::{Analyzer, KICK_DETECTION_DELAY};
 use crate::config::Config;
 use crate::flash::{Action, CONFIRM_MARGIN, FlashMode, FlashPlanner};
+use crate::look::{Palette, Phase, ReactiveLook};
 use crate::tempo::Tracker;
 use crate::wav;
 
@@ -46,12 +48,21 @@ struct Slice {
     anticipated: u32,
     reactive: u32,
     cancelled: u32,
+    /// Images (60 par seconde) passées dans chaque phase : groove, break, montée.
+    phase_frames: [u32; 3],
 }
 
 impl Slice {
     /// Nombre de temps de la tranche, si le tempo est connu.
     fn beats(&self) -> Option<usize> {
         self.bpm.map(|bpm| ((self.end - self.start) * bpm / 60.0).round() as usize)
+    }
+
+    /// Phase la plus présente de la tranche, avec sa part du temps.
+    fn phase(&self) -> String {
+        let total = self.phase_frames.iter().sum::<u32>().max(1);
+        let (index, frames) = (0u8..).zip(self.phase_frames).max_by_key(|&(_, frames)| frames).unwrap_or((0, 0));
+        format!("{} {:.0} %", Phase::from_index(index).label(), 100.0 * f64::from(frames) / f64::from(total))
     }
 
     fn is_weak(&self) -> bool {
@@ -76,7 +87,9 @@ pub fn run(cfg: &Config, options: Options) -> Result<()> {
         cfg.light_advance_ms
     );
     println!();
-    println!("  début   tempo  groove  temps avec kick  kicks hors temps  flashs anticipés/réactifs/annulés");
+    println!(
+        "  début   tempo  groove  temps avec kick  kicks hors temps  flashs anticipés/réactifs/annulés  phase"
+    );
 
     let replay = replay(rate, &samples, advance, &options);
     for slice in &replay.slices {
@@ -85,7 +98,7 @@ pub fn run(cfg: &Config, options: Options) -> Result<()> {
             _ => "-".to_owned(),
         };
         println!(
-            "  {:>4.0} s  {:>6}  {:>4.0} %  {coverage:^15}  {:^16}  {:>4} / {:>3} / {:>3}{}",
+            "  {:>4.0} s  {:>6}  {:>4.0} %  {coverage:^15}  {:^16}  {:>4} / {:>3} / {:>3}           {}{}",
             slice.start,
             slice.bpm.map_or("---.-".to_owned(), |bpm| format!("{bpm:.1}")),
             100.0 * slice.groove_samples as f64 / slice.samples.max(1) as f64,
@@ -93,6 +106,7 @@ pub fn run(cfg: &Config, options: Options) -> Result<()> {
             slice.anticipated,
             slice.reactive,
             slice.cancelled,
+            slice.phase(),
             if slice.is_weak() { "  ⚠" } else { "" }
         );
     }
@@ -124,6 +138,9 @@ fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay
     let mut arrivals: VecDeque<(f64, f64)> = VecDeque::new();
     let mut slices = Vec::new();
     let mut slice = Slice::default();
+    // Phase reconnue (break, montée…), comme la boucle d'éclairage la voit.
+    let mut look = ReactiveLook::new(Palette::default());
+    let mut next_frame = 0.0;
     let mut next_poll = 0.0;
     let mut next_update = TEMPO_UPDATE;
     for (i, &x) in samples.iter().enumerate() {
@@ -137,6 +154,7 @@ fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay
         if analyzer.process(x, grid.expectation(t)) {
             let kick = t - KICK_DETECTION_DELAY;
             tracker.on_kick(kick);
+            look.kick_detected();
             arrivals.push_back((t + ARRIVAL, kick));
             let clock = tracker.clock();
             match clock.period().zip(clock.nearest_beat(kick)) {
@@ -152,12 +170,22 @@ fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay
             let kick = if arrived { arrivals.pop_front().map(|(_, kick)| kick) } else { None };
             let clock = tracker.clock();
             match planner.poll(&clock, t, kick) {
-                Action::Flash { reactive: false } => slice.anticipated += 1,
-                Action::Flash { reactive: true } => slice.reactive += 1,
-                Action::Cancel => slice.cancelled += 1,
+                Action::Flash { reactive } => {
+                    look.kick();
+                    if reactive { slice.reactive += 1 } else { slice.anticipated += 1 }
+                }
+                Action::Cancel => {
+                    look.cancel_flash();
+                    slice.cancelled += 1;
+                }
                 Action::None => {}
             }
             next_poll = planner.next_event(&clock, t).map_or(t + FRAME, |event| event.min(t + FRAME));
+        }
+        if t >= next_frame {
+            look.render(Duration::from_secs_f64(FRAME), analyzer.levels());
+            slice.phase_frames[usize::from(look.phase().index())] += 1;
+            next_frame += FRAME;
         }
         if t >= next_update {
             tracker.update(t);

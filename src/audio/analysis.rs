@@ -50,6 +50,30 @@ const EXPECTED_REFRACTORY: f32 = 0.04;
 const OFFBEAT_STRICT: f32 = 2.0;
 const OFFBEAT_RISE_RATIO: f32 = 1.8;
 
+/// Le « clic » d'un kick : l'attaque autour de 2,5 kHz qui précède son corps grave d'une
+/// vingtaine de ms. Une note de basse n'en a pas ; un charleston, surtout plus aigu, peu.
+const CLICK_CENTER: f32 = 2500.0;
+const CLICK_Q: f32 = 1.0;
+const CLICK_ATTACK: f32 = 0.0005;
+const CLICK_RELEASE: f32 = 0.02;
+const CLICK_RISE_TIME: f32 = 0.01;
+/// L'enveloppe aiguë doit doubler d'un coup.
+const CLICK_RISE_RATIO: f32 = 2.0;
+/// Niveau minimal des aigus (-50 dBFS) pour qu'une attaque compte.
+const CLICK_FLOOR: f32 = 0.003;
+/// Le corps grave doit suivre le clic de moins de 45 ms.
+const CLICK_WINDOW: f32 = 0.045;
+/// Kick fondu dans une basse aussi forte que lui (kick-bass, sous-basse roulante) : précédé d'un
+/// clic, il n'a besoin que de 40 % de l'excès du seuil (1,6 → 1,24) et d'une montée modeste de
+/// son corps, sous 100 Hz (un clap à contretemps ne gonfle que le haut du grave).
+const FUSED_RELAX: f32 = 0.4;
+const FUSED_RISE_RATIO: f32 = 1.15;
+const BODY_CUTOFF: f32 = 100.0;
+/// Ce relâchement ne vaut que dans un mix dense : quand les pics des basses (mémorisés 1 s) ne
+/// dépassent plus leur fond de 2,2 fois. Ailleurs, les kicks se détachent assez sans lui.
+const DENSE_CONTRAST: f32 = 2.2;
+const PEAK_RELEASE: f32 = 1.0;
+
 /// Ce que l'horloge de tempo attend à l'instant d'un échantillon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expectation {
@@ -167,16 +191,25 @@ impl AutoGain {
 }
 
 /// Détecteur de kick : l'enveloppe rapide des basses monte brusquement et dépasse
-/// `threshold` fois leur niveau de fond.
+/// `threshold` fois leur niveau de fond. Dans un mix dense, juste après un clic, une montée plus
+/// faible suffit : c'est ce qui distingue un kick d'une note de basse quand les deux sont aussi
+/// forts.
 #[derive(Debug, Clone, Copy)]
 pub struct KickDetector {
     fast: Envelope,
     reference: Envelope,
     background: Envelope,
+    click: Envelope,
+    click_reference: Envelope,
+    body: Envelope,
+    body_reference: Envelope,
+    peak: Envelope,
     threshold: f32,
     since_kick: u32,
+    since_click: u32,
     refractory: u32,
     expected_refractory: u32,
+    click_window: u32,
 }
 
 impl KickDetector {
@@ -185,30 +218,52 @@ impl KickDetector {
             fast: Envelope::new(rate, KICK_ATTACK, KICK_RELEASE),
             reference: Envelope::new(rate, KICK_RISE_TIME, KICK_RELEASE),
             background: Envelope::new(rate, KICK_FLOOR_RISE, KICK_FLOOR_FALL),
+            click: Envelope::new(rate, CLICK_ATTACK, CLICK_RELEASE),
+            click_reference: Envelope::new(rate, CLICK_RISE_TIME, CLICK_RELEASE),
+            body: Envelope::new(rate, KICK_ATTACK, KICK_RELEASE),
+            body_reference: Envelope::new(rate, KICK_RISE_TIME, KICK_RELEASE),
+            peak: Envelope::new(rate, KICK_ATTACK, PEAK_RELEASE),
             threshold,
             since_kick: u32::MAX,
+            since_click: u32::MAX,
             refractory: (rate * KICK_REFRACTORY) as u32,
             expected_refractory: (rate * EXPECTED_REFRACTORY) as u32,
+            click_window: (rate * CLICK_WINDOW) as u32,
         }
     }
 
-    /// Traite un échantillon filtré dans les basses ; `true` à l'instant où un kick est détecté.
+    /// Traite un échantillon filtré dans les basses, sous 100 Hz (corps du kick) et autour de
+    /// 2,5 kHz (clic) ; `true` à l'instant où un kick est détecté.
     #[inline]
-    pub fn process(&mut self, bass: f32, expectation: Expectation) -> bool {
+    pub fn process(&mut self, bass: f32, body: f32, treble: f32, expectation: Expectation) -> bool {
         let level = self.fast.process(bass.abs());
         let reference = self.reference.process(level);
         let background = self.background.process(level);
+        let peak = self.peak.process(level);
+        let click = self.click.process(treble.abs());
+        let click_reference = self.click_reference.process(click);
+        let body = self.body.process(body.abs());
+        let body_reference = self.body_reference.process(body);
         self.since_kick = self.since_kick.saturating_add(1);
+        self.since_click = self.since_click.saturating_add(1);
+        if click > CLICK_FLOOR && click > click_reference * CLICK_RISE_RATIO {
+            self.since_click = 0;
+        }
         let excess = self.threshold - 1.0;
         let (threshold, rise, refractory) = match expectation {
             Expectation::Free => (self.threshold, KICK_RISE_RATIO, self.refractory),
             Expectation::Kick => (1.0 + excess * EXPECTED_RELAX, EXPECTED_RISE_RATIO, self.expected_refractory),
             Expectation::Offbeat => (1.0 + excess * OFFBEAT_STRICT, OFFBEAT_RISE_RATIO, self.refractory),
         };
+        // Loin d'un temps en plein groove, le clic n'excuse rien : charleston et basse y tombent.
+        let fused = expectation != Expectation::Offbeat
+            && peak < background * DENSE_CONTRAST
+            && self.since_click <= self.click_window
+            && body > body_reference * FUSED_RISE_RATIO
+            && level > background * (1.0 + excess * FUSED_RELAX);
         let kick = self.since_kick >= refractory
             && level > KICK_FLOOR
-            && level > reference * rise
-            && level > background * threshold;
+            && (fused || (level > reference * rise && level > background * threshold));
         if kick {
             self.since_kick = 0;
         }
@@ -246,6 +301,8 @@ pub struct Analyzer {
     bass_filter: Biquad,
     mid_filter: Biquad,
     high_filter: Biquad,
+    click_filter: Biquad,
+    body_filter: Biquad,
     envelopes: [Envelope; 3],
     gains: [AutoGain; 3],
     /// Enveloppes brutes et normalisées des trois bandes, au dernier échantillon.
@@ -260,6 +317,8 @@ impl Analyzer {
             bass_filter: Biquad::low_pass(rate, BASS_CUTOFF, FRAC_1_SQRT_2),
             mid_filter: Biquad::band_pass(rate, MID_CENTER, MID_Q),
             high_filter: Biquad::high_pass(rate, HIGH_CUTOFF, FRAC_1_SQRT_2),
+            click_filter: Biquad::band_pass(rate, CLICK_CENTER, CLICK_Q),
+            body_filter: Biquad::low_pass(rate, BODY_CUTOFF, FRAC_1_SQRT_2),
             envelopes: [Envelope::new(rate, BAND_ATTACK, BAND_RELEASE); 3],
             gains: [AutoGain::new(rate, GAIN_MEMORY); 3],
             raw: [0.0; 3],
@@ -290,14 +349,16 @@ impl Analyzer {
         let bands = [bass, self.mid_filter.process(x), self.high_filter.process(x)];
         self.raw = std::array::from_fn(|i| self.envelopes[i].process(bands[i].abs()));
         self.normalized = std::array::from_fn(|i| self.gains[i].process(self.raw[i]));
-        self.kick.process(bass, expectation)
+        let treble = self.click_filter.process(x);
+        let body = self.body_filter.process(x);
+        self.kick.process(bass, body, treble, expectation)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::synth::{Noise, RATE, bass_note, hat_envelope, kick};
+    use crate::audio::synth::{Noise, RATE, bass_note, click, hat_envelope, kick};
 
     /// Ligne de basse tenue à 55 Hz : (début en s, amplitude).
     type Bassline = Option<(f32, f32)>;
@@ -420,6 +481,43 @@ mod tests {
         assert_eq!(guided, (kicks.len(), 0));
     }
 
+
+    /// Kick-bass : la sous-basse est aussi forte que les kicks et le grave ne fait que gonfler
+    /// de 35 % en 20 ms à chaque kick, comme sur un enregistrement où les kicks décrochaient.
+    /// Une note de basse gonfle pareil : seul le clic du kick (autour de 2,5 kHz) les distingue.
+    #[test]
+    fn click_reveals_kicks_fused_with_the_bass() {
+        let beat = 60.0 / 152.0;
+        let swells: Vec<f32> = (0..24).map(|n| 0.5 + beat / 2.0 * n as f32).collect();
+        // Kicks sur les temps, notes de basse entre eux.
+        let kicks: Vec<f32> = swells.iter().copied().step_by(2).collect();
+        let swell = |t: f32| match t {
+            t if !(0.0..0.15).contains(&t) => 0.0,
+            t if t < 0.02 => 0.35 * t / 0.02,
+            t => 0.35 * (1.0 - (t - 0.02) / 0.13),
+        };
+        let signal = |clicks: bool| -> Vec<f32> {
+            (0..(6.0 * RATE) as usize)
+                .map(|i| {
+                    let t = i as f32 / RATE;
+                    let level = 0.25 * (1.0 + swells.iter().map(|&s| swell(t - s)).sum::<f32>());
+                    let attack: f32 = if clicks { kicks.iter().map(|&k| click(t - k + 0.02)).sum() } else { 0.0 };
+                    level * (TAU * 55.0 * t).sin() + attack
+                })
+                .collect()
+        };
+        let report = |found: &[f32]| {
+            let near = |h: f32, k: f32| (0.0..0.04).contains(&(h - k));
+            let caught = kicks.iter().filter(|&&k| found.iter().any(|&h| near(h, k))).count();
+            let wrong = found.iter().filter(|&&h| h > WARM_UP && !kicks.iter().any(|&k| near(h, k))).count();
+            (caught, wrong)
+        };
+        let blind = report(&detections(&signal(false)));
+        let clicked = report(&detections(&signal(true)));
+        println!("kick-bass (kicks, fausses détections) : sans clic {blind:?}, avec {clicked:?}");
+        assert!(blind.0 <= 2, "sans clic, les gonflements ne sont pas des kicks : {blind:?}");
+        assert_eq!(clicked, (kicks.len(), 0));
+    }
     #[test]
     fn bands_follow_their_frequencies() {
         let tone = |freq: f32| -> Levels {

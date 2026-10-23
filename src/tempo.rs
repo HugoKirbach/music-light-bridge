@@ -14,6 +14,8 @@ pub const MANUAL_BPM_LIMITS: (f64, f64) = (40.0, 300.0);
 
 /// Kicks pris en compte : ~40 temps à 155 BPM.
 const WINDOW: f64 = 16.0;
+/// Fenêtre courte, consultée quand la longue ne confirme plus le tempo de l'horloge.
+const RECENT_WINDOW: f64 = 6.0;
 const MIN_ONSETS: usize = 8;
 /// Écart maximal entre deux kicks comparés pour l'estimation.
 const MAX_PAIR_SPAN: f64 = 2.5;
@@ -260,7 +262,19 @@ impl Tracker {
         }
         let onsets = self.onsets.make_contiguous();
         let estimate = match self.source {
-            TempoSource::Auto => estimate(onsets, self.bpm_range).filter(|e| e.confidence >= MIN_CONFIDENCE),
+            TempoSource::Auto => {
+                let confident = |e: &TempoEstimate| e.confidence >= MIN_CONFIDENCE;
+                // Les kicks du morceau précédent restent 16 s dans la fenêtre et y confirmeraient
+                // l'ancien tempo : un tempo différent trouvé sur les dernières secondes seules
+                // l'emporte (il devra encore se confirmer, à chaque mise à jour).
+                let recent_start = onsets.partition_point(|&t| t < now - RECENT_WINDOW);
+                let differs = |e: &TempoEstimate| {
+                    self.clock.period.is_some_and(|p| (60.0 / e.bpm - p).abs() / p >= TEMPO_JUMP)
+                };
+                estimate(&onsets[recent_start..], self.bpm_range)
+                    .filter(|e| confident(e) && differs(e))
+                    .or_else(|| estimate(onsets, self.bpm_range).filter(confident))
+            }
             TempoSource::Manual | TempoSource::Link => None,
         };
         if let Some(estimate) = estimate {
@@ -449,6 +463,26 @@ mod tests {
         run(&mut tracker, &onsets, 32.0, 60.0);
         let later = tracker.clock().bpm().unwrap();
         assert!((later - 140.0).abs() < 0.2, "{later}");
+    }
+
+    /// Changement de morceau : 188 BPM puis 152, avec un kick sur trois perdu dans le second. Les
+    /// kicks du premier restent 16 s dans la fenêtre ; les dernières secondes suffisent à trouver
+    /// le nouveau tempo en moins de 10 s.
+    #[test]
+    fn a_new_tempo_wins_before_the_old_kicks_leave_the_window() {
+        let mut onsets = kicks(0.0, 15.0, 1.0, |_| 188.0, 0.002);
+        let switch = *onsets.last().unwrap() + 60.0 / 188.0;
+        let second: Vec<f64> = kicks(switch, 45.0, 1.0, |_| 152.0, 0.003)
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| i % 3 != 2)
+            .map(|(_, t)| t)
+            .collect();
+        onsets.extend(second);
+        let mut tracker = Tracker::new(DEFAULT_BPM_RANGE);
+        run(&mut tracker, &onsets, 0.0, switch + 9.0);
+        let found = tracker.clock().bpm().unwrap();
+        assert!((found - 152.0).abs() < 0.5, "{found}");
     }
 
     #[test]

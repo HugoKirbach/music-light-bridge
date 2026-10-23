@@ -38,3 +38,11 @@ impl Noise {
         self.0 as f32 / u32::MAX as f32 * 2.0 - 1.0
     }
 }
+
+/// Clic d'attaque d'un kick : salve brève autour de 2,5 kHz.
+pub fn click(t: f32) -> f32 {
+    if !(0.0..0.03).contains(&t) {
+        return 0.0;
+    }
+    0.25 * (-t / 0.004).exp() * (TAU * 2500.0 * t).sin()
+}

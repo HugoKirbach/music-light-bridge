@@ -76,11 +76,23 @@ temps : près d'un temps, ses seuils se relâchent (kick noyé dans une basse de
 temps, ils se durcissent (une note de basse ne passe pas pour un kick). Dès qu'un kick manque,
 le groove tombe et les seuils redeviennent normaux, pour les breaks et les montées.
 
+Dans un mix dense (kick-bass, sous-basse roulante aussi forte que les kicks), le grave ne fait
+plus que gonfler de 30 à 50 % à chaque kick, comme à chaque note de basse. Ce qui trahit alors le
+kick, c'est son clic : l'attaque autour de 2,5 kHz qui précède son corps d'une vingtaine de ms.
+Un gonflement du grave sous 100 Hz juste après un clic compte comme un kick, même sans groove
+établi ; hors d'un mix dense, ou loin d'un temps en plein groove, cette règle ne joue pas.
+
+Au changement de morceau, les kicks du précédent restent un moment en mémoire : si les 6
+dernières secondes donnent un autre tempo, il est adopté après 4 confirmations (une par seconde),
+sans attendre que les anciens kicks soient oubliés.
+
 ### Analyser un passage
 
 `.\target\release\dj-bridge.exe analyze <capture.wav>` rejoue l'enregistrement dans la même
 chaîne que le mode live et affiche, par tranches de 4 s : tempo, part du temps en groove, temps
-marqués par un kick, kicks hors temps et flashs (anticipés / réactifs / annulés). Les tranches où
+marqués par un kick, kicks hors temps, flashs (anticipés / réactifs / annulés) et phase reconnue
+la plus présente (groove, break, montée : en mode Auto, un « break » donne la couleur des temps
+creux et la respiration, sans flash). Les tranches où
 moins de la moitié des temps ont un kick sont signalées par ⚠. Options : `--bpm`, `--threshold`,
 `--slice` (durée des tranches).
 
