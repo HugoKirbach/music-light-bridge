@@ -466,6 +466,7 @@ impl App {
                 }
             });
         }
+        self.director_chip(ui);
 
         ui.add_space(12.0);
         theme::section(ui, "COULEURS");

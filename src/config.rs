@@ -58,6 +58,8 @@ pub struct LiveSettings {
     pub flash: FlashMode,
     pub motion: Motion,
     pub spread: Spread,
+    /// Régisseur : la disposition Auto et la teinte varient d'une section à l'autre.
+    pub director: bool,
     pub threshold: f32,
 }
 
@@ -72,6 +74,7 @@ impl Default for LiveSettings {
             flash: FlashMode::Kicks,
             motion: Motion::Auto,
             spread: Spread::Auto,
+            director: true,
             threshold: DEFAULT_THRESHOLD,
         }
     }

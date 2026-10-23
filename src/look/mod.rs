@@ -11,11 +11,13 @@ use serde::{Deserialize, Serialize};
 use crate::audio::analysis::Levels;
 use crate::hue::stream::Rgb;
 
+mod director;
 mod lamps;
 mod phases;
 
 pub use lamps::{Accent, Spread};
 pub use phases::{Phase, Pulse};
+use director::Director;
 use lamps::Lamp;
 use phases::PhaseTracker;
 
@@ -175,6 +177,8 @@ pub struct ReactiveLook {
     /// déjà montré d'avance, qui ne se rejoue pas à sa confirmation.
     drop_advance: f32,
     drop_shown: bool,
+    /// Régisseur de la disposition Auto.
+    director: Director,
 }
 
 impl Default for ReactiveLook {
@@ -200,6 +204,7 @@ impl Default for ReactiveLook {
             note_color: None,
             drop_advance: 0.0,
             drop_shown: false,
+            director: Director::default(),
         }
     }
 }
@@ -235,6 +240,9 @@ impl ReactiveLook {
 
     /// Flash de kick, réparti entre les lampes selon la disposition et la place du kick.
     pub fn kick_at(&mut self, accent: Accent) {
+        if self.phases.phase == Phase::Groove {
+            self.director.kick(accent == Accent::Phrase);
+        }
         let spread = self.active_spread();
         let single = self.lamps.len() == 1;
         let parity = self.kicks % 2 == 1;
@@ -304,7 +312,7 @@ impl ReactiveLook {
     /// Disposition effectivement jouée : celle choisie, ou celle de la phase en mode Auto.
     pub fn active_spread(&self) -> Spread {
         match (self.spread, self.phases.phase) {
-            (Spread::Auto, Phase::Groove) => Spread::Alternate,
+            (Spread::Auto, Phase::Groove) => self.director.groove_spread(),
             (Spread::Auto, Phase::BuildUp | Phase::Calm) => Spread::Wave,
             (spread, _) => spread,
         }
@@ -319,6 +327,12 @@ impl ReactiveLook {
         for lamp in &mut self.lamps {
             lamp.fire(strength, 0.0);
         }
+    }
+
+    /// Régisseur : en disposition Auto, la mise en scène et la teinte varient d'une section à
+    /// l'autre.
+    pub fn set_director(&mut self, on: bool) {
+        self.director.enabled = on;
     }
 
     /// Avance des lampes (s), dont le drop prévu d'une montée s'allume d'autant plus tôt.
@@ -372,7 +386,12 @@ impl ReactiveLook {
             self.fire_drop();
             self.drop_shown = true;
         }
+        let before = self.phases.phase;
         let dropped = self.phases.update(dt, levels, pulse);
+        // Le régisseur ouvre une nouvelle section au drop et au retour du groove.
+        if dropped || (before != Phase::Groove && self.phases.phase == Phase::Groove) {
+            self.director.next_section();
+        }
         if std::mem::take(&mut self.phases.false_drop) && std::mem::take(&mut self.drop_shown) {
             self.cancel_flash();
         }
@@ -395,16 +414,17 @@ impl ReactiveLook {
         let filtered = self.filter_amount(levels.tilt, dt);
         self.calm = approach(self.calm, calm, dt, SCENE_FADE);
         self.filtered = approach(self.filtered, filtered, dt, SCENE_FADE);
-        let scene = mix(
+        let scene = self.director.tint(mix(
             mix(color(self.palette.primary), color(self.palette.calm), self.calm),
             color(self.palette.filtered),
             self.filtered,
-        );
+        ));
         let base = self.note_color.unwrap_or(scene);
         let floor = self.dynamics.floor.clamp(0.0, 1.0);
         let intensity = self.dynamics.flash.clamp(0.0, 1.0);
         let glow = (floor + GLOW * (1.0 - floor) * levels.bass).min(1.0);
         let energy = 0.5 * levels.bass + 0.3 * levels.mid + 0.2 * levels.high;
+        self.director.update(dt, energy);
         let breath_time = if energy > self.breath { BREATH_ATTACK } else { BREATH_RELEASE };
         self.breath = approach(self.breath, energy, dt, breath_time);
         let treble = 0.5 * (levels.mid + levels.high);
@@ -505,6 +525,8 @@ mod tests {
     #[test]
     fn the_groove_shows_the_primary_color_and_a_break_the_calm_one() {
         let mut look = ReactiveLook::new(PALETTE);
+        // Sans les variantes de teinte du régisseur, pour juger les couleurs choisies.
+        look.set_director(false);
         let groove = play(&mut look, 5.0, 1.0, true);
         assert!(groove.r > 10 * groove.b.max(groove.g).max(1), "groove : {groove:?}");
         let calm = play(&mut look, 4.0, 1.0, false);

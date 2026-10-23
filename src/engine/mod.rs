@@ -79,6 +79,8 @@ pub struct Options {
     pub motion: Motion,
     /// Répartition des flashs entre les lampes.
     pub spread: Spread,
+    /// Régisseur de la disposition Auto.
+    pub director: bool,
 }
 
 /// Ce qui est connu au démarrage.
@@ -161,6 +163,7 @@ struct Shared {
     mode: AtomicU8,
     motion: AtomicU8,
     spread: AtomicU8,
+    director: AtomicBool,
     active_spread: AtomicU8,
     /// Dernière couleur de chaque lampe, `0x00RRGGBB`.
     lamp_colors: Vec<AtomicU32>,
@@ -327,6 +330,7 @@ impl Engine {
             mode: AtomicU8::new(options.flash.index()),
             motion: AtomicU8::new(options.motion.index()),
             spread: AtomicU8::new(options.spread.index()),
+            director: AtomicBool::new(options.director),
             active_spread: AtomicU8::new(options.spread.index()),
             lamp_colors: channels.iter().map(|_| AtomicU32::new(0)).collect(),
             lamp_lags: channel_lags.iter().map(|lag| AtomicU32::new(lag.to_bits())).collect(),
@@ -459,6 +463,10 @@ impl Engine {
 
     pub fn set_spread(&self, spread: Spread) {
         self.shared.spread.store(spread.index(), Ordering::Relaxed);
+    }
+
+    pub fn set_director(&self, on: bool) {
+        self.shared.director.store(on, Ordering::Relaxed);
     }
 
     /// Lampes pilotées : identifiant, nom et retard propre (ms).

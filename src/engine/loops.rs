@@ -100,6 +100,7 @@ pub(super) fn light_loop(
         look.dynamics = shared.dynamics();
         look.motion = Motion::from_index(shared.motion.load(Ordering::Relaxed));
         look.spread = Spread::from_index(shared.spread.load(Ordering::Relaxed));
+        look.set_director(shared.director.load(Ordering::Relaxed));
         let mut colors = look.render_lamps(now - last, features.levels()).to_vec();
         if shared.sync_test.load(Ordering::Relaxed) {
             // Blanc sur chaque temps, tel qu'il sonnera quand les lampes montreront l'image.

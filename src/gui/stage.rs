@@ -222,6 +222,7 @@ impl App {
                 }
             }
         });
+        self.director_chip(ui);
     }
 
     fn colors_tab(&mut self, ui: &mut Ui) {

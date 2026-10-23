@@ -142,6 +142,9 @@ struct LiveArgs {
     /// alternate (alternance gauche/droite) ou split (graves / aigus)
     #[arg(long, value_enum, default_value_t = look::Spread::Auto)]
     spread: look::Spread,
+    /// Sans régisseur : en disposition auto, le groove alterne toujours, dans la couleur choisie
+    #[arg(long)]
+    no_director: bool,
     /// Rejoint la session Ableton Link : tempo et phase viennent de la session
     #[arg(long)]
     link: bool,
@@ -166,6 +169,7 @@ impl LiveArgs {
             dynamics,
             motion: self.motion,
             spread: self.spread,
+            director: !self.no_director,
         }
     }
 }

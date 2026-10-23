@@ -225,6 +225,7 @@ impl App {
             flash: self.settings.flash,
             motion: self.settings.motion,
             spread: self.settings.spread,
+            director: self.settings.director,
             link: self.settings.link,
             midi: self.settings.midi.clone().map(Some),
             palette: self.palette,
@@ -269,6 +270,21 @@ impl App {
         self.settings.spread = spread;
         if let Some(engine) = &self.engine {
             engine.set_spread(spread);
+        }
+    }
+
+    fn set_director(&mut self, on: bool) {
+        self.settings.director = on;
+        if let Some(engine) = &self.engine {
+            engine.set_director(on);
+        }
+    }
+
+    /// Case du régisseur, sous les dispositions.
+    fn director_chip(&mut self, ui: &mut egui::Ui) {
+        let hint = "En disposition Auto, la mise en scène du groove et la teinte varient d'une section à l'autre selon l'énergie du set";
+        if theme::chip(ui, "Régisseur auto", self.settings.director).on_hover_text(hint).clicked() {
+            self.set_director(!self.settings.director);
         }
     }
 
