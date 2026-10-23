@@ -491,5 +491,9 @@ impl App {
         }
         ui.add_space(4.0);
         self.threshold_slider(ui, MUTED);
+
+        ui.add_space(12.0);
+        theme::section(ui, "SCÈNES");
+        self.presets_panel(ui, width, 2, &theme::SETUP_CARD, LABEL);
     }
 }

@@ -91,7 +91,9 @@ pub(super) fn light_loop(
             Action::Cancel => look.cancel_flash(),
             Action::None => {}
         }
-        if let Some((pitch, velocity)) = note {
+        if let Some(preset) = note.and_then(|(pitch, _)| shared.preset_for(pitch)) {
+            shared.apply(&preset);
+        } else if let Some((pitch, velocity)) = note {
             look.note(note_hue(pitch), velocity);
             shared.note_flashes.fetch_add(1, Ordering::Relaxed);
             shared.last_note.store(features.seconds(now).to_bits(), Ordering::Relaxed);

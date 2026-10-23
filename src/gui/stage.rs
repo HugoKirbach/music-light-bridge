@@ -10,10 +10,11 @@ use crate::look::{Motion, Spread};
 use crate::tempo::TempoSource;
 
 const DOCK_WIDTH: f32 = 1040.0;
-const TABS: [(Tab, &str); 6] = [
+const TABS: [(Tab, &str); 7] = [
     (Tab::Motion, "Animation"),
     (Tab::Colors, "Couleurs"),
     (Tab::Flashes, "Flashs"),
+    (Tab::Presets, "Scènes"),
     (Tab::Tempo, "Tempo"),
     (Tab::Lamps, "Lampes"),
     (Tab::Source, "Source"),
@@ -186,6 +187,7 @@ impl App {
                             Tab::Motion => self.motion_tab(ui, width - 36.0, status),
                             Tab::Colors => self.colors_tab(ui),
                             Tab::Flashes => self.flashes_tab(ui, width - 36.0),
+                            Tab::Presets => self.presets_panel(ui, width - 36.0, 5, &theme::STAGE_CARD, DIM),
                             Tab::Tempo => self.tempo_tab(ui, status),
                             Tab::Lamps => self.lamps_tab(ui),
                             Tab::Source => self.source_tab(ui, status),

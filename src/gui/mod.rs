@@ -2,6 +2,7 @@
 //! couleurs, animation) ; pendant le live, une scène plein écran qui prend la couleur de la lampe,
 //! le tempo en très grand et les réglages qui restent modifiables dans un dock en bas.
 
+mod presets;
 mod setup;
 mod stage;
 mod theme;
@@ -73,6 +74,7 @@ enum Tab {
     Motion,
     Colors,
     Flashes,
+    Presets,
     Tempo,
     Lamps,
     Source,
@@ -108,6 +110,11 @@ struct App {
     summary: Option<String>,
     /// Captures automatiques déjà signalées pendant ce live.
     auto_captures_seen: u32,
+    /// Scène rappelée en dernier, nom et note saisis pour en enregistrer une, rappels déjà suivis.
+    active_preset: Option<String>,
+    preset_name: String,
+    preset_note: String,
+    presets_seen: u32,
 }
 
 impl App {
@@ -143,6 +150,10 @@ impl App {
             message: None,
             summary: None,
             auto_captures_seen: 0,
+            active_preset: None,
+            preset_name: String::new(),
+            preset_note: String::new(),
+            presets_seen: 0,
         };
         app.refresh_devices();
         app
@@ -239,6 +250,7 @@ impl App {
                 self.shown_bpm = None;
                 self.summary = None;
                 self.auto_captures_seen = 0;
+                self.presets_seen = 0;
                 self.message = None;
                 self.engine = Some(engine);
             }
@@ -417,6 +429,7 @@ impl eframe::App for App {
                     self.shown_source = status.source;
                     self.next_refresh = Instant::now() + BPM_REFRESH;
                 }
+                self.follow_presets(&status);
                 if status.auto_captures > self.auto_captures_seen {
                     self.auto_captures_seen = status.auto_captures;
                     self.show("Le groove a décroché : capture automatique enregistrée pour le banc d'essai.");

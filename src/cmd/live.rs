@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use crossterm::event::{KeyCode, KeyEvent};
 use tokio::runtime::Runtime;
 
@@ -35,6 +35,7 @@ pub fn run(rt: Arc<Runtime>, cfg: &Config, options: Options) -> Result<()> {
     println!("  a        BPM automatique                       m       mode : kicks → réactif → temps");
     println!("  ↑ / ↓    seuil de détection des kicks (plus haut = moins de kicks)");
     println!("  r        enregistre les 40 dernières secondes, pour `dj-bridge analyze`");
+    println!("  1 à 9    rappelle une scène enregistrée dans la fenêtre");
     println!("  Échap    quitte");
     println!();
     println!("Ligne d'état : B/M/A = basses, médiums, aigus ; ● = kick ; ♪ = note MIDI ;");
@@ -143,6 +144,10 @@ fn handle_key(engine: &Engine, key: &KeyEvent) -> Result<KeyOutcome> {
         }
         KeyCode::Char('a') => engine.set_auto()?,
         KeyCode::Char('m') => engine.set_mode(engine.status().mode.next()),
+        KeyCode::Char(digit @ '1'..='9') => {
+            let index = usize::from(digit as u8 - b'1');
+            engine.recall_preset(index).ok_or_else(|| anyhow!("pas de scène n° {}", index + 1))?;
+        }
         _ => {}
     }
     Ok(KeyOutcome::Nothing)
@@ -168,13 +173,14 @@ fn status_text(status: &Status) -> String {
         0 => String::new(),
         n => format!(" ●rec{n}"),
     };
+    let preset = status.preset.as_ref().map_or(String::new(), |name| format!(" ★{name}"));
     let phase = match status.build {
         Some(build) => format!("{} {build}%", status.phase.label()),
         None => status.phase.label().to_owned(),
     };
     let levels = status.levels;
     format!(
-        "B{} M{} A{} {}{} ♩{tempo} {source} {} {phase} s{:.2} {metric}{alert}{auto}",
+        "B{} M{} A{} {}{} ♩{tempo} {source} {} {phase} s{:.2} {metric}{preset}{alert}{auto}",
         tui::meter(levels.bass, METER_WIDTH),
         tui::meter(levels.mid, METER_WIDTH),
         tui::meter(levels.high, METER_WIDTH),

@@ -20,7 +20,7 @@ use tokio::runtime::Runtime;
 use crate::audio::analysis::{KICK_DETECTION_DELAY, Levels};
 use crate::audio::capture::Capture;
 use crate::audio::{AudioInput, Backend, CAPTURE_SECONDS, Features, Grid};
-use crate::config::Config;
+use crate::config::{Config, Preset};
 use crate::flash::{Action, CONFIRM_MARGIN, FlashMode, FlashPlanner};
 use crate::hue::api;
 use crate::hue::snapshot::Restored;
@@ -123,6 +123,9 @@ pub struct Status {
     pub input_lost: bool,
     /// Le bridge ne répond plus : le flux tente de se rouvrir.
     pub bridge_lost: bool,
+    /// Dernière scène rappelée, et nombre de rappels (une note MIDI peut en rappeler une).
+    pub preset: Option<String>,
+    pub presets_applied: u32,
     /// Autres participants de la session Link, si elle est rejointe.
     pub link_peers: Option<u64>,
     /// Couleur envoyée à la lampe, en sRGB 8 bits.
@@ -199,6 +202,10 @@ struct Shared {
     audio_restarts: AtomicU32,
     bridge_restarts: AtomicU32,
     bridge_lost: AtomicBool,
+    /// Scènes rappelables par note MIDI, et dernière rappelée (nom, nombre de rappels).
+    presets: Mutex<Vec<Preset>>,
+    preset: Mutex<Option<String>>,
+    presets_applied: AtomicU32,
     note_flashes: AtomicU32,
     /// Instant (s, horloge commune) de la dernière note, en bits de `f64`.
     last_note: AtomicU64,
@@ -229,6 +236,23 @@ impl Shared {
 
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Rappelle une scène : couleurs, flashs, animation, disposition et régisseur.
+    fn apply(&self, preset: &Preset) {
+        *lock(&self.palette) = preset.palette;
+        *lock(&self.dynamics) = preset.dynamics;
+        self.motion.store(preset.motion.index(), Ordering::Relaxed);
+        self.spread.store(preset.spread.index(), Ordering::Relaxed);
+        self.mode.store(preset.flash.index(), Ordering::Relaxed);
+        self.director.store(preset.director, Ordering::Relaxed);
+        *lock(&self.preset) = Some(preset.name.clone());
+        self.presets_applied.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Scène rappelée par la note MIDI `note`, s'il y en a une.
+    fn preset_for(&self, note: u8) -> Option<Preset> {
+        lock(&self.presets).iter().find(|preset| preset.note == Some(note)).cloned()
     }
 
     fn record_reaction(&self, reaction: Duration) {
@@ -366,6 +390,9 @@ impl Engine {
             audio_restarts: AtomicU32::new(0),
             bridge_restarts: AtomicU32::new(0),
             bridge_lost: AtomicBool::new(false),
+            presets: Mutex::new(cfg.presets.clone()),
+            preset: Mutex::new(None),
+            presets_applied: AtomicU32::new(0),
             note_flashes: AtomicU32::new(0),
             last_note: AtomicU64::new(f64::NEG_INFINITY.to_bits()),
             color: AtomicU32::new(0),
@@ -465,6 +492,8 @@ impl Engine {
             glitches: features.glitches(),
             input_lost: self.audio_lost(),
             bridge_lost: self.shared.bridge_lost.load(Ordering::Relaxed),
+            preset: lock(&self.shared.preset).clone(),
+            presets_applied: self.shared.presets_applied.load(Ordering::Relaxed),
             link_peers: self.shared.link.then(|| self.shared.link_peers.load(Ordering::Relaxed)),
             color: unpack(color),
             phase: Phase::from_index(self.shared.phase.load(Ordering::Relaxed)),
@@ -560,6 +589,23 @@ impl Engine {
 
     pub fn set_dynamics(&self, dynamics: Dynamics) {
         *self.shared.dynamics.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = dynamics;
+    }
+
+    /// Rappelle une scène.
+    pub fn apply_preset(&self, preset: &Preset) {
+        self.shared.apply(preset);
+    }
+
+    /// Rappelle la scène n° `index` (à partir de 0) ; rend son nom.
+    pub fn recall_preset(&self, index: usize) -> Option<String> {
+        let preset = lock(&self.shared.presets).get(index).cloned()?;
+        self.shared.apply(&preset);
+        Some(preset.name)
+    }
+
+    /// Scènes rappelables par note MIDI.
+    pub fn set_presets(&self, presets: Vec<Preset>) {
+        *lock(&self.shared.presets) = presets;
     }
 
     /// Impose un tempo (le phase reste calée sur les kicks).
@@ -731,3 +777,8 @@ impl fmt::Display for Summary {
     }
 }
 
+
+/// Verrou qui survit à un fil qui a paniqué en le tenant.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
