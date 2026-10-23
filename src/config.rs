@@ -34,6 +34,10 @@ pub struct Config {
     /// état pendant le flux. Une lampe ajoutée à la zone est donc pilotée par défaut.
     #[serde(default)]
     pub excluded_lights: Vec<String>,
+    /// Place de chaque lampe dans la pièce choisie dans la fenêtre (identifiant CLIP v2 → x de -1 à
+    /// gauche à 1 à droite) ; à défaut, celle de la zone Hue.
+    #[serde(default)]
+    pub lamp_positions: std::collections::BTreeMap<String, f32>,
 }
 
 /// Réglages du mode live choisis dans la fenêtre avant de lancer, repris à l'ouverture suivante.

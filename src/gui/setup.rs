@@ -279,7 +279,38 @@ impl App {
             }
         });
         let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded_lights.contains(&lamp.id)).count();
+        // Place des lampes pilotées dans la pièce : celle choisie ici, sinon celle de la zone Hue.
+        let placed: Vec<(String, String, f32)> = lamps
+            .iter()
+            .filter(|lamp| !self.cfg.excluded_lights.contains(&lamp.id))
+            .map(|lamp| (lamp.id.clone(), lamp.name.clone(), self.cfg.lamp_positions.get(&lamp.id).copied().unwrap_or(lamp.x)))
+            .collect();
         drop(bridge);
+        if placed.len() > 1 {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(theme::text("Place dans la pièce, de gauche à droite", theme::regular(13.0), MUTED));
+                if !self.cfg.lamp_positions.is_empty() {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let reset = ui.add(egui::Label::new(theme::text("Places de l'app Hue", theme::regular(13.0), ACCENT)).sense(Sense::click()));
+                        if reset.on_hover_text("Oublier les places choisies ici").clicked() {
+                            self.cfg.lamp_positions.clear();
+                            self.save_config();
+                        }
+                    });
+                }
+            });
+            match theme::room_strip(ui, &placed) {
+                Some((id, x, false)) => {
+                    self.cfg.lamp_positions.insert(id, x);
+                }
+                Some((id, x, true)) => {
+                    self.cfg.lamp_positions.insert(id, x);
+                    self.save_config();
+                }
+                None => {}
+            }
+        }
         match toggled {
             Some((_, true)) if piloted == 1 => self.show("Garde au moins une lampe pour le live."),
             Some((id, true)) => {

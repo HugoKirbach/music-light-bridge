@@ -251,10 +251,21 @@ impl Engine {
         if channels.is_empty() {
             bail!("aucune lampe à piloter : coche au moins une lampe de la zone");
         }
-        // Canaux pilotés et leur place dans la pièce, de gauche à droite.
+        // Canaux pilotés et leur place dans la pièce, de gauche à droite : celle choisie dans la
+        // fenêtre pour leur lampe, sinon celle de la zone Hue.
         let lamps_in_room: Vec<(u8, f32)> = channels
             .iter()
-            .map(|&id| (id, area.channels.iter().find(|c| c.channel_id == id).map_or(0.0, |c| c.position.x)))
+            .map(|&id| {
+                let lamp = lamps.iter().find(|lamp| lamp.channels.contains(&id));
+                let chosen = lamp.and_then(|lamp| cfg.lamp_positions.get(&lamp.id).copied());
+                // Un ruban garde la place de chacun de ses segments ; une lampe, celle de la zone (ou
+                // sa place par défaut si les lampes n'ont jamais été placées).
+                let hue = match lamp {
+                    Some(lamp) if lamp.channels.len() == 1 => lamp.x,
+                    _ => area.channels.iter().find(|c| c.channel_id == id).map_or(0.0, |c| c.position.x),
+                };
+                (id, chosen.unwrap_or(hue))
+            })
             .collect();
         let piloted: Vec<String> = lamps
             .iter()

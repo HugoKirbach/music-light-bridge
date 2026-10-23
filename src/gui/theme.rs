@@ -467,3 +467,44 @@ pub fn slider_row(ui: &mut Ui, label: &str, value: String, slider: egui::Slider<
     })
     .inner
 }
+
+/// Bande « pièce » de gauche à droite où glisser chaque lampe : (identifiant, nom, place de -1 à
+/// 1). Rend la lampe déplacée, sa nouvelle place, et `true` quand on la lâche.
+pub fn room_strip(ui: &mut Ui, lamps: &[(String, String, f32)]) -> Option<(String, f32, bool)> {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 72.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 10.0, CARD);
+    painter.rect_stroke(rect, 10.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+    let line_y = rect.top() + 26.0;
+    let (left, right) = (rect.left() + 28.0, rect.right() - 28.0);
+    painter.line_segment([pos2(left, line_y), pos2(right, line_y)], Stroke::new(2.0, BORDER_HOVER));
+    painter.text(pos2(rect.left() + 10.0, rect.bottom() - 10.0), Align2::LEFT_BOTTOM, "gauche", regular(11.0), LABEL);
+    painter.text(pos2(rect.right() - 10.0, rect.bottom() - 10.0), Align2::RIGHT_BOTTOM, "droite", regular(11.0), LABEL);
+    let mut moved = None;
+    for (i, (id, name, x)) in lamps.iter().enumerate() {
+        let cx = left + (x.clamp(-1.0, 1.0) + 1.0) / 2.0 * (right - left);
+        let center = pos2(cx, line_y);
+        let handle = Rect::from_center_size(center, Vec2::splat(28.0));
+        let response = ui.interact(handle, ui.scope_id().with(("lampe", i)), Sense::drag());
+        let active = response.dragged() || response.hovered();
+        let painter = ui.painter();
+        painter.circle_filled(center, if active { 11.0 } else { 9.0 }, ACCENT);
+        painter.circle_stroke(center, 11.0, Stroke::new(1.5, BG));
+        // Les noms alternent dessus / dessous pour ne pas se chevaucher.
+        let label_y = if i % 2 == 0 { rect.top() + 2.0 } else { line_y + 14.0 };
+        let align = if i % 2 == 0 { Align2::CENTER_TOP } else { Align2::CENTER_TOP };
+        painter.text(pos2(cx, label_y), align, name, regular(11.0), TEXT);
+        if let Some(pointer) = response.interact_pointer_pos()
+            && response.dragged()
+        {
+            let x = ((pointer.x - left) / (right - left) * 2.0 - 1.0).clamp(-1.0, 1.0);
+            moved = Some((id.clone(), (x * 20.0).round() / 20.0, false));
+        }
+        if response.drag_stopped() {
+            moved = Some((id.clone(), *x, true));
+        }
+        response.on_hover_cursor(egui::CursorIcon::Grab);
+    }
+    moved
+}

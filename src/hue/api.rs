@@ -67,6 +67,10 @@ struct Entertainment {
     renderer_reference: Option<ResourceRef>,
 }
 
+/// Lampes à moins de 0,1 l'une de l'autre : jamais placées ; on les répartit de -0,8 à 0,8.
+const SAME_PLACE: f32 = 0.1;
+const SPREAD_PLACES: f32 = 0.8;
+
 /// Lampe d'une zone de divertissement et canaux du flux qui l'éclairent (plusieurs pour un
 /// ruban ou une lampe à dégradé).
 #[derive(Debug, Clone)]
@@ -74,6 +78,8 @@ pub struct Lamp {
     pub id: String,
     pub name: String,
     pub channels: Vec<u8>,
+    /// Place dans la pièce selon la zone Hue (moyenne de ses canaux, de -1 à gauche à 1 à droite).
+    pub x: f32,
 }
 
 /// Référence à une autre ressource du bridge.
@@ -253,11 +259,29 @@ pub async fn area_lamps(bridge: &BridgeCredentials, area: &EntertainmentArea) ->
                     id: id.to_owned(),
                     name: lights.iter().find(|l| l.id == id).map_or_else(|| id.to_owned(), |l| l.metadata.name.clone()),
                     channels: vec![channel.channel_id],
+                    x: 0.0,
                 }),
             }
         }
     }
+    for lamp in &mut lamps {
+        let places: Vec<f32> = area.channels.iter().filter(|c| lamp.channels.contains(&c.channel_id)).map(|c| c.position.x).collect();
+        lamp.x = places.iter().sum::<f32>() / places.len().max(1) as f32;
+    }
+    spread_unplaced(&mut lamps);
     Ok(lamps)
+}
+
+/// Lampes jamais placées dans l'app Hue (toutes au même endroit) : réparties régulièrement de
+/// gauche à droite, dans l'ordre de la zone.
+fn spread_unplaced(lamps: &mut [Lamp]) {
+    let (low, high) = lamps.iter().fold((f32::MAX, f32::MIN), |(lo, hi), lamp| (lo.min(lamp.x), hi.max(lamp.x)));
+    if lamps.len() > 1 && high - low < SAME_PLACE {
+        let last = (lamps.len() - 1) as f32;
+        for (i, lamp) in lamps.iter_mut().enumerate() {
+            lamp.x = -SPREAD_PLACES + 2.0 * SPREAD_PLACES * i as f32 / last;
+        }
+    }
 }
 
 /// Canaux à piloter : ceux des lampes qui ne sont pas écartées. Un canal partagé avec une lampe
@@ -367,7 +391,7 @@ mod tests {
     }
 
     fn lamp(id: &str, channels: &[u8]) -> Lamp {
-        Lamp { id: id.into(), name: id.into(), channels: channels.to_vec() }
+        Lamp { id: id.into(), name: id.into(), channels: channels.to_vec(), x: 0.0 }
     }
 
     #[test]
@@ -377,6 +401,17 @@ mod tests {
         assert_eq!(piloted_channels(&area, &lamps, &[]), [0, 1, 2, 3]);
         assert_eq!(piloted_channels(&area, &lamps, &["ruban".into()]), [0, 3]);
         assert!(piloted_channels(&area, &lamps, &["salon".into(), "ruban".into(), "bureau".into()]).is_empty());
+    }
+
+    #[test]
+    fn lamps_never_placed_are_spread_from_left_to_right() {
+        let mut lamps = [lamp("a", &[0]), lamp("b", &[1]), lamp("c", &[2])];
+        spread_unplaced(&mut lamps);
+        assert_eq!(lamps.map(|l| l.x), [-0.8, 0.0, 0.8]);
+        let mut placed = [lamp("a", &[0]), lamp("b", &[1])];
+        placed[1].x = 0.5;
+        spread_unplaced(&mut placed);
+        assert_eq!(placed.map(|l| l.x), [0.0, 0.5], "déjà placées : on n'y touche pas");
     }
 
     #[test]
