@@ -38,6 +38,9 @@ pub struct Config {
     /// gauche à 1 à droite) ; à défaut, celle de la zone Hue.
     #[serde(default)]
     pub lamp_positions: std::collections::BTreeMap<String, f32>,
+    /// Retard propre de chaque lampe (ms) : une lampe plus lente reçoit ses flashs plus tôt.
+    #[serde(default)]
+    pub lamp_delays_ms: std::collections::BTreeMap<String, f32>,
 }
 
 /// Réglages du mode live choisis dans la fenêtre avant de lancer, repris à l'ouverture suivante.

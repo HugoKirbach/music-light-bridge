@@ -33,6 +33,7 @@ use crate::timing;
 use crate::wav;
 
 mod captures;
+mod delays;
 mod loops;
 
 use captures::{auto_capture_loop, write_capture};
@@ -46,6 +47,8 @@ const CONFIRM_RANGE: (f64, f64) = (0.03, 0.1);
 /// Durée d'allumage des témoins de kick et de note.
 const LIT: Duration = Duration::from_millis(100);
 pub const THRESHOLD_RANGE: (f32, f32) = (1.1, 4.0);
+/// Retard propre maximal d'une lampe (ms) : au-delà, c'est un réglage d'avance générale.
+pub const MAX_LAMP_DELAY_MS: f32 = 150.0;
 const LINK_TEMPO: &str = "tempo piloté par Ableton Link : change-le depuis la session";
 /// Captures automatiques : le groove doit avoir tenu 8 s, la capture part 8 s après sa perte si
 /// les basses sont restées à plus de 60 % de leur niveau pendant le groove (moyenne sur 4 s), au
@@ -156,6 +159,9 @@ struct Shared {
     active_spread: AtomicU8,
     /// Dernière couleur de chaque lampe, `0x00RRGGBB`.
     lamp_colors: Vec<AtomicU32>,
+    /// Retard propre de chaque canal (ms, bits de `f32`), et test de synchro des lampes.
+    lamp_lags: Vec<AtomicU32>,
+    sync_test: AtomicBool,
     /// Publiés par la boucle d'éclairage.
     phase: AtomicU8,
     active_motion: AtomicU8,
@@ -229,6 +235,8 @@ pub struct Engine {
     helpers: Vec<JoinHandle<()>>,
     audio: Option<AudioInput>,
     midi: Option<MidiListener>,
+    /// Lampes pilotées : identifiant, nom, rangs de leurs canaux.
+    lamp_map: Vec<(String, String, Vec<usize>)>,
 }
 
 impl Engine {
@@ -267,6 +275,22 @@ impl Engine {
                 (id, chosen.unwrap_or(hue))
             })
             .collect();
+        // Lampes pilotées et leurs canaux (rangs dans `channels`), et retard de chaque canal.
+        let lamp_map: Vec<(String, String, Vec<usize>)> = lamps
+            .iter()
+            .filter(|lamp| !cfg.excluded_lights.contains(&lamp.id))
+            .map(|lamp| {
+                let ranks = channels.iter().enumerate().filter(|(_, id)| lamp.channels.contains(id)).map(|(i, _)| i).collect();
+                (lamp.id.clone(), lamp.name.clone(), ranks)
+            })
+            .collect();
+        let mut channel_lags = vec![0.0f32; channels.len()];
+        for (id, _, ranks) in &lamp_map {
+            let lag = cfg.lamp_delays_ms.get(id).copied().unwrap_or(0.0);
+            for &rank in ranks {
+                channel_lags[rank] = lag.clamp(0.0, MAX_LAMP_DELAY_MS);
+            }
+        }
         let piloted: Vec<String> = lamps
             .iter()
             .filter(|lamp| !cfg.excluded_lights.contains(&lamp.id))
@@ -297,6 +321,8 @@ impl Engine {
             spread: AtomicU8::new(options.spread.index()),
             active_spread: AtomicU8::new(options.spread.index()),
             lamp_colors: channels.iter().map(|_| AtomicU32::new(0)).collect(),
+            lamp_lags: channel_lags.iter().map(|lag| AtomicU32::new(lag.to_bits())).collect(),
+            sync_test: AtomicBool::new(false),
             phase: AtomicU8::new(Phase::default().index()),
             active_motion: AtomicU8::new(options.motion.index()),
             tracker: Mutex::new(tracker),
@@ -365,6 +391,7 @@ impl Engine {
             helpers,
             audio: Some(audio),
             midi,
+            lamp_map,
         })
     }
 
@@ -420,6 +447,36 @@ impl Engine {
 
     pub fn set_spread(&self, spread: Spread) {
         self.shared.spread.store(spread.index(), Ordering::Relaxed);
+    }
+
+    /// Lampes pilotées : identifiant, nom et retard propre (ms).
+    pub fn lamps(&self) -> Vec<(String, String, f32)> {
+        self.lamp_map
+            .iter()
+            .map(|(id, name, ranks)| {
+                let lag = ranks.first().map_or(0.0, |&rank| f32::from_bits(self.shared.lamp_lags[rank].load(Ordering::Relaxed)));
+                (id.clone(), name.clone(), lag)
+            })
+            .collect()
+    }
+
+    /// Retard propre d'une lampe : ses flashs partent d'autant plus tôt que les autres.
+    pub fn set_lamp_delay(&self, id: &str, ms: f32) {
+        let ms = ms.clamp(0.0, MAX_LAMP_DELAY_MS);
+        for (_, _, ranks) in self.lamp_map.iter().filter(|(lamp, _, _)| lamp == id) {
+            for &rank in ranks {
+                self.shared.lamp_lags[rank].store(ms.to_bits(), Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Test de synchro : toutes les lampes flashent en blanc sur chaque temps.
+    pub fn set_sync_test(&self, on: bool) {
+        self.shared.sync_test.store(on, Ordering::Relaxed);
+    }
+
+    pub fn sync_test(&self) -> bool {
+        self.shared.sync_test.load(Ordering::Relaxed)
     }
 
     pub fn set_mode(&self, mode: FlashMode) {

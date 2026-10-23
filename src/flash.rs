@@ -86,7 +86,7 @@ pub enum Action {
 pub struct FlashPlanner {
     pub mode: FlashMode,
     /// Avance des flashs anticipés : la latence de la chaîne Hue (s).
-    advance: f64,
+    pub advance: f64,
     /// Délai après un temps anticipé au-delà duquel son kick est déclaré absent (s).
     pub confirm_window: f64,
     /// Dernier temps confirmé par un kick, et nombre de temps consécutifs confirmés.

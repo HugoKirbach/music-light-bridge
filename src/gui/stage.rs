@@ -5,16 +5,17 @@ use eframe::egui::{self, Align, Color32, CornerRadius, Frame, Layout, Margin, Se
 
 use super::theme::{self, BOLD, Icon, LIVE, MONO_BOLD, SEMIBOLD, STAGE_BG};
 use super::{App, MODES, Tab, flash_text, format_bpm, motion_text, spread_text};
-use crate::engine::Status;
+use crate::engine::{MAX_LAMP_DELAY_MS, Status};
 use crate::look::{Motion, Spread};
 use crate::tempo::TempoSource;
 
 const DOCK_WIDTH: f32 = 1040.0;
-const TABS: [(Tab, &str); 5] = [
+const TABS: [(Tab, &str); 6] = [
     (Tab::Motion, "Animation"),
     (Tab::Colors, "Couleurs"),
     (Tab::Flashes, "Flashs"),
     (Tab::Tempo, "Tempo"),
+    (Tab::Lamps, "Lampes"),
     (Tab::Source, "Source"),
 ];
 const SOFT: Color32 = Color32::from_rgb(0xD9, 0xDC, 0xE1);
@@ -179,6 +180,7 @@ impl App {
                             Tab::Colors => self.colors_tab(ui),
                             Tab::Flashes => self.flashes_tab(ui, width - 36.0),
                             Tab::Tempo => self.tempo_tab(ui, status),
+                            Tab::Lamps => self.lamps_tab(ui),
                             Tab::Source => self.source_tab(ui, status),
                         }
                     });
@@ -287,6 +289,45 @@ impl App {
             ui.label(theme::text("Tempo et phase pilotés par la session Ableton Link.", theme::regular(15.0), Color32::WHITE));
             ui.label(theme::text(format!("{peers} autre(s) participant(s) dans la session."), theme::regular(13.0), DIM));
         }
+        self.engine = Some(engine);
+    }
+
+    /// Synchro des lampes : le test fait flasher toutes les lampes en blanc sur chaque temps, et
+    /// chaque lampe en retard sur les autres reçoit le sien.
+    fn lamps_tab(&mut self, ui: &mut Ui) {
+        let Some(engine) = self.engine.take() else { return };
+        ui.horizontal(|ui| {
+            let testing = engine.sync_test();
+            if theme::chip(ui, "Test de synchro", testing)
+                .on_hover_text("Toutes les lampes flashent en blanc sur chaque temps")
+                .clicked()
+            {
+                engine.set_sync_test(!testing);
+            }
+            ui.label(theme::text(
+                "Une lampe qui s'allume après les autres : monte son curseur jusqu'à ce qu'elles flashent ensemble.",
+                theme::regular(13.0),
+                DIM,
+            ));
+        });
+        let lamps = engine.lamps();
+        let shown = lamps.len().clamp(1, 4);
+        ui.columns(shown, |columns| {
+            for (i, (id, name, lag)) in lamps.iter().enumerate() {
+                let ui = &mut columns[i % shown];
+                let mut ms = *lag;
+                let shown_ms = format!("{ms:.0} ms");
+                let slider = egui::Slider::new(&mut ms, 0.0..=MAX_LAMP_DELAY_MS).step_by(5.0);
+                if theme::slider_row(ui, name, shown_ms, slider, DIM) {
+                    engine.set_lamp_delay(id, ms);
+                    if ms > 0.0 {
+                        self.cfg.lamp_delays_ms.insert(id.clone(), ms);
+                    } else {
+                        self.cfg.lamp_delays_ms.remove(id);
+                    }
+                }
+            }
+        });
         self.engine = Some(engine);
     }
 

@@ -1,6 +1,12 @@
 //! Boucles des fils du moteur : éclairage (60 Hz), tempo, Ableton Link.
 
+use super::delays::LampDelays;
 use super::*;
+
+/// Durée d'un flash du test de synchro, et sa cadence sans tempo connu.
+const SYNC_FLASH: f64 = 0.08;
+const SYNC_PERIOD: f64 = 0.5;
+const WHITE: Rgb = Rgb { r: u16::MAX, g: u16::MAX, b: u16::MAX };
 
 /// Flashe selon le planificateur (vrais kicks, anticipés quand ils sont attendus) et sur chaque
 /// note MIDI, et entretient le flux à 60 Hz entre deux flashs.
@@ -21,8 +27,16 @@ pub(super) fn light_loop(
     let mut seen_notes = notes.count();
     let mut last = Instant::now();
     let mut next_frame = last;
+    let mut delays = LampDelays::default();
+    let mut lags: Vec<f32> = Vec::new();
     while !shared.stopped() {
         planner.mode = shared.mode();
+        // La lampe la plus lente reçoit ses flashs d'autant plus tôt ; les autres l'attendent.
+        lags.clear();
+        lags.extend(shared.lamp_lags.iter().map(|lag| f32::from_bits(lag.load(Ordering::Relaxed))));
+        let head_start = Duration::from_secs_f32(lags.iter().copied().fold(0.0, f32::max) / 1000.0);
+        let total_advance = advance + head_start;
+        planner.advance = total_advance.as_secs_f64();
         // Le kick d'un flash anticipé arrive après l'âge d'un bloc audio : on l'attend jusque-là.
         planner.confirm_window = (features.input_latency().as_secs_f64() + CONFIRM_MARGIN)
             .clamp(CONFIRM_RANGE.0, CONFIRM_RANGE.1);
@@ -64,7 +78,7 @@ pub(super) fn light_loop(
         match action {
             Action::Flash { reactive } => {
                 // Place du temps flashé dans la structure : tête de phrase ou de mesure.
-                let at = if reactive { kick.unwrap_or(features.seconds(now)) } else { features.seconds(now) + advance.as_secs_f64() };
+                let at = if reactive { kick.unwrap_or(features.seconds(now)) } else { features.seconds(now) + total_advance.as_secs_f64() };
                 match shared.tracker().position(at) {
                     Some(p) if p.phrase == 0 => look.kick_at(Accent::Phrase),
                     Some(p) if p.beat == 0 => look.kick_at(Accent::Bar),
@@ -84,7 +98,15 @@ pub(super) fn light_loop(
         look.dynamics = shared.dynamics();
         look.motion = Motion::from_index(shared.motion.load(Ordering::Relaxed));
         look.spread = Spread::from_index(shared.spread.load(Ordering::Relaxed));
-        let colors = look.render_lamps(now - last, features.levels());
+        let mut colors = look.render_lamps(now - last, features.levels()).to_vec();
+        if shared.sync_test.load(Ordering::Relaxed) {
+            // Blanc sur chaque temps, tel qu'il sonnera quand les lampes montreront l'image.
+            let at = features.seconds(now) + total_advance.as_secs_f64();
+            let (period, anchor) = clock.period().map_or((SYNC_PERIOD, 0.0), |p| (p, clock.anchor()));
+            let lit = (at - anchor).rem_euclid(period) < SYNC_FLASH;
+            colors.iter_mut().for_each(|c| *c = if lit { WHITE } else { Rgb::OFF });
+        }
+        let colors = delays.delay(now, colors, &lags);
         for ((_, c), (color, published)) in frame.iter_mut().zip(colors.iter().zip(&shared.lamp_colors)) {
             *c = *color;
             published.store(pack(*color), Ordering::Relaxed);

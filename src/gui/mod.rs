@@ -74,6 +74,7 @@ enum Tab {
     Colors,
     Flashes,
     Tempo,
+    Lamps,
     Source,
 }
 
