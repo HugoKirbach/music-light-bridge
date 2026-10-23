@@ -97,6 +97,16 @@ impl HueStream {
         Ok(())
     }
 
+    /// Rouvre le flux après une coupure (bridge redémarré, Wi-Fi perdu, streaming repris par une
+    /// autre app) : réactive le streaming de la zone et refait la session DTLS. La photo des
+    /// lampes prise à l'ouverture reste celle qui sera rétablie.
+    pub async fn reopen(&mut self) -> Result<()> {
+        let _ = self.conn.close().await;
+        api::set_streaming(&self.bridge, &self.area_id, true).await?;
+        self.conn = connect(&self.bridge).await?;
+        Ok(())
+    }
+
     /// Ferme la session DTLS, rend la main à l'app Hue et rétablit l'état d'avant le flux.
     pub async fn close(self) -> Result<Restored> {
         let _ = self.conn.close().await;

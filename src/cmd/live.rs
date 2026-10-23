@@ -28,7 +28,7 @@ enum KeyOutcome {
 }
 
 pub fn run(rt: Arc<Runtime>, cfg: &Config, options: Options) -> Result<()> {
-    let engine = Engine::start(rt, cfg, options)?;
+    let mut engine = Engine::start(rt, cfg, options)?;
     println!("{}", engine.info);
     println!();
     println!("  b        saisir le BPM (chiffres puis Entrée)   + / -   BPM ±{BPM_NUDGE}");
@@ -47,7 +47,7 @@ pub fn run(rt: Arc<Runtime>, cfg: &Config, options: Options) -> Result<()> {
     println!("±n ms = écart moyen kicks/temps ; n ms = réaction côté PC ; ⚠n = coupures audio.");
     println!();
 
-    let captures = status_loop(&engine);
+    let captures = status_loop(&mut engine);
     let summary = engine.stop()?;
     println!("{summary}");
     for path in &captures? {
@@ -57,7 +57,7 @@ pub fn run(rt: Arc<Runtime>, cfg: &Config, options: Options) -> Result<()> {
 }
 
 /// Affiche la ligne d'état et traite le clavier ; renvoie les captures enregistrées.
-fn status_loop(engine: &Engine) -> Result<Vec<PathBuf>> {
+fn status_loop(engine: &mut Engine) -> Result<Vec<PathBuf>> {
     let _raw = RawMode::enable()?;
     let mut out = std::io::stdout();
     // BPM en cours de saisie, après la touche `b`.
@@ -89,6 +89,9 @@ fn status_loop(engine: &Engine) -> Result<Vec<PathBuf>> {
                     Err(e) => show(format!("{e:#}")),
                 }
             }
+        }
+        if let Some(Ok(())) = engine.recover_audio() {
+            message = Some((Instant::now() + MESSAGE_DURATION, "entrée audio retrouvée".to_owned()));
         }
         let line = match (&typing, &message) {
             (Some(text), _) => format!("BPM : {text}_   Entrée = valider, Échap = annuler"),
@@ -156,7 +159,8 @@ fn status_text(status: &Status) -> String {
         FlashMode::Kicks | FlashMode::EveryBeat => format!("±{:.0}ms", status.offset_ms),
     };
     let alert = match status.glitches {
-        _ if status.input_lost => " ⚠ entrée perdue".to_owned(),
+        _ if status.bridge_lost => " ⚠ bridge injoignable, reconnexion…".to_owned(),
+        _ if status.input_lost => " ⚠ entrée perdue, reconnexion…".to_owned(),
         0 => String::new(),
         n => format!(" ⚠{n}"),
     };

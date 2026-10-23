@@ -47,6 +47,11 @@ const CONFIRM_RANGE: (f64, f64) = (0.03, 0.1);
 /// Durée d'allumage des témoins de kick et de note.
 const LIT: Duration = Duration::from_millis(100);
 const NO_BUILD: u8 = u8::MAX;
+/// Entrée audio ou bridge perdus : nouvelle tentative toutes les 2 s (le bridge, de 0,5 à 5 s).
+const AUDIO_RETRY: Duration = Duration::from_secs(2);
+/// Plus aucun bloc audio depuis 1 s : l'entrée est perdue.
+const AUDIO_STALL: Duration = Duration::from_secs(1);
+const BRIDGE_RETRY: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(5));
 pub const THRESHOLD_RANGE: (f32, f32) = (1.1, 4.0);
 /// Retard propre maximal d'une lampe (ms) : au-delà, c'est un réglage d'avance générale.
 pub const MAX_LAMP_DELAY_MS: f32 = 150.0;
@@ -116,6 +121,8 @@ pub struct Status {
     pub reaction_ms: f64,
     pub glitches: u32,
     pub input_lost: bool,
+    /// Le bridge ne répond plus : le flux tente de se rouvrir.
+    pub bridge_lost: bool,
     /// Autres participants de la session Link, si elle est rejointe.
     pub link_peers: Option<u64>,
     /// Couleur envoyée à la lampe, en sRGB 8 bits.
@@ -154,6 +161,8 @@ pub struct Summary {
     input_latency_ms: f64,
     glitches: u32,
     input_lost: bool,
+    audio_restarts: u32,
+    bridge_restarts: u32,
     /// Retour des lampes à leur état d'avant le flux, ou la raison de son échec.
     restore: std::result::Result<Restored, String>,
 }
@@ -186,6 +195,10 @@ struct Shared {
     /// Le groove tient (publié par la boucle d'éclairage), et captures automatiques enregistrées.
     grooving: AtomicBool,
     auto_captures: AtomicU32,
+    /// Reprises : entrée audio rouverte, flux du bridge rouvert ; le bridge est injoignable.
+    audio_restarts: AtomicU32,
+    bridge_restarts: AtomicU32,
+    bridge_lost: AtomicBool,
     note_flashes: AtomicU32,
     /// Instant (s, horloge commune) de la dernière note, en bits de `f64`.
     last_note: AtomicU64,
@@ -248,6 +261,9 @@ pub struct Engine {
     midi: Option<MidiListener>,
     /// Lampes pilotées : identifiant, nom, rangs de leurs canaux.
     lamp_map: Vec<(String, String, Vec<usize>)>,
+    /// Entrée audio à rouvrir si elle se perd, et dernière tentative.
+    input: (Option<String>, Backend),
+    audio_retry: Instant,
 }
 
 impl Engine {
@@ -347,6 +363,9 @@ impl Engine {
             flashes: AtomicU32::new(0),
             grooving: AtomicBool::new(false),
             auto_captures: AtomicU32::new(0),
+            audio_restarts: AtomicU32::new(0),
+            bridge_restarts: AtomicU32::new(0),
+            bridge_lost: AtomicBool::new(false),
             note_flashes: AtomicU32::new(0),
             last_note: AtomicU64::new(f64::NEG_INFINITY.to_bits()),
             color: AtomicU32::new(0),
@@ -406,6 +425,8 @@ impl Engine {
             audio: Some(audio),
             midi,
             lamp_map,
+            input: (options.input.clone(), options.audio),
+            audio_retry: Instant::now(),
         })
     }
 
@@ -442,7 +463,8 @@ impl Engine {
             offset_ms: offset * 1e3,
             reaction_ms: self.shared.average_reaction_ms(),
             glitches: features.glitches(),
-            input_lost: features.input_lost(),
+            input_lost: self.audio_lost(),
+            bridge_lost: self.shared.bridge_lost.load(Ordering::Relaxed),
             link_peers: self.shared.link.then(|| self.shared.link_peers.load(Ordering::Relaxed)),
             color: unpack(color),
             phase: Phase::from_index(self.shared.phase.load(Ordering::Relaxed)),
@@ -467,6 +489,31 @@ impl Engine {
 
     pub fn set_director(&self, on: bool) {
         self.shared.director.store(on, Ordering::Relaxed);
+    }
+
+    /// L'entrée est perdue : le pilote l'a signalé, ou plus aucun bloc n'arrive (l'ASIO se tait
+    /// sans prévenir). La sortie du PC, elle, n'envoie rien quand rien ne joue.
+    fn audio_lost(&self) -> bool {
+        let silent = self.input.1 != Backend::Output && self.features.block_age().is_some_and(|age| age > AUDIO_STALL);
+        self.features.input_lost() || silent
+    }
+
+    /// Entrée audio perdue (câble, pilote) : tente de la rouvrir toutes les 2 s. À appeler
+    /// régulièrement depuis le fil qui possède le moteur ; rend le résultat d'une tentative.
+    pub fn recover_audio(&mut self) -> Option<Result<()>> {
+        if !self.audio_lost() || self.audio_retry.elapsed() < AUDIO_RETRY {
+            return None;
+        }
+        self.audio_retry = Instant::now();
+        // L'ancien flux doit lâcher le pilote (l'ASIO n'en accepte qu'un) avant d'en rouvrir un.
+        self.audio = None;
+        let (input, backend) = &self.input;
+        let reopened = AudioInput::start_into(input.as_deref(), *backend, self.features.clone(), self.capture.clone());
+        Some(reopened.map(|audio| {
+            self.features.clear_input_lost();
+            self.shared.audio_restarts.fetch_add(1, Ordering::Relaxed);
+            self.audio = Some(audio);
+        }))
     }
 
     /// Lampes pilotées : identifiant, nom et retard propre (ms).
@@ -597,6 +644,8 @@ impl Engine {
             input_latency_ms: self.features.input_latency().as_secs_f64() * 1e3,
             glitches: self.features.glitches(),
             input_lost: self.features.input_lost(),
+            audio_restarts: shared.audio_restarts.load(Ordering::Relaxed),
+            bridge_restarts: shared.bridge_restarts.load(Ordering::Relaxed),
             restore,
         })
     }
@@ -668,6 +717,12 @@ impl fmt::Display for Summary {
         )?;
         if self.input_lost {
             write!(f, "\nL'entrée audio a été perdue en cours de route (câble ou pilote).")?;
+        }
+        if self.audio_restarts > 0 {
+            write!(f, "\nEntrée audio rouverte {} fois.", self.audio_restarts)?;
+        }
+        if self.bridge_restarts > 0 {
+            write!(f, "\nFlux du bridge rouvert {} fois.", self.bridge_restarts)?;
         }
         match &self.restore {
             Ok(restored) => write!(f, "\n{restored}"),

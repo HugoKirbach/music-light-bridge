@@ -124,7 +124,9 @@ pub(super) fn light_loop(
         shared.active_motion.store(look.active_motion().index(), Ordering::Relaxed);
         shared.active_spread.store(look.active_spread().index(), Ordering::Relaxed);
         last = now;
-        rt.block_on(stream.send(&frame))?;
+        if rt.block_on(stream.send(&frame)).is_err() {
+            reconnect(rt, stream, shared);
+        }
         if let Action::Flash { reactive } = action {
             shared.flashes.fetch_add(1, Ordering::Relaxed);
             if reactive {
@@ -175,3 +177,22 @@ fn pack(color: Rgb) -> u32 {
     u32::from(color.r >> 8) << 16 | u32::from(color.g >> 8) << 8 | u32::from(color.b >> 8)
 }
 
+
+/// Le bridge ne reçoit plus le flux : rouvre-le, de plus en plus patiemment (de 0,5 à 5 s
+/// entre deux tentatives), jusqu'à ce qu'il réponde ou que le moteur s'arrête.
+fn reconnect(rt: &Runtime, stream: &mut HueStream, shared: &Shared) {
+    shared.bridge_lost.store(true, Ordering::Relaxed);
+    let mut wait = BRIDGE_RETRY.0;
+    while !shared.stopped() {
+        if rt.block_on(stream.reopen()).is_ok() {
+            shared.bridge_restarts.fetch_add(1, Ordering::Relaxed);
+            shared.bridge_lost.store(false, Ordering::Relaxed);
+            return;
+        }
+        let until = Instant::now() + wait;
+        while !shared.stopped() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(50));
+        }
+        wait = (wait * 2).min(BRIDGE_RETRY.1);
+    }
+}

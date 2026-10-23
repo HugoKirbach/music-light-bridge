@@ -91,6 +91,8 @@ pub struct Features {
     glitches: AtomicU32,
     /// L'entrée a disparu (câble débranché, pilote réinitialisé).
     input_lost: AtomicBool,
+    /// Arrivée du dernier bloc audio (ns depuis l'origine) ; 0 avant le premier.
+    last_block_ns: AtomicU64,
     grid_period: AtomicU64,
     grid_anchor: AtomicU64,
     grid_locked: AtomicBool,
@@ -117,6 +119,7 @@ impl Features {
             input_latency_us: AtomicU64::new(0),
             glitches: AtomicU32::new(0),
             input_lost: AtomicBool::new(false),
+            last_block_ns: AtomicU64::new(0),
             grid_period: AtomicU64::new(0),
             grid_anchor: AtomicU64::new(0),
             grid_locked: AtomicBool::new(false),
@@ -132,6 +135,18 @@ impl Features {
 
     pub fn input_lost(&self) -> bool {
         self.input_lost.load(Ordering::Relaxed)
+    }
+
+    /// L'entrée vient d'être rouverte : elle a jusqu'à son premier bloc pour se manifester.
+    pub fn clear_input_lost(&self) {
+        self.input_lost.store(false, Ordering::Relaxed);
+        self.last_block_ns.store(self.epoch.elapsed().as_nanos().max(1) as u64, Ordering::Relaxed);
+    }
+
+    /// Temps écoulé depuis le dernier bloc audio, s'il en est déjà arrivé un.
+    pub fn block_age(&self) -> Option<Duration> {
+        let last = self.last_block_ns.load(Ordering::Relaxed);
+        (last > 0).then(|| self.epoch.elapsed().saturating_sub(Duration::from_nanos(last)))
     }
 
     /// Secondes écoulées entre l'origine commune et `t` : l'unité de temps de l'horloge de tempo.
@@ -228,6 +243,7 @@ impl Features {
     }
 
     fn publish_levels(&self, levels: Levels) {
+        self.last_block_ns.store(self.epoch.elapsed().as_nanos().max(1) as u64, Ordering::Relaxed);
         self.bass.store(levels.bass);
         self.mid.store(levels.mid);
         self.high.store(levels.high);
@@ -252,6 +268,16 @@ impl Features {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reopened_input_waits_for_its_first_block() {
+        let features = Features::new(1.6);
+        assert_eq!(features.block_age(), None, "pas de bloc, pas de perte supposée");
+        features.record_input_lost();
+        features.clear_input_lost();
+        assert!(!features.input_lost());
+        assert!(features.block_age().is_some_and(|age| age < Duration::from_secs(1)));
+    }
 
     #[test]
     fn a_sure_tempo_expects_kicks_on_the_beats_before_the_groove() {

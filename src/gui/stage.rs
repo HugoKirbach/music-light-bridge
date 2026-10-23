@@ -142,8 +142,10 @@ impl App {
     fn warning(&self, status: &Status) -> Option<String> {
         if let Some(message) = self.current_message() {
             Some(message.to_owned())
+        } else if status.bridge_lost {
+            Some("Bridge injoignable : reconnexion en cours…".to_owned())
         } else if status.input_lost {
-            Some("Entrée audio perdue : câble ou pilote ?".to_owned())
+            Some("Entrée audio perdue (câble ou pilote ?) : reconnexion en cours…".to_owned())
         } else if status.glitches > 0 {
             Some(format!("{} coupure(s) audio", status.glitches))
         } else {

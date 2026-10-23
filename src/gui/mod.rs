@@ -405,6 +405,9 @@ impl eframe::App for App {
             self.stop();
             self.show("Le mode live s'est arrêté : bridge injoignable ?");
         }
+        if let Some(Ok(())) = self.engine.as_mut().and_then(Engine::recover_audio) {
+            self.show("Entrée audio retrouvée.");
+        }
         let status = self.engine.as_ref().map(Engine::status);
         match status {
             Some(status) => {
