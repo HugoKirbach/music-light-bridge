@@ -493,8 +493,7 @@ pub fn room_strip(ui: &mut Ui, lamps: &[(String, String, f32)]) -> Option<(Strin
         painter.circle_stroke(center, 11.0, Stroke::new(1.5, BG));
         // Les noms alternent dessus / dessous pour ne pas se chevaucher.
         let label_y = if i % 2 == 0 { rect.top() + 2.0 } else { line_y + 14.0 };
-        let align = if i % 2 == 0 { Align2::CENTER_TOP } else { Align2::CENTER_TOP };
-        painter.text(pos2(cx, label_y), align, name, regular(11.0), TEXT);
+        painter.text(pos2(cx, label_y), Align2::CENTER_TOP, name, regular(11.0), TEXT);
         if let Some(pointer) = response.interact_pointer_pos()
             && response.dragged()
         {
