@@ -90,7 +90,10 @@ moins de la moitié des temps ont un kick sont signalées par ⚠. Options : `--
 **Préparer la session**. L'en-tête dit si le bridge répond et quelle zone sera pilotée. Au
 centre : la source audio (**Carte son**, avec l'appareil et le pilote, ou **Sortie du PC**), le
 tempo (**Détection auto**, **BPM imposé** ou **Ableton Link**), le MIDI, puis le bouton **Lancer
-le live**. À droite : un aperçu de la couleur principale, l'animation, les couleurs, l'allure des
+le live**. La section **Lampes** liste les lampes de la zone de divertissement : celles qu'on
+décoche sont laissées hors du flux et gardent leur état pendant le live (le choix vaut aussi pour
+`live` dans le terminal). Seules les lampes ajoutées à la zone dans l'app Hue (Paramètres > Zones
+de divertissement) apparaissent ; après en avoir ajouté une, **Actualiser** relit la zone. À droite : un aperçu de la couleur principale, l'animation, les couleurs, l'allure des
 flashs, leur déclenchement (kicks anticipés, réactif, chaque temps) et le seuil des kicks. Les
 réglages sont enregistrés et repris à l'ouverture suivante ; après l'arrêt, le bilan de la
 session s'affiche sous le bouton.

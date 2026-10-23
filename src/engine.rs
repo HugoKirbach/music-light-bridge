@@ -67,6 +67,8 @@ pub struct Info {
     pub sample_rate: u32,
     pub channels: u16,
     pub area: String,
+    /// Noms des lampes pilotées (vide si le bridge ne les a pas donnés).
+    pub lamps: Vec<String>,
     pub midi_port: Option<String>,
     pub link: bool,
     pub advance: Duration,
@@ -210,7 +212,17 @@ impl Engine {
 
         let bridge = cfg.bridge()?;
         let area = rt.block_on(api::select_area(bridge, cfg.area_id.as_deref()))?;
-        let channels: Vec<u8> = area.channels.iter().map(|c| c.channel_id).collect();
+        // Sans la liste des lampes (bridge ancien), toute la zone est pilotée.
+        let lamps = rt.block_on(api::area_lamps(bridge, &area)).unwrap_or_default();
+        let channels = api::piloted_channels(&area, &lamps, &cfg.excluded_lights);
+        if channels.is_empty() {
+            bail!("aucune lampe à piloter : coche au moins une lampe de la zone");
+        }
+        let piloted: Vec<String> = lamps
+            .iter()
+            .filter(|lamp| !cfg.excluded_lights.contains(&lamp.id))
+            .map(|lamp| lamp.name.clone())
+            .collect();
 
         let features = Arc::new(Features::new(options.threshold));
         let notes = Arc::new(Notes::default());
@@ -275,6 +287,7 @@ impl Engine {
             sample_rate: audio.sample_rate,
             channels: audio.channels,
             area: area.metadata.name.clone(),
+            lamps: piloted,
             midi_port: midi.as_ref().map(|m| m.port.clone()),
             link: options.link,
             advance,
@@ -461,6 +474,9 @@ impl fmt::Display for Info {
         )?;
         if let Some(reason) = &self.fallback {
             write!(f, "\nASIO indisponible ({reason}) : capture en WASAPI.")?;
+        }
+        if !self.lamps.is_empty() {
+            write!(f, "\nLampes pilotées : {}.", self.lamps.join(", "))?;
         }
         if let Some(port) = &self.midi_port {
             write!(f, "\nMIDI : « {port} » ; chaque note flashe à sa couleur.")?;

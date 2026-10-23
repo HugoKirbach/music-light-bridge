@@ -58,7 +58,12 @@ impl App {
             theme::pill(ui, theme::spaced(state, theme::font(12.0, BOLD), MUTED, 1.0), RAISED, Some(dot));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &*bridge {
                 Bridge::Ready { area, lamps } => {
-                    let lamps = if *lamps == 1 { "1 lampe".to_owned() } else { format!("{lamps} lampes") };
+                    let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded_lights.contains(&lamp.id)).count();
+                    let lamps = match (lamps.len(), piloted) {
+                        (1, 1) => "1 lampe".to_owned(),
+                        (total, piloted) if total == piloted => format!("{total} lampes"),
+                        (total, piloted) => format!("{piloted} lampe(s) sur {total}"),
+                    };
                     ui.label(theme::text(format!("Zone « {area} » · {lamps}"), theme::regular(13.0), MUTED));
                     ui.label(theme::text("Bridge Hue connecté", theme::regular(13.0), TEXT));
                 }
@@ -124,11 +129,15 @@ impl App {
         self.device_row(ui, width);
 
         ui.add_space(12.0);
-        theme::section(ui, "2 · TEMPO");
+        theme::section(ui, "2 · LAMPES");
+        self.lamps_row(ui);
+
+        ui.add_space(12.0);
+        theme::section(ui, "3 · TEMPO");
         self.tempo_row(ui, width);
 
         ui.add_space(12.0);
-        theme::section(ui, "3 · MIDI");
+        theme::section(ui, "4 · MIDI");
         self.midi_row(ui);
 
         ui.add_space(16.0);
@@ -179,7 +188,7 @@ impl App {
                     ui.label(theme::text("Appareil", theme::regular(13.0), MUTED));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let refresh = ui.add(egui::Label::new(theme::text("Actualiser", theme::regular(13.0), ACCENT)).sense(Sense::click()));
-                        if refresh.on_hover_text("Relire les entrées audio et MIDI").clicked() {
+                        if refresh.on_hover_text("Relire les entrées audio et MIDI, et les lampes de la zone").clicked() {
                             self.refresh_devices();
                         }
                     });
@@ -224,6 +233,51 @@ impl App {
                 LABEL,
             ));
         }
+    }
+
+    /// Lampes de la zone, à cocher : celles décochées gardent leur état pendant le live.
+    fn lamps_row(&mut self, ui: &mut Ui) {
+        let bridge = self.bridge.clone();
+        let bridge = bridge.lock().unwrap_or_else(PoisonError::into_inner);
+        let Bridge::Ready { lamps, .. } = &*bridge else {
+            ui.label(theme::text("Les lampes s'affichent dès que le bridge répond.", theme::regular(13.0), LABEL));
+            return;
+        };
+        let mut toggled = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            for lamp in lamps {
+                let checked = !self.cfg.excluded_lights.contains(&lamp.id);
+                let chip = theme::chip(ui, &lamp.name, checked);
+                let chip = if lamp.channels.len() > 1 {
+                    chip.on_hover_text(format!("{} segments, éclairés ensemble", lamp.channels.len()))
+                } else {
+                    chip
+                };
+                if chip.clicked() {
+                    toggled = Some((lamp.id.clone(), checked));
+                }
+            }
+        });
+        let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded_lights.contains(&lamp.id)).count();
+        drop(bridge);
+        match toggled {
+            Some((_, true)) if piloted == 1 => self.show("Garde au moins une lampe pour le live."),
+            Some((id, true)) => {
+                self.cfg.excluded_lights.push(id);
+                self.save_config();
+            }
+            Some((id, false)) => {
+                self.cfg.excluded_lights.retain(|excluded| *excluded != id);
+                self.save_config();
+            }
+            None => {}
+        }
+        ui.label(theme::text(
+            "Les lampes décochées gardent leur état pendant le live. Une lampe absente ? Ajoute-la à la zone de divertissement dans l'app Hue, puis « Actualiser ».",
+            theme::regular(12.0),
+            LABEL,
+        ));
     }
 
     fn tempo_row(&mut self, ui: &mut Ui, width: f32) {

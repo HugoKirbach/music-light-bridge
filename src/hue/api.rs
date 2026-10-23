@@ -41,6 +41,31 @@ pub struct Metadata {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Channel {
     pub channel_id: u8,
+    /// Services de divertissement (segments de lampe) éclairés par ce canal.
+    #[serde(default)]
+    pub members: Vec<ChannelMember>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelMember {
+    pub service: ResourceRef,
+}
+
+/// Service de divertissement : le côté « flux » d'une lampe.
+#[derive(Debug, Clone, Deserialize)]
+struct Entertainment {
+    id: String,
+    /// Lampe qui rend ce service.
+    renderer_reference: Option<ResourceRef>,
+}
+
+/// Lampe d'une zone de divertissement et canaux du flux qui l'éclairent (plusieurs pour un
+/// ruban ou une lampe à dégradé).
+#[derive(Debug, Clone)]
+pub struct Lamp {
+    pub id: String,
+    pub name: String,
+    pub channels: Vec<u8>,
 }
 
 /// Référence à une autre ressource du bridge.
@@ -202,6 +227,44 @@ pub async fn light(bridge: &BridgeCredentials, id: &str) -> Result<Light> {
         .with_context(|| format!("lampe {id} introuvable"))
 }
 
+/// Lampes de la zone, dans l'ordre de leur premier canal, avec leur nom.
+pub async fn area_lamps(bridge: &BridgeCredentials, area: &EntertainmentArea) -> Result<Vec<Lamp>> {
+    let services: Vec<Entertainment> = clip_get(bridge, "entertainment").await?;
+    let lights: Vec<Light> = clip_get(bridge, "light").await?;
+    let mut lamps: Vec<Lamp> = Vec::new();
+    for channel in &area.channels {
+        let light_ids = channel.members.iter().filter_map(|member| {
+            let service = services.iter().find(|s| s.id == member.service.rid)?;
+            service.renderer_reference.as_ref().filter(|r| r.rtype == "light").map(|r| r.rid.as_str())
+        });
+        for id in light_ids {
+            match lamps.iter_mut().find(|lamp| lamp.id == id) {
+                Some(lamp) if !lamp.channels.contains(&channel.channel_id) => lamp.channels.push(channel.channel_id),
+                Some(_) => {}
+                None => lamps.push(Lamp {
+                    id: id.to_owned(),
+                    name: lights.iter().find(|l| l.id == id).map_or_else(|| id.to_owned(), |l| l.metadata.name.clone()),
+                    channels: vec![channel.channel_id],
+                }),
+            }
+        }
+    }
+    Ok(lamps)
+}
+
+/// Canaux à piloter : ceux des lampes qui ne sont pas écartées. Un canal partagé avec une lampe
+/// gardée reste piloté.
+pub fn piloted_channels(area: &EntertainmentArea, lamps: &[Lamp], excluded: &[String]) -> Vec<u8> {
+    area.channels
+        .iter()
+        .map(|c| c.channel_id)
+        .filter(|id| {
+            let owners: Vec<&Lamp> = lamps.iter().filter(|lamp| lamp.channels.contains(id)).collect();
+            owners.is_empty() || owners.iter().any(|lamp| !excluded.contains(&lamp.id))
+        })
+        .collect()
+}
+
 pub async fn scenes(bridge: &BridgeCredentials) -> Result<Vec<Scene>> {
     clip_get(bridge, "scene").await
 }
@@ -276,4 +339,40 @@ async fn clip_data<T: DeserializeOwned>(response: reqwest::Response) -> Result<V
         bail!("le bridge répond {status} : {}", details.join(" ; "));
     }
     Ok(parsed.data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn area(channels: &[u8]) -> EntertainmentArea {
+        EntertainmentArea {
+            id: "zone".into(),
+            metadata: Metadata { name: "Zone".into() },
+            status: "inactive".into(),
+            channels: channels.iter().map(|&channel_id| Channel { channel_id, members: Vec::new() }).collect(),
+            light_services: Vec::new(),
+        }
+    }
+
+    fn lamp(id: &str, channels: &[u8]) -> Lamp {
+        Lamp { id: id.into(), name: id.into(), channels: channels.to_vec() }
+    }
+
+    #[test]
+    fn excluded_lamps_leave_the_stream() {
+        let area = area(&[0, 1, 2, 3]);
+        let lamps = [lamp("salon", &[0]), lamp("ruban", &[1, 2]), lamp("bureau", &[3])];
+        assert_eq!(piloted_channels(&area, &lamps, &[]), [0, 1, 2, 3]);
+        assert_eq!(piloted_channels(&area, &lamps, &["ruban".into()]), [0, 3]);
+        assert!(piloted_channels(&area, &lamps, &["salon".into(), "ruban".into(), "bureau".into()]).is_empty());
+    }
+
+    #[test]
+    fn unknown_or_shared_channels_stay_piloted() {
+        let area = area(&[0, 1, 2]);
+        let lamps = [lamp("a", &[0, 1]), lamp("b", &[1])];
+        // Le canal 2 n'appartient à aucune lampe connue ; le canal 1 est partagé avec « b ».
+        assert_eq!(piloted_channels(&area, &lamps, &["a".into()]), [1, 2]);
+    }
 }

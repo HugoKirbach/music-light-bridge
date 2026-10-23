@@ -55,7 +55,7 @@ pub fn run(rt: Arc<Runtime>, cfg: Config) -> Result<()> {
 enum Bridge {
     Unpaired,
     Pending,
-    Ready { area: String, lamps: usize },
+    Ready { area: String, lamps: Vec<api::Lamp> },
     Failed(String),
 }
 
@@ -116,20 +116,7 @@ impl App {
             (false, None) => TempoChoice::Auto,
         };
         let card_backend = if settings.audio == Backend::Output { Backend::Auto } else { settings.audio };
-        let bridge = Arc::new(Mutex::new(if cfg.bridge.is_some() { Bridge::Pending } else { Bridge::Unpaired }));
-        if let Some(credentials) = cfg.bridge.clone() {
-            let (slot, wanted) = (bridge.clone(), cfg.area_id.clone());
-            rt.spawn(async move {
-                let state = match api::select_area(&credentials, wanted.as_deref()).await {
-                    Ok(area) => Bridge::Ready {
-                        lamps: if area.light_services.is_empty() { area.channels.len() } else { area.light_services.len() },
-                        area: area.metadata.name,
-                    },
-                    Err(e) => Bridge::Failed(format!("{e:#}")),
-                };
-                *slot.lock().unwrap_or_else(PoisonError::into_inner) = state;
-            });
-        }
+        let bridge = Arc::new(Mutex::new(Bridge::Unpaired));
         let mut app = Self {
             rt,
             palette: cfg.palette,
@@ -157,7 +144,22 @@ impl App {
         app
     }
 
+    /// Relit les entrées audio et MIDI, et demande au bridge la zone et ses lampes.
     fn refresh_devices(&mut self) {
+        if let Some(credentials) = self.cfg.bridge.clone() {
+            *self.bridge.lock().unwrap_or_else(PoisonError::into_inner) = Bridge::Pending;
+            let (slot, wanted) = (self.bridge.clone(), self.cfg.area_id.clone());
+            self.rt.spawn(async move {
+                let state = match api::select_area(&credentials, wanted.as_deref()).await {
+                    Ok(area) => match api::area_lamps(&credentials, &area).await {
+                        Ok(lamps) => Bridge::Ready { area: area.metadata.name, lamps },
+                        Err(e) => Bridge::Failed(format!("{e:#}")),
+                    },
+                    Err(e) => Bridge::Failed(format!("{e:#}")),
+                };
+                *slot.lock().unwrap_or_else(PoisonError::into_inner) = state;
+            });
+        }
         self.inputs = audio::list_inputs().map(|list| list.into_iter().map(|i| i.name).collect()).unwrap_or_default();
         self.outputs = audio::list_outputs().unwrap_or_default();
         self.midi_ports = midi::list_inputs().unwrap_or_default();

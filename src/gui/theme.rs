@@ -358,6 +358,35 @@ pub fn big_button(ui: &mut Ui, size: Vec2, fill: Color32, ink: Color32, with_ico
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Choix à cocher en forme de pastille : case à gauche, libellé à droite.
+pub fn chip(ui: &mut Ui, label: &str, checked: bool) -> Response {
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font(14.0, SEMIBOLD), TEXT);
+    let size = vec2(galley.size().x + 14.0 + 16.0 + 10.0 + 16.0, 40.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let painter = ui.painter();
+    let fill = if checked {
+        ACCENT_TINT
+    } else if response.hovered() {
+        RAISED
+    } else {
+        CARD
+    };
+    painter.rect_filled(rect, 10.0, fill);
+    let border = if checked { Stroke::new(1.5, ACCENT) } else { Stroke::new(1.0, BORDER) };
+    painter.rect_stroke(rect, 10.0, border, StrokeKind::Inside);
+    let tick = Rect::from_center_size(pos2(rect.left() + 14.0 + 8.0, rect.center().y), Vec2::splat(16.0));
+    if checked {
+        painter.rect_filled(tick, 4.0, ACCENT);
+        let mark = vec![tick.min + vec2(3.5, 8.0), tick.min + vec2(6.5, 11.5), tick.min + vec2(12.5, 4.5)];
+        painter.add(Shape::line(mark, Stroke::new(2.0, BG)));
+    } else {
+        painter.rect_stroke(tick, 4.0, Stroke::new(1.5, MUTED), StrokeKind::Inside);
+    }
+    let color = if checked { TEXT } else { MUTED };
+    painter.galley(pos2(tick.right() + 10.0, rect.center().y - galley.size().y / 2.0), galley, color);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Pastille de couleur avec son nom en bas à gauche ; entourée quand on la modifie.
 pub fn swatch(ui: &mut Ui, size: Vec2, color: Color32, label: &str, selected: bool, ring: Color32) -> Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());

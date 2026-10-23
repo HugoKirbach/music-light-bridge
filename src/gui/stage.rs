@@ -277,6 +277,9 @@ impl App {
                 details.push_str(&format!(" · MIDI « {port} »"));
             }
             ui.label(theme::text(details, theme::regular(13.0), DIM));
+            if !info.lamps.is_empty() {
+                ui.label(theme::text(format!("Lampes pilotées : {}", info.lamps.join(", ")), theme::regular(13.0), DIM));
+            }
             if let Some(reason) = &info.fallback {
                 ui.label(theme::text(format!("ASIO indisponible : {reason}"), theme::regular(12.0), DIM));
             }

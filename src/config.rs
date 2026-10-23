@@ -30,6 +30,10 @@ pub struct Config {
     /// Derniers réglages choisis dans la fenêtre.
     #[serde(default)]
     pub live: LiveSettings,
+    /// Lampes de la zone laissées hors du mode live (identifiants CLIP v2) : elles gardent leur
+    /// état pendant le flux. Une lampe ajoutée à la zone est donc pilotée par défaut.
+    #[serde(default)]
+    pub excluded_lights: Vec<String>,
 }
 
 /// Réglages du mode live choisis dans la fenêtre avant de lancer, repris à l'ouverture suivante.
