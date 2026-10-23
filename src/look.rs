@@ -15,6 +15,8 @@ use crate::hue::stream::Rgb;
 const GLOW: f32 = 0.25;
 /// Part de blanc au sommet d'un flash de kick, pour un impact plus franc.
 const WHITE_PUNCH: f32 = 0.5;
+/// En tête de phrase, toutes les lampes flashent, avec plus de blanc.
+const PHRASE_PUNCH: f32 = 0.85;
 /// Intensité d'un flash de note : de 35 % (vélocité minimale) à 100 %.
 const NOTE_MIN_STRENGTH: f32 = 0.35;
 /// Sans kick depuis 1,5 s, la musique est dans un temps creux.
@@ -308,12 +310,13 @@ impl Spread {
     }
 }
 
-/// Place d'un kick dans la musique : un temps quelconque, ou le premier d'une mesure (l'alternance
-/// y flashe toutes les lampes).
+/// Place d'un kick dans la musique : un temps quelconque, le premier d'une mesure (l'alternance y
+/// flashe toutes les lampes) ou celui qui ouvre une phrase (toutes les lampes, en blanc plus franc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Accent {
     Beat,
     Bar,
+    Phrase,
 }
 
 /// Une lampe (ou un segment de ruban) et son flash.
@@ -431,6 +434,7 @@ impl ReactiveLook {
         self.kicks += 1;
         for lamp in &mut self.lamps {
             match spread {
+                _ if accent == Accent::Phrase => lamp.fire(1.0, PHRASE_PUNCH),
                 _ if single => lamp.fire(1.0, WHITE_PUNCH),
                 Spread::Auto | Spread::Together => lamp.fire(1.0, WHITE_PUNCH),
                 Spread::Wave => {
@@ -870,5 +874,22 @@ mod tests {
                 look.cancel_flash();
             }
         }
+    }
+
+    #[test]
+    fn the_head_of_a_phrase_lights_every_lamp_whiter() {
+        for spread in [Spread::Wave, Spread::Alternate, Spread::Split] {
+            let mut look = room(spread);
+            look.kick_at(Accent::Phrase);
+            assert_eq!(lit(&mut look, FRAME), [true; 4], "{spread:?}");
+        }
+        // Plus de blanc qu'un temps ordinaire : le vert et le bleu montent avec le rouge.
+        let mut look = room(Spread::Together);
+        look.kick_at(Accent::Beat);
+        let beat = look.render(FRAME, Levels::default());
+        look.cancel_flash();
+        look.kick_at(Accent::Phrase);
+        let phrase = look.render(FRAME, Levels::default());
+        assert!(phrase.g > beat.g && phrase.b > beat.b, "{beat:?} {phrase:?}");
     }
 }

@@ -11,7 +11,7 @@ pub use input::{AudioInput, Backend, CAPTURE_SECONDS, list_inputs, list_outputs}
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use analysis::{Expectation, Levels};
+use analysis::{Expectation, Levels, Onset};
 
 /// Demi-largeur de la fenêtre où l'horloge attend un kick, autour de chaque temps.
 const KICK_WINDOW: f64 = 0.035;
@@ -97,7 +97,7 @@ pub struct Features {
     grid_groove: AtomicBool,
     /// Force d'attaque, trame par trame : tampon circulaire (instant, valeur) et nombre de
     /// trames écrites. Le fil audio y écrit sans jamais attendre.
-    onsets: Box<[(AtomicU64, AtomicU32)]>,
+    onsets: Box<[(AtomicU64, [AtomicU32; 5])]>,
     onsets_written: AtomicU64,
 }
 
@@ -121,7 +121,7 @@ impl Features {
             grid_anchor: AtomicU64::new(0),
             grid_locked: AtomicBool::new(false),
             grid_groove: AtomicBool::new(false),
-            onsets: (0..ONSET_SLOTS).map(|_| (AtomicU64::new(0), AtomicU32::new(0))).collect(),
+            onsets: (0..ONSET_SLOTS).map(|_| (AtomicU64::new(0), std::array::from_fn(|_| AtomicU32::new(0)))).collect(),
             onsets_written: AtomicU64::new(0),
         }
     }
@@ -197,21 +197,25 @@ impl Features {
 
     /// Trames de force d'attaque écrites depuis `seen`, dans l'ordre ; met `seen` à jour. À lire
     /// au moins toutes les 10 s, sans quoi les plus anciennes sont perdues.
-    pub fn read_onsets(&self, seen: &mut u64, mut each: impl FnMut(f64, f32)) {
+    pub fn read_onsets(&self, seen: &mut u64, mut each: impl FnMut(f64, Onset)) {
         let written = self.onsets_written.load(Ordering::Acquire);
         let start = (*seen).max(written.saturating_sub(ONSET_SLOTS as u64 - 1));
         for index in start..written {
-            let (time, value) = &self.onsets[index as usize % ONSET_SLOTS];
-            each(f64::from_bits(time.load(Ordering::Relaxed)), f32::from_bits(value.load(Ordering::Relaxed)));
+            let (time, values) = &self.onsets[index as usize % ONSET_SLOTS];
+            let [kick, bass, mid, high, bright] = values.each_ref().map(|v| f32::from_bits(v.load(Ordering::Relaxed)));
+            each(f64::from_bits(time.load(Ordering::Relaxed)), Onset { kick, bass, mid, high, bright });
         }
         *seen = written;
     }
 
-    fn publish_onset(&self, t: f64, strength: f32) {
+    fn publish_onset(&self, t: f64, onset: Onset) {
         let written = self.onsets_written.load(Ordering::Relaxed);
-        let (time, value) = &self.onsets[written as usize % ONSET_SLOTS];
+        let (time, values) = &self.onsets[written as usize % ONSET_SLOTS];
         time.store(t.to_bits(), Ordering::Relaxed);
-        value.store(strength.to_bits(), Ordering::Relaxed);
+        let fields = [onset.kick, onset.bass, onset.mid, onset.high, onset.bright];
+        for (value, field) in values.iter().zip(fields) {
+            value.store(field.to_bits(), Ordering::Relaxed);
+        }
         // `Release` : qui voit la nouvelle trame comptée voit aussi son contenu.
         self.onsets_written.store(written + 1, Ordering::Release);
     }
@@ -266,12 +270,12 @@ mod tests {
         let mut seen = 0;
         let mut read = Vec::new();
         for n in 0..(ONSET_SLOTS + 10) {
-            features.publish_onset(n as f64 * 0.01, n as f32);
+            features.publish_onset(n as f64 * 0.01, Onset { kick: n as f32, ..Onset::default() });
             if n % 300 == 0 {
-                features.read_onsets(&mut seen, |_, strength| read.push(strength));
+                features.read_onsets(&mut seen, |_, onset| read.push(onset.kick));
             }
         }
-        features.read_onsets(&mut seen, |_, strength| read.push(strength));
+        features.read_onsets(&mut seen, |_, onset| read.push(onset.kick));
         let expected: Vec<f32> = (0..(ONSET_SLOTS + 10)).map(|n| n as f32).collect();
         assert_eq!(read, expected);
     }

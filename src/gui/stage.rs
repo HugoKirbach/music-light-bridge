@@ -83,7 +83,11 @@ impl App {
         ui.add_space(((height - content) / 2.0).max(0.0));
         ui.vertical_centered(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            let phase = status.phase.label().to_uppercase();
+            let phase = match status.phrase {
+                // Mesure dans la phrase de quatre, quand la structure est reconnue.
+                Some(phrase) => format!("{} · MESURE {}/4", status.phase.label().to_uppercase(), phrase / 4 + 1),
+                None => status.phase.label().to_uppercase(),
+            };
             theme::pill(ui, theme::spaced(&phase, theme::font(13.0, BOLD), Color32::WHITE, 3.9), theme::black(0.45), None);
             ui.add_space(20.0);
 
@@ -115,7 +119,11 @@ impl App {
                     ui.painter().circle_stroke(c, 7.0, Stroke::new(2.0, theme::white(0.6)));
                 }
             }
-            response.on_hover_text("Temps de la mesure (le premier temps n'est pas repéré)");
+            response.on_hover_text(if status.phrase.is_some() {
+                "Temps de la mesure, calés sur la structure du morceau"
+            } else {
+                "Temps de la mesure (le premier temps n'est pas encore repéré)"
+            });
 
             if let Some(text) = warning {
                 ui.add_space(28.0);

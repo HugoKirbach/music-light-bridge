@@ -53,6 +53,10 @@ struct Annotation {
     /// Passages sans kick, en secondes : la lumière ne doit pas y flasher.
     #[serde(default)]
     breaks: Vec<(f64, f64)>,
+    /// Têtes de phrase connues (le premier temps d'une phrase de quatre mesures, donc aussi
+    /// d'une mesure), en secondes : elles donnent la structure attendue.
+    #[serde(default)]
+    phrases: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +85,14 @@ pub struct Score {
     groove_as_break: u32,
     break_seconds: f64,
     break_flashes: u32,
+    /// Relevés de la place dans la structure (une par seconde, en groove, avec tête de phrase
+    /// connue), têtes de mesure et de phrase justes.
+    #[serde(default)]
+    structure_checks: u32,
+    #[serde(default)]
+    bar_right: u32,
+    #[serde(default)]
+    phrase_right: u32,
 }
 
 impl Score {
@@ -95,6 +107,9 @@ impl Score {
         self.groove_as_break += other.groove_as_break;
         self.break_seconds += other.break_seconds;
         self.break_flashes += other.break_flashes;
+        self.structure_checks += other.structure_checks;
+        self.bar_right += other.bar_right;
+        self.phrase_right += other.phrase_right;
     }
 
     fn share(part: u32, whole: u32) -> f64 {
@@ -156,8 +171,8 @@ pub fn run(cfg: &Config, detail: bool, lights: bool) -> Result<()> {
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
     println!(
-        "  {:<24} {:>5}  {:>9}  {:>9}  {:>7}  {:>8}  {:>6}  {:>13}  {:>12}",
-        "capture", "note", "à l'heure", "en retard", "manqués", "en trop", "tempo", "groove→break", "break flashs"
+        "  {:<24} {:>5}  {:>9}  {:>9}  {:>7}  {:>8}  {:>6}  {:>13}  {:>12}  {:>6}  {:>6}",
+        "capture", "note", "à l'heure", "en retard", "manqués", "en trop", "tempo", "groove→break", "break flashs", "mesure", "phrase"
     );
     let mut total = Score::default();
     let mut current = BTreeMap::new();
@@ -218,7 +233,7 @@ fn print_row(name: &str, score: &Score, delta: Option<f64>) {
     let delta = delta.map_or(String::new(), |d| if d.abs() < 0.5 { " (=)".to_owned() } else { format!(" ({d:+.0})") });
     let per_second = if score.break_seconds > 0.0 { f64::from(score.break_flashes) / score.break_seconds } else { 0.0 };
     println!(
-        "  {name:<24} {:>4.0}{delta:<6} {:>7.0} %  {:>7.0} %  {:>5.0} %  {:>8.2}  {:>4.0} %  {:>11.0} %  {:>8.1} /s",
+        "  {name:<24} {:>4.0}{delta:<6} {:>7.0} %  {:>7.0} %  {:>5.0} %  {:>8.2}  {:>4.0} %  {:>11.0} %  {:>8.1} /s  {:>4} %  {:>4} %",
         score.grade(),
         Score::share(score.on_time, score.beats),
         Score::share(score.late, score.beats),
@@ -227,7 +242,14 @@ fn print_row(name: &str, score: &Score, delta: Option<f64>) {
         Score::share(score.tempo_right, score.tempo_checks),
         Score::share(score.groove_as_break, score.groove_frames),
         per_second,
+        structure(score.bar_right, score.structure_checks),
+        structure(score.phrase_right, score.structure_checks),
     );
+}
+
+/// Part de têtes justes, ou un tiret sans tête de phrase annotée.
+fn structure(right: u32, checks: u32) -> String {
+    if checks == 0 { "-".to_owned() } else { format!("{:.0}", Score::share(right, checks)) }
 }
 
 /// Rejoue une capture et la note au regard de ses annotations.
@@ -298,6 +320,31 @@ fn score(
         let right = tempos.iter().filter(|&&found| (found - bpm).abs() / bpm < TEMPO_TOLERANCE).count() as u32;
         let frames: Vec<Phase> = timeline.phases.iter().filter(|(t, _)| inside(*t)).map(|&(_, p)| p).collect();
         let as_break = frames.iter().filter(|&&p| p == Phase::Calm).count() as u32;
+        // Place dans la structure : la tête de phrase connue la plus proche, recalée sur la grille
+        // de référence, donne pour chaque relevé le temps attendu dans la mesure et la phrase.
+        let head = annotation
+            .phrases
+            .iter()
+            .copied()
+            .min_by(|a, b| (a - section.from).abs().total_cmp(&(b - section.from).abs()));
+        let (mut structure_checks, mut bar_right, mut phrase_right) = (0, 0, 0);
+        let mut wrong = Vec::new();
+        if let Some(head) = head {
+            for &(t, position) in timeline.positions.iter().filter(|(t, _)| inside(*t)) {
+                let n = ((t - head) / reference.period).round() as i64;
+                let (bar, phrase) = (n.rem_euclid(4) as u8, n.rem_euclid(16) as u8);
+                structure_checks += 1;
+                bar_right += u32::from(position.is_some_and(|p| p.beat == bar));
+                phrase_right += u32::from(position.is_some_and(|p| p.phrase == phrase));
+                if lights_detail {
+                    let found = position.map_or("?".to_owned(), |p| format!("{}/{}", p.beat, p.phrase));
+                    wrong.push(format!("{t:.0}:{found}≠{bar}/{phrase}"));
+                }
+            }
+        }
+        if !wrong.is_empty() {
+            details.push(format!("structure (trouvée≠attendue) : {}", wrong.join(" ")));
+        }
         details.push(format!(
             "groove {:.1}–{:.1} s : oracle {bpm:.2} BPM, kick à {:.3} s ; {on_time}/{beats} à l'heure, {late} en retard, {extra} en trop, décalage médian {:+.0} ms",
             section.from,
@@ -314,6 +361,9 @@ fn score(
             tempo_right: right,
             groove_frames: frames.len() as u32,
             groove_as_break: as_break,
+            structure_checks,
+            bar_right,
+            phrase_right,
             ..Score::default()
         });
     }
@@ -424,6 +474,7 @@ mod tests {
             note: String::new(),
             groove: vec![Section { from: 0.5, to: 18.5, bpm: 151.0, kick: None }],
             breaks: vec![],
+            phrases: vec![],
         };
         let timeline = timeline(&beats, &flashes);
         let (score, details) = score(&timeline, &timeline.onsets, &annotation, advance, false);

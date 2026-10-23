@@ -13,6 +13,7 @@ use crate::audio::analysis::{Analyzer, KICK_DETECTION_DELAY};
 use crate::config::Config;
 use crate::flash::{Action, CONFIRM_MARGIN, FlashMode, FlashPlanner};
 use crate::look::{Palette, Phase, ReactiveLook};
+use crate::phrase::Position;
 use crate::tempo::Tracker;
 use crate::wav;
 
@@ -50,6 +51,8 @@ struct Slice {
     cancelled: u32,
     /// Images (60 par seconde) passées dans chaque phase : groove, break, montée.
     phase_frames: [u32; 3],
+    /// Place du dernier temps de la tranche dans la phrase (de 1 à 16), si elle est reconnue.
+    phrase: Option<u8>,
 }
 
 impl Slice {
@@ -83,6 +86,8 @@ pub struct Timeline {
     pub phases: Vec<(f64, Phase)>,
     /// Tempo de l'horloge, à chaque réestimation.
     pub tempos: Vec<(f64, Option<f64>)>,
+    /// Place reconnue dans la mesure et la phrase, à chaque réestimation.
+    pub positions: Vec<(f64, Option<Position>)>,
 }
 
 pub struct Replay {
@@ -103,7 +108,7 @@ pub fn run(cfg: &Config, options: Options) -> Result<()> {
     );
     println!();
     println!(
-        "  début   tempo  groove  temps avec kick  kicks hors temps  flashs anticipés/réactifs/annulés  phase"
+        "  début   tempo  groove  temps avec kick  kicks hors temps  flashs anticipés/réactifs/annulés  phrase  phase"
     );
 
     let replay = replay(rate, &samples, advance, &options);
@@ -113,7 +118,7 @@ pub fn run(cfg: &Config, options: Options) -> Result<()> {
             _ => "-".to_owned(),
         };
         println!(
-            "  {:>4.0} s  {:>6}  {:>4.0} %  {coverage:^15}  {:^16}  {:>4} / {:>3} / {:>3}           {}{}",
+            "  {:>4.0} s  {:>6}  {:>4.0} %  {coverage:^15}  {:^16}  {:>4} / {:>3} / {:>3}           {:>5}   {}{}",
             slice.start,
             slice.bpm.map_or("---.-".to_owned(), |bpm| format!("{bpm:.1}")),
             100.0 * slice.groove_samples as f64 / slice.samples.max(1) as f64,
@@ -121,6 +126,7 @@ pub fn run(cfg: &Config, options: Options) -> Result<()> {
             slice.anticipated,
             slice.reactive,
             slice.cancelled,
+            slice.phrase.map_or("-".to_owned(), |p| format!("{}/16", p + 1)),
             slice.phase(),
             if slice.is_weak() { "  ⚠" } else { "" }
         );
@@ -184,7 +190,7 @@ pub fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Re
 
         if let Some(strength) = analyzer.take_onset() {
             tracker.on_onset(t, strength);
-            timeline.onsets.push((t, strength));
+            timeline.onsets.push((t, strength.kick));
         }
         let arrived = arrivals.front().is_some_and(|&(at, _)| at <= t);
         if t >= next_poll || arrived {
@@ -214,11 +220,15 @@ pub fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Re
         if t >= next_update {
             tracker.update(t);
             timeline.tempos.push((t, tracker.clock().bpm()));
+            if let Some(beat) = tracker.clock().nearest_beat(t) {
+                timeline.positions.push((beat, tracker.position(beat)));
+            }
             next_update += TEMPO_UPDATE;
         }
         if t >= slice.start + options.slice {
             slice.end = t;
             slice.bpm = tracker.clock().bpm();
+            slice.phrase = tracker.clock().nearest_beat(t).and_then(|beat| tracker.position(beat)).map(|p| p.phrase);
             slices.push(std::mem::replace(&mut slice, Slice { start: t, ..Slice::default() }));
         }
     }

@@ -108,6 +108,26 @@ creux et la respiration, sans flash). Les tranches où
 moins de la moitié des temps ont un kick sont signalées par ⚠. Options : `--bpm`, `--threshold`,
 `--slice` (durée des tranches).
 
+### Structure du morceau : mesures et phrases
+
+Dans une boucle de techno, rien ne distingue le premier temps de la mesure. La structure se lit
+aux changements de section (break, drop, entrée d'un élément), qui tombent en tête de phrase
+(quatre mesures, seize temps). DJ-Bridge décrit chaque temps par quelques indices (niveaux des
+basses, médiums et aigus, kick, attaques entre les temps) et compare les deux mesures qui
+précèdent chaque temps aux deux qui le suivent : un pic de cette nouveauté vote pour la position
+de son temps dans la phrase. Les votes s'estompent lentement (environ 80 mesures) et la grille
+continue de compter les temps pendant les breaks : une fois reconnue, la structure tient d'une
+section à l'autre. Tant qu'aucune position ne ressort nettement, la structure reste inconnue et
+rien ne change.
+
+Quand elle est reconnue : les quatre points de la scène suivent la vraie mesure, la phase affiche
+la mesure dans la phrase (« GROOVE · MESURE 3/4 »), l'alternance réunit les lampes en tête de
+mesure, et la tête de phrase flashe toutes les lampes, en blanc plus franc. `analyze` affiche la
+place du temps dans la phrase en fin de tranche, et le banc d'essai note les têtes de mesure et
+de phrase des captures dont une tête de phrase est annotée (`"phrases": [17.91]`). Il faut
+compter quelques secondes après un premier changement de section, et un extrait sans changement
+(une seule boucle) ne donne pas de structure.
+
 ### Captures automatiques et banc d'essai
 
 Les captures sont rangées dans `%APPDATA%\dj-bridge\captures\`, chacune avec une fiche JSON du
@@ -130,7 +150,7 @@ son décalage au temps le plus proche. Exemple d'annotation :
 { "captures": [ {
   "file": "capture-1792761389.wav", "note": "reprise après break",
   "groove": [ { "from": 18.25, "to": 40.0, "bpm": 154.0, "kick": 18.30 } ],
-  "breaks": [ [12.5, 16.3] ]
+  "breaks": [ [12.5, 16.3] ], "phrases": [ 17.91 ]
 } ] }
 ```
 

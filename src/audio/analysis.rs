@@ -346,6 +346,18 @@ fn tilt(bass: f32, high: f32) -> Option<f32> {
     (bass.max(high) > GAIN_FLOOR).then(|| (bass.max(TILT_FLOOR) / high.max(TILT_FLOOR)).ln())
 }
 
+/// Ce que retient une trame de 10 ms : force d'attaque de kick (voir `OnsetStrength`), niveaux
+/// bruts des basses, médiums et aigus en fin de trame, et bond des aigus (crash, charleston ouvert,
+/// riser qui éclate) : de quoi reconnaître les têtes de mesure et de phrase.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Onset {
+    pub kick: f32,
+    pub bass: f32,
+    pub mid: f32,
+    pub high: f32,
+    pub bright: f32,
+}
+
 /// Force d'attaque de kick, une valeur toutes les 10 ms : la somme des bonds d'énergie de quatre
 /// bandes sous 250 Hz (50, 90, 150 et 230 Hz), chacune redressée à part. Quand le sidechain
 /// efface la sous-basse au moment du kick, le bond du haut du grave compte quand même ; un clap,
@@ -422,6 +434,10 @@ pub struct Analyzer {
     normalized: [f32; 3],
     kick: KickDetector,
     onset: OnsetStrength,
+    /// Plus haut niveau brut des aigus pendant la trame en cours, et celui de la trame précédente.
+    high_peak: f32,
+    previous_high: f32,
+    frame: Option<Onset>,
 }
 
 impl Analyzer {
@@ -439,6 +455,9 @@ impl Analyzer {
             normalized: [0.0; 3],
             kick: KickDetector::new(rate, threshold),
             onset: OnsetStrength::new(rate),
+            high_peak: 0.0,
+            previous_high: ONSET_FLOOR,
+            frame: None,
         }
     }
 
@@ -446,9 +465,9 @@ impl Analyzer {
         self.kick.threshold = threshold;
     }
 
-    /// Force d'attaque de la trame de 10 ms qui vient de se terminer, s'il y en a une.
-    pub fn take_onset(&mut self) -> Option<f32> {
-        self.onset.take()
+    /// Trame de 10 ms qui vient de se terminer, s'il y en a une.
+    pub fn take_onset(&mut self) -> Option<Onset> {
+        self.frame.take()
     }
 
     pub fn levels(&self) -> Levels {
@@ -474,6 +493,14 @@ impl Analyzer {
         let body = self.body_filter.process(x);
         let punch = self.punch_filter.process(x);
         self.onset.process(x);
+        self.high_peak = self.high_peak.max(self.raw[2]);
+        if let Some(kick) = self.onset.take() {
+            let high = self.high_peak.max(ONSET_FLOOR);
+            let bright = (high / self.previous_high).ln().max(0.0);
+            (self.previous_high, self.high_peak) = (high, 0.0);
+            let [bass, mid, high] = self.raw;
+            self.frame = Some(Onset { kick, bass, mid, high, bright });
+        }
         self.kick.process(bass, body, punch, treble, expectation)
     }
 }

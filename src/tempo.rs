@@ -7,6 +7,9 @@
 use std::collections::VecDeque;
 use std::f64::consts::TAU;
 
+use crate::audio::analysis::Onset;
+use crate::phrase::{PhraseTracker, Position};
+
 /// Plage de la détection automatique : exclut les octaves trompeuses (77,5 ou 310 pour 155 BPM).
 pub const DEFAULT_BPM_RANGE: (f64, f64) = (100.0, 190.0);
 /// Tempos acceptés en saisie manuelle.
@@ -319,6 +322,8 @@ pub struct Tracker {
     locked_until: f64,
     /// Force d'attaque des dernières secondes, trame par trame : (fin de trame, valeur).
     frames: VecDeque<(f64, f32)>,
+    /// Têtes de mesure et de phrase.
+    phrase: PhraseTracker,
 }
 
 impl Tracker {
@@ -332,6 +337,7 @@ impl Tracker {
             mean_offset: 0.0,
             locked_until: f64::NEG_INFINITY,
             frames: VecDeque::new(),
+            phrase: PhraseTracker::default(),
         }
     }
 
@@ -347,6 +353,12 @@ impl Tracker {
     /// via Link. Les kicks peuvent alors être cherchés sur les temps.
     pub fn locked(&self, now: f64) -> bool {
         self.clock.period.is_some() && (self.source != TempoSource::Auto || now < self.locked_until)
+    }
+
+    /// Place dans la mesure et la phrase du temps le plus proche de `t`, si la structure est
+    /// reconnue.
+    pub fn position(&self, t: f64) -> Option<Position> {
+        self.phrase.position(t, &self.clock)
     }
 
     /// Écart moyen (s) entre les kicks sur le temps et les temps de l'horloge.
@@ -428,8 +440,9 @@ impl Tracker {
     }
 
     /// Force d'attaque (voir `OnsetStrength`) de la trame de 10 ms qui finit à l'instant `t`.
-    pub fn on_onset(&mut self, t: f64, strength: f32) {
-        self.frames.push_back((t, strength));
+    pub fn on_onset(&mut self, t: f64, onset: Onset) {
+        self.frames.push_back((t, onset.kick));
+        self.phrase.on_frame(t, onset, &self.clock);
         self.forget_frames_before(t - FRAME_MEMORY);
     }
 
@@ -628,7 +641,7 @@ mod tests {
             } else {
                 0.0
             };
-            tracker.on_onset(t, strength);
+            tracker.on_onset(t, Onset { kick: strength, ..Onset::default() });
             t += 0.01;
         }
     }

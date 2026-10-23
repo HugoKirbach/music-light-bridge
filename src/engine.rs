@@ -26,7 +26,7 @@ use crate::hue::api;
 use crate::hue::snapshot::Restored;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
 use crate::link::LinkSession;
-use crate::look::{Dynamics, Motion, Palette, Phase, ReactiveLook, Spread};
+use crate::look::{Accent, Dynamics, Motion, Palette, Phase, ReactiveLook, Spread};
 use crate::midi::{MidiListener, Notes, note_hue};
 use crate::tempo::{MANUAL_BPM_LIMITS, TempoSource, Tracker};
 use crate::timing;
@@ -114,9 +114,11 @@ pub struct Status {
     /// Disposition effectivement jouée, et couleur envoyée à chaque lampe (canaux de la zone).
     pub active_spread: Spread,
     pub lamp_colors: Vec<[u8; 3]>,
-    /// Temps en cours dans une mesure de 4 (0 à 3), si le tempo est connu. La grille ne sait pas
-    /// où tombe le premier temps : la mesure affichée peut commencer sur n'importe lequel.
+    /// Temps en cours dans une mesure de 4 (0 à 3), si le tempo est connu. Tant que la structure
+    /// n'est pas reconnue, la mesure affichée peut commencer sur n'importe quel temps.
     pub beat: Option<u8>,
+    /// Temps en cours dans la phrase de quatre mesures (0 à 15), si la structure est reconnue.
+    pub phrase: Option<u8>,
     /// Captures enregistrées d'elles-mêmes, le groove ayant décroché dans un passage fort.
     pub auto_captures: u32,
 }
@@ -357,13 +359,19 @@ impl Engine {
     pub fn status(&self) -> Status {
         let now = Instant::now();
         let features = &self.features;
-        let (clock, source, offset) = {
+        let (clock, source, offset, position) = {
             let tracker = self.shared.tracker();
-            (tracker.clock(), tracker.source(), tracker.mean_offset())
+            let clock = tracker.clock();
+            // Le temps en cours : le dernier passé de la grille.
+            let started = clock.period().map(|period| {
+                clock.anchor() + ((features.seconds(now) - clock.anchor()) / period).floor() * period
+            });
+            (clock, tracker.source(), tracker.mean_offset(), started.and_then(|t| tracker.position(t)))
         };
-        let beat = clock
-            .period()
-            .map(|period| ((features.seconds(now) - clock.anchor()) / period).floor().rem_euclid(4.0) as u8);
+        // Sans structure reconnue, la mesure affichée commence à un temps quelconque.
+        let beat = position.map(|p| p.beat).or_else(|| {
+            clock.period().map(|period| ((features.seconds(now) - clock.anchor()) / period).floor().rem_euclid(4.0) as u8)
+        });
         let color = self.shared.color.load(Ordering::Relaxed);
         Status {
             bpm: clock.bpm(),
@@ -384,6 +392,7 @@ impl Engine {
             active_spread: Spread::from_index(self.shared.active_spread.load(Ordering::Relaxed)),
             lamp_colors: self.shared.lamp_colors.iter().map(|c| unpack(c.load(Ordering::Relaxed))).collect(),
             beat,
+            phrase: position.map(|p| p.phrase),
             auto_captures: self.shared.auto_captures.load(Ordering::Relaxed),
         }
     }
@@ -631,7 +640,16 @@ fn light_loop(
         });
         shared.grooving.store(planner.in_groove(&clock, features.seconds(now)), Ordering::Relaxed);
         match action {
-            Action::Flash { .. } => look.kick(),
+            Action::Flash { reactive } => {
+                // Place du temps flashé dans la structure : tête de phrase ou de mesure.
+                let at = if reactive { kick.unwrap_or(features.seconds(now)) } else { features.seconds(now) + advance.as_secs_f64() };
+                match shared.tracker().position(at) {
+                    Some(p) if p.phrase == 0 => look.kick_at(Accent::Phrase),
+                    Some(p) if p.beat == 0 => look.kick_at(Accent::Bar),
+                    Some(_) => look.kick_at(Accent::Beat),
+                    None => look.kick(),
+                }
+            }
             Action::Cancel => look.cancel_flash(),
             Action::None => {}
         }

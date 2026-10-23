@@ -11,6 +11,7 @@ mod hue;
 mod link;
 mod look;
 mod metronome;
+mod phrase;
 mod midi;
 mod tempo;
 mod timing;
