@@ -1,270 +1,434 @@
 # DJ-Bridge
 
-Lumières Philips Hue pilotées par le son (platines, synthé) et le tempo (Ableton Link),
-avec la latence la plus faible possible. Écrit en Rust, sortie via l'Entertainment API de Hue
-(flux UDP chiffré en DTLS, 60 paquets/s).
+Lumières Philips Hue pilotées par le son (platines, synthé, ce que joue le PC) et par le tempo
+(détection automatique ou Ableton Link), avec la latence la plus faible possible. L'appli écoute
+la musique et règle seule la mise en scène : elle flashe sur les vrais kicks, en avance pour
+tomber pile malgré la latence des ampoules. Elle reconnaît les breaks, les montées et les drops,
+et répartit la lumière entre les lampes selon leur place dans la pièce.
 
-## Phase 1 : sortie Hue et mesure de latence
+Écrit en Rust. La lumière part par l'Entertainment API de Hue : un flux UDP chiffré en DTLS,
+60 paquets par seconde. Windows uniquement pour l'instant (capture ASIO/WASAPI).
 
-Prérequis : un bridge Hue carré (v2), une ampoule couleur, et une **zone de divertissement**
-créée dans l'app Hue (Paramètres > Zones de divertissement) contenant l'ampoule.
+- [Ce que fait DJ-Bridge](#ce-que-fait-dj-bridge)
+- [Matériel](#matériel)
+- [Installation](#installation)
+- [Premier réglage : bridge, zone, latence](#premier-réglage--bridge-zone-latence)
+- [Utilisation : la fenêtre](#utilisation--la-fenêtre)
+- [Utilisation : le terminal](#utilisation--le-terminal)
+- [Comment ça marche](#comment-ça-marche)
+- [Analyse, captures et banc d'essai](#analyse-captures-et-banc-dessai)
+- [Fichiers et état des lampes](#fichiers-et-état-des-lampes)
+- [Dépannage](#dépannage)
+- [Licence](#licence)
+
+## Ce que fait DJ-Bridge
+
+- **Flashs sur les vrais kicks.** Ils sont détectés dans les basses et anticipés de la latence
+  des lampes, pour s'allumer en même temps que le son. Les breaks restent sombres.
+- **Tempo et grille.** Le BPM est détecté sur les kicks (ou imposé, ou donné par Ableton Link),
+  et une grille de temps tient à travers les breaks et les roulements.
+- **Structure du morceau.** Les mesures et les phrases (16 temps) sont repérées aux changements de
+  section. La tête de mesure et la tête de phrase sont alors accentuées.
+- **Phases reconnues** : groove, break, montée (avec son avancement vers le drop prévu), drop. Le
+  drop peut être allumé d'avance quand la structure le prévoit.
+- **Régisseur automatique.** Il change la disposition et la teinte d'une section à l'autre, selon
+  l'énergie du set.
+- **Plusieurs lampes.** Chacune a sa place dans la pièce et son retard propre, ce qui permet des
+  vagues, des alternances gauche/droite, ou de séparer graves et aigus.
+- **Scènes** enregistrées, rappelables d'un clic, d'une note MIDI ou du téléphone.
+- **Télécommande mobile** : une page pour téléphone sur le réseau local.
+- **Synthé** : Ableton Link pour le tempo exact, et chaque note MIDI flashe à sa couleur.
+- **Fiable en soirée.** Le bridge et l'entrée audio perdus se reconnectent seuls. L'état des
+  lampes est rétabli à la fin, même après un plantage.
+
+## Matériel
+
+- Un bridge Philips Hue **carré (v2)** et au moins une lampe **couleur** compatible Entertainment
+  (ampoules, Hue Go, rubans…).
+- Une **zone de divertissement** créée dans l'app Hue (Paramètres > Zones de divertissement) qui
+  contient les lampes à piloter.
+- Une source audio, au choix :
+  - une carte son (testé avec une Focusrite Scarlett 2i2) branchée sur la table de mixage ou le
+    synthé, de préférence en ASIO ;
+  - rien du tout : l'option **Sortie du PC** capte ce que joue Windows (Spotify, Ableton…).
+- Le PC et le bridge sur le même réseau local. Le téléphone aussi, pour la télécommande.
+
+## Installation
+
+DJ-Bridge se compile depuis les sources. Comptez une demi-heure la première fois, surtout du
+téléchargement.
+
+### 1. Outils de compilation (Windows)
+
+1. **Visual Studio Build Tools 2022** : <https://visualstudio.microsoft.com/fr/downloads/>
+   (section « Outils pour Visual Studio »). Dans l'installeur, cochez **Développement Desktop en
+   C++**. Il apporte le compilateur MSVC, le SDK Windows et **CMake**, qui compile Ableton Link.
+2. **Rust** : <https://rustup.rs> puis `rustup-init.exe`, avec les choix par défaut
+   (toolchain `stable-x86_64-pc-windows-msvc`). Ouvrez ensuite un **nouveau** terminal pour que
+   `cargo` soit trouvé.
+3. **LLVM** (pour `libclang`, qui génère les liaisons C d'Ableton Link et d'ASIO) :
+   <https://github.com/llvm/llvm-project/releases>, le fichier `LLVM-…-win64.exe`. Il s'installe
+   par défaut dans `C:\Program Files\LLVM`.
+4. **Kit ASIO de Steinberg** : <https://www.steinberg.net/asiosdk>. Décompressez-le, par exemple
+   dans `C:\Dev\ASIOSDK`. Le kit n'est pas inclus dans ce dépôt pour des raisons de licence.
+
+### 2. Récupérer et configurer le projet
+
+```bash
+git clone https://github.com/HugoKirbach/music-light-bridge.git
+```
+
+Le fichier `.cargo/config.toml` du dépôt indique où trouver ces outils. Adaptez les trois
+chemins s'ils diffèrent chez vous :
+
+```toml
+[env]
+CMAKE = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe"
+LIBCLANG_PATH = "C:\\Program Files\\LLVM\\bin"
+CPAL_ASIO_DIR = "C:\\Dev\\ASIOSDK"
+```
+
+Avec Visual Studio Community ou Professional au lieu des Build Tools, remplacez `BuildTools` par
+`Community` (ou `Professional`) dans le chemin de CMake.
+
+### 3. Compiler
+
+Dans le dossier du projet :
 
 ```bash
 cargo build --release
 ```
 
-1. Associer le bridge (appuyer sur son bouton quand c'est demandé) :
-   `cargo run --release -- pair` (ou `-- pair --ip 192.168.x.y`)
-2. Vérifier la zone choisie : `cargo run --release -- areas`
-3. Tester le flux (arc-en-ciel 10 s + régularité d'envoi) : `cargo run --release -- test`
-4. Calibrer la latence : `cargo run --release -- latency`
-   - Chaque seconde, un tic part dans les enceintes et un flash blanc vers la lampe, au même
-     instant. La lampe ayant du retard, on entend le tic avant de voir le flash.
-   - ↑ fait partir le flash plus tôt (+5 ms), ↓ plus tard ; →/← par pas de 1 ms. Monter jusqu'à
-     ce que tic et flash tombent ensemble, puis Entrée pour enregistrer (Échap : quitter sans
-     enregistrer).
-   - Mesure précise : avance à 0 ms, filmer la lampe au ralenti (240 i/s) ; l'écart entre
-     le tic et le flash sur la vidéo est la latence de la chaîne Hue (1 image = 4,2 ms).
-   - Utiliser une sortie audio filaire (le Bluetooth ajoute une latence non rapportée).
+L'exécutable est `target\release\dj-bridge.exe`. Les exemples qui suivent l'appellent
+`dj-bridge` : lancez-le depuis le dossier du projet avec `.\target\release\dj-bridge.exe …`, ou
+copiez-le où vous voulez (il est autonome).
 
-Si `cargo` est introuvable (terminal ouvert avant l'installation de Rust), lancer directement
-l'exécutable compilé : `.\target\release\dj-bridge.exe latency`, ou ouvrir un nouveau terminal.
+## Premier réglage : bridge, zone, latence
 
-## Phase 2 : mode live (entrée audio + horloge de tempo)
+1. **Associer le bridge.** Lancez `dj-bridge pair` et appuyez sur le bouton du bridge quand c'est
+   demandé. Si le bridge n'est pas trouvé, cherchez-le avec `dj-bridge discover` et passez son
+   adresse : `dj-bridge pair --ip 192.168.x.y`.
+2. **Choisir la zone.** `dj-bridge areas` liste les zones de divertissement et leurs lampes
+   (→ marque celle utilisée). S'il n'y en a qu'une, elle est choisie d'office ; sinon
+   `dj-bridge areas --select <id>` désigne la bonne.
+3. **Tester le flux** (facultatif) : `dj-bridge test` joue un arc-en-ciel pendant 10 s et mesure
+   la régularité d'envoi.
+4. **Calibrer la latence** : `dj-bridge latency`.
+   - Chaque seconde, un tic part dans les enceintes et un flash blanc vers les lampes au même
+     instant. Comme les lampes ont du retard, on entend le tic avant de voir le flash.
+   - Utilisez ↑ / ↓ pour faire partir le flash plus tôt ou plus tard (5 ms), et → / ← pour un pas
+     de 1 ms. Réglez jusqu'à ce que le tic et le flash tombent ensemble, puis appuyez sur Entrée
+     pour enregistrer (Échap pour quitter sans enregistrer).
+   - Pour une mesure précise, filmez au ralenti (240 i/s) avec l'avance à 0 ms. L'écart entre le
+     tic et le flash sur la vidéo est la latence (1 image = 4,2 ms).
+   - Prenez une sortie audio filaire : le Bluetooth ajoute une latence que Windows ne rapporte
+     pas.
+5. **Ouvrir la fenêtre** : `dj-bridge gui`. Elle ne touche pas aux lampes tant que le live n'est
+   pas lancé.
 
-Seuls les vrais kicks, détectés dans les basses, déclenchent un flash : les breaks et les temps
-creux restent sombres. Les kicks alimentent aussi une horloge de tempo (BPM stable estimé sur
-les 16 dernières secondes, ou saisi, et phase calée sur les kicks). Quand les kicks tombent sur
-deux temps de suite, le flash du suivant part en avance de la latence calibrée pour s'allumer
-avec lui ; s'il ne vient pas (début de break), ce flash est aussitôt annulé. Les kicks hors
-temps (roulements de montée, retour après un break) flashent immédiatement, et ne faussent ni
-le tempo ni la phase. La lueur suit les basses et la teinte glisse du rouge (son grave) vers
-le bleu (son brillant).
+Les identifiants du bridge et tous les réglages sont enregistrés dans
+`%APPDATA%\dj-bridge\config.json`, hors du dépôt.
 
-1. Lister les entrées audio et MIDI (→ : celle utilisée par défaut, la Focusrite si elle est
-   branchée) : `.\target\release\dj-bridge.exe devices`. Avec `--test`, l'entrée est ouverte 3 s
-   (sans le bridge) pour vérifier qu'elle reçoit du son et lire l'âge de ses blocs audio.
-2. Lancer le mode live : `.\target\release\dj-bridge.exe live`
-   - `--bpm 155` : démarrer avec un tempo imposé (sinon détection automatique).
-   - `--bpm-min` / `--bpm-max` : plage de la détection (100-190 par défaut).
-   - `--flash kicks|reactif|temps` : vrais kicks anticipés (par défaut), chaque kick sans
-     anticipation (aucun flash annulé, mais ~55 ms de retard), ou chaque temps de l'horloge.
-   - `--input "nom partiel"` : une autre entrée audio.
-   - `--audio output` : capte ce que le PC joue (WASAPI loopback), sur la sortie par défaut ou
-     celle choisie avec `--input` (haut-parleurs, sorties de la carte son). Dans la fenêtre :
-     « Sortie du PC ». La latence de sortie n'étant pas connue, les flashs peuvent précéder le
-     son de quelques ms (davantage en Bluetooth).
-   - `--audio auto|asio|wasapi` : pilote de capture. Par défaut, ASIO (« Focusrite USB ASIO »)
-     s'il est libre, sinon WASAPI ; un pilote ASIO n'accepte souvent qu'un logiciel à la fois,
-     d'où le repli quand Ableton l'utilise déjà. En ASIO, la latence d'entrée dépend de la taille
-     de tampon réglée dans Focusrite Control : 64 ou 128 échantillons pour la plus faible.
-3. Touches en direct :
-   - `b` puis chiffres et Entrée : saisir le BPM ; `+` / `-` : BPM ±0,5 ; `a` : BPM automatique.
-   - `m` : mode de flash, kicks → réactif → temps.
-   - ↑/↓ : seuil de détection des kicks plus haut (moins de kicks) / plus bas (plus de kicks).
-   - `r` : enregistre les 40 dernières secondes de l'entrée dans
-     `%APPDATA%\dj-bridge\captures\` (à faire juste après un passage qui décroche).
-4. Ligne d'état : B/M/A = basses, médiums, aigus ; ● = kick détecté ; ♩ = tempo (auto ou
-   man.) ; mode de flash ; ±n ms = écart moyen entre kicks et temps de l'horloge (n ms en
-   mode réactif = réaction côté PC) ; ⚠n = coupures audio signalées par le pilote.
+## Utilisation : la fenêtre
 
-Si les barres restent vides : vérifier le gain d'entrée de la 2i2 et, dans Windows,
-Paramètres > Confidentialité > Microphone > « Autoriser les applications de bureau ».
+`dj-bridge gui` ouvre l'écran **Préparer la session**. L'en-tête indique si le bridge répond, la
+zone pilotée et le nombre de lampes.
 
-La détection suit une grille de temps, comme celle d'un logiciel de DJ. Toutes les 10 ms, le
-moteur mesure une force d'attaque de kick : le bond d'énergie autour de 160 Hz (le punch du kick,
-net même quand le sidechain efface la sous-basse au même instant), renforcé par un clic. Chaque
-seconde, un peigne range cette force sur la grille des 6 dernières secondes : la position des
-temps qui en concentre le plus recale la grille (même décalée d'un demi-temps après un break),
-et si les kicks détectés un à un ne suffisent pas à estimer le tempo, le peigne le trouve seul
-(à 1 BPM près, affiné ensuite par les kicks).
+**Colonne principale :**
 
-Dès que le tempo est sûr (estimation confirmée dans la dernière minute et jamais contredite
-depuis, tempo imposé ou Ableton Link : la grille tient à travers un long break), la détection
-cherche le kick sur chaque temps : près d'un temps, ses seuils se relâchent (kick noyé dans une
-basse dense), et un kick qui remonte du creux creusé par le sidechain compte même si sa montée
-est lente. Un seul kick compte par temps. Une fois le groove établi (kicks sur 4 temps de suite), les seuils se durcissent aussi
-entre les temps (une note de basse ne passe pas pour un kick), et chaque temps flashe en avance :
-un kick manqué garde son flash, seuls deux temps sans kick de suite signent un break (un flash
-de trop, puis un annulé).
+1. **Source audio.**
+   - **Carte son** : choix de l'appareil et du pilote (ASIO s'il est libre, sinon WASAPI).
+   - **Sortie du PC** : capte ce que joue Windows (WASAPI loopback).
+2. **Lampes.**
+   - Cochez les lampes de la zone à piloter. Les autres gardent leur état pendant le live.
+   - Placez chaque lampe de gauche à droite en la faisant glisser sur la bande « pièce ». Cette
+     place sert aux vagues et aux alternances.
+   - **Mettre à jour** relit la zone si elle a changé dans l'app Hue.
+3. **Tempo.**
+   - **Détection auto** (plage 100–190 BPM).
+   - **BPM imposé** : le tempo reste fixe, seule la phase se cale sur les kicks.
+   - **Ableton Link** : tempo et phase viennent de la session.
+4. **MIDI** : les notes du synthé flashent à leur couleur, et une note peut rappeler une scène.
+5. **Télécommande** : cochez **Piloter le live depuis un téléphone** pour ouvrir la télécommande
+   mobile au lancement.
 
-Dans un mix dense (kick-bass, sous-basse roulante aussi forte que les kicks), le grave ne fait
-plus que gonfler de 30 à 50 % à chaque kick, comme à chaque note de basse. Ce qui trahit alors le
-kick, c'est son clic : l'attaque autour de 2,5 kHz qui précède son corps d'une vingtaine de ms.
-Un gonflement du grave sous 100 Hz juste après un clic compte comme un kick, même sans groove
-établi ; hors d'un mix dense, ou loin d'un temps en plein groove, cette règle ne joue pas.
+**Colonne de droite :** aperçu de la couleur principale, puis les sections suivantes.
+- **Animation** : Auto, Pulse, Respiration, Montée.
+- **Disposition** : Auto, Ensemble, Vague, Alternance, Graves / aigus, et la case **Régisseur
+  auto**.
+- **Couleurs** : Groove, Creux, Filtres.
+- **Flashs** : intensité, redescente, lueur de fond.
+- **Déclenchement** : Kicks anticipés, Réactif, Chaque temps.
+- **Seuil des kicks.**
+- **Scènes.**
 
-Au changement de morceau, les kicks du précédent restent un moment en mémoire : si les 6
-dernières secondes donnent un autre tempo, il est adopté après 4 confirmations (une par seconde),
-sans attendre que les anciens kicks soient oubliés.
+Les réglages sont repris à l'ouverture suivante.
 
-### Analyser un passage
+**Pendant le live**, la fenêtre devient une scène :
+- Le fond prend la couleur des lampes.
+- Le tempo s'affiche en très grand, avec quatre points pour les temps de la mesure.
+- Au-dessus du tempo, la phase reconnue : « GROOVE · MESURE 3/4 », ou « MONTÉE · 62 % · DROP
+  DANS 12 T ».
+- En haut à droite, la couleur de chaque lampe.
 
-`.\target\release\dj-bridge.exe analyze <capture.wav>` rejoue l'enregistrement dans la même
-chaîne que le mode live et affiche, par tranches de 4 s : tempo, part du temps en groove, temps
-marqués par un kick, kicks hors temps, flashs (anticipés / réactifs / annulés) et phase reconnue
-la plus présente (groove, break, montée : en mode Auto, un « break » donne la couleur des temps
-creux et la respiration, sans flash). Les tranches où
-moins de la moitié des temps ont un kick sont signalées par ⚠. Options : `--bpm`, `--threshold`,
-`--slice` (durée des tranches).
+Le dock du bas garde tout réglable en onglets :
 
-### Structure du morceau : mesures et phrases
+| Onglet | Contenu |
+|---|---|
+| Animation | Animation, disposition (la carte Auto montre celle jouée en ce moment), régisseur |
+| Couleurs | Les trois couleurs et leur nuancier |
+| Flashs | Allure des flashs et déclenchement |
+| Scènes | Rappeler, enregistrer (avec une note MIDI facultative), supprimer (clic droit) |
+| Tempo | Imposer un BPM ou revenir à la détection |
+| Lampes | **Test de synchro** et retard propre de chaque lampe |
+| Source | Entrée, niveaux, seuil, capture des 40 dernières secondes, adresse de la télécommande |
+
+Le bouton rond en haut à droite arrête le live et rétablit les lampes. Le bilan de la session
+s'affiche ensuite sous le bouton de lancement.
+
+### Accorder plusieurs lampes
+
+Les ampoules et la Hue Go ne réagissent pas toutes à la même vitesse. Dans l'onglet **Lampes** :
+
+1. Activez **Test de synchro** : toutes les lampes flashent en blanc sur chaque temps (ou toutes
+   les 0,5 s sans tempo).
+2. Si une lampe s'allume après les autres, montez son curseur (0–150 ms) jusqu'à ce que toutes
+   flashent ensemble.
+
+DJ-Bridge envoie alors les flashs plus tôt à la lampe la plus lente et retarde d'autant les
+autres. Le réglage est enregistré.
+
+### Scènes
+
+Une scène garde les couleurs, l'allure des flashs, l'animation, la disposition, le déclenchement
+et le régisseur.
+- **Enregistrer** : donnez un nom (et une note MIDI si vous voulez) puis cliquez sur **Enregistrer
+  la scène**. Une scène du même nom est remplacée.
+- **Rappeler** : un clic, une note MIDI liée (elle rappelle la scène au lieu de flasher), une
+  touche 1 à 9 dans le terminal, ou un bouton sur le téléphone.
+
+### Télécommande mobile
+
+Avec l'option cochée, ou `live --remote` dans le terminal, DJ-Bridge ouvre un petit serveur web
+sur le port 8484.
+- **L'adresse** s'affiche au lancement (onglet Source, ou première ligne du terminal), par exemple
+  `http://192.168.1.20:8484/3f9c…/`. Ouvrez-la sur un téléphone connecté au même Wi-Fi.
+- **La page** montre le tempo, la phase, l'avancement d'une montée et la couleur des lampes. Elle
+  pilote les scènes, l'animation, la disposition, le déclenchement et le régisseur, et un grand
+  bouton **DROP** envoie un éclat blanc.
+- **Sécurité** : l'adresse contient un jeton secret, gardé dans la configuration. Elle reste la
+  même d'une soirée à l'autre, vous pouvez la mettre en favori. Ne la partagez qu'avec qui doit
+  piloter.
+- **Pare-feu** : au premier lancement, Windows demande d'autoriser l'accès réseau de
+  `dj-bridge.exe`. Acceptez pour les réseaux privés.
+
+## Utilisation : le terminal
+
+`dj-bridge live` lance le mode live sans fenêtre. Il reprend les lampes, places, retards, couleurs
+et scènes réglés dans la fenêtre.
+
+| Option | Effet |
+|---|---|
+| `--input "nom partiel"` | Une autre entrée audio (voir `dj-bridge devices`) |
+| `--audio auto\|asio\|wasapi\|output` | Pilote de capture ; `output` capte ce que joue le PC |
+| `--bpm 155` | Démarrer avec un tempo imposé |
+| `--bpm-min` / `--bpm-max` | Plage de la détection automatique (100–190) |
+| `--flash kicks\|reactif\|temps` | Kicks anticipés (défaut), chaque kick sans avance, chaque temps |
+| `--motion auto\|pulse\|breath\|build-up` | Animation |
+| `--spread auto\|together\|wave\|alternate\|split` | Disposition |
+| `--no-director` | Sans régisseur : en disposition auto, le groove alterne toujours |
+| `--link` | Rejoindre la session Ableton Link |
+| `--midi ["nom partiel"]` | Écouter une entrée MIDI |
+| `--remote` | Ouvrir la télécommande mobile |
+| `--threshold 1.6` | Seuil de détection des kicks |
+
+Touches en direct :
+
+| Touche | Effet |
+|---|---|
+| `b`, chiffres, Entrée | Imposer un BPM |
+| `+` / `-` | BPM ±0,5 |
+| `a` | Revenir au BPM automatique |
+| `m` | Déclenchement : kicks → réactif → temps |
+| ↑ / ↓ | Seuil des kicks plus haut (moins de kicks) / plus bas |
+| `1` à `9` | Rappeler une scène |
+| `r` | Enregistrer les 40 dernières secondes (pour `analyze`) |
+| Échap | Quitter (lampes rétablies) |
+
+Ligne d'état, de gauche à droite :
+- `B` / `M` / `A` : niveaux des basses, médiums et aigus ;
+- `●` : kick détecté ; `♪` : note MIDI ;
+- `♩` : tempo et sa source ; puis le mode de flash et la phase (avec le % d'une montée) ;
+- `±n ms` : écart moyen entre les kicks et les temps de l'horloge ;
+- `★` : dernière scène rappelée ;
+- `⚠` : coupures audio, entrée perdue ou bridge injoignable ;
+- `●rec` : captures automatiques.
+
+Autres commandes : `devices` (avec `--test` pour vérifier qu'une entrée reçoit du son),
+`restore`, `analyze`, `bench` (voir plus bas).
+
+## Comment ça marche
+
+### De la musique au kick
+
+L'entrée audio est découpée en blocs par le pilote (ASIO avec une Focusrite réglée sur 64 ou
+128 échantillons pour la latence la plus faible). Un banc de filtres suit les basses, les
+médiums et les aigus, et un détecteur de kick cherche le bond d'énergie du grave.
+
+Le détecteur sait lire un mix dense. Il prend en compte le punch autour de 160 Hz, net même quand
+le sidechain efface la sous-basse au même instant. Il guette aussi le clic d'attaque vers 2,5 kHz,
+qui précède le corps du kick d'une vingtaine de ms, et un kick qui remonte du creux creusé par le
+sidechain. Toutes les 10 ms, une force d'attaque par bande est publiée pour le suivi du tempo,
+sans jamais bloquer le fil audio.
+
+### Tempo et grille
+
+Les kicks et la force d'attaque alimentent une horloge de tempo. Les écarts entre kicks donnent
+le BPM, et un « peigne » range la force d'attaque sur la grille des 6 dernières secondes pour
+caler la phase, même décalée d'un demi-temps après un break. Une fois sûr, le tempo est tenu une
+minute : un break ou un roulement ne le déplace pas.
+
+Quand le tempo est sûr, la détection cherche le kick sur chaque temps :
+- elle relâche ses seuils près d'un temps ;
+- en plein groove, elle les durcit entre les temps, pour qu'une note de basse ne passe pas pour
+  un kick.
+
+### Flashs anticipés
+
+Une fois le groove établi (des kicks sur 4 temps de suite), chaque temps flashe **en avance de
+la latence calibrée** : la lampe s'allume au moment où le kick sonne. Un kick manqué garde son
+flash. Deux temps sans kick de suite signent un break : un flash de trop, puis le suivant est
+annulé. Les kicks hors temps (roulements, retour après un break) flashent aussitôt.
+
+### Structure : mesures et phrases
 
 Dans une boucle de techno, rien ne distingue le premier temps de la mesure. La structure se lit
 aux changements de section (break, drop, entrée d'un élément), qui tombent en tête de phrase
-(quatre mesures, seize temps). DJ-Bridge décrit chaque temps par quelques indices (niveaux des
-basses, médiums et aigus, kick, attaques entre les temps) et compare les deux mesures qui
-précèdent chaque temps aux deux qui le suivent : un pic de cette nouveauté vote pour la position
-de son temps dans la phrase. Les votes s'estompent lentement (environ 80 mesures) et la grille
-continue de compter les temps pendant les breaks : une fois reconnue, la structure tient d'une
-section à l'autre. Tant qu'aucune position ne ressort nettement, la structure reste inconnue et
-rien ne change.
+(quatre mesures, seize temps). Chaque temps est décrit par quelques indices, et les deux mesures
+qui le précèdent sont comparées aux deux qui le suivent : un pic de nouveauté vote pour sa place
+dans la phrase. Une fois reconnue, la structure tient d'une section à l'autre. Tant qu'aucune
+position ne ressort nettement, elle reste inconnue et rien ne change.
 
-Quand elle est reconnue : les quatre points de la scène suivent la vraie mesure, la phase affiche
-la mesure dans la phrase (« GROOVE · MESURE 3/4 »), l'alternance réunit les lampes en tête de
-mesure, et la tête de phrase flashe toutes les lampes, en blanc plus franc. `analyze` affiche la
-place du temps dans la phrase en fin de tranche, et le banc d'essai note les têtes de mesure et
-de phrase des captures dont une tête de phrase est annotée (`"phrases": [17.91]`). Il faut
-compter quelques secondes après un premier changement de section, et un extrait sans changement
-(une seule boucle) ne donne pas de structure.
+### Phases : groove, break, montée, drop
 
-### Captures automatiques et banc d'essai
+- **Groove** : la grille confirme des kicks réguliers.
+- **Break** : la grille a perdu les kicks depuis 1 s, et soit ils sont rares, soit les basses
+  sont tombées sous 40 % de leur niveau habituel. Un roulement ou un impact isolé ne relance pas
+  le groove : il faut que la grille retrouve des kicks réguliers, avec des basses revenues ou
+  pendant 4 s.
+- **Montée** : les médiums et aigus enflent de plus de 4 dB sans basse, ou les kicks roulent à
+  plus de 4,5 par seconde.
+  - Quand la structure est connue, le drop est prévu sur la première tête de phrase au moins
+    8 temps après le début de la montée (puis la suivante s'il ne vient pas). L'intensité suit
+    l'avancement vers ce drop.
+  - Sans structure, l'intensité monte en 8 s.
+- **Drop** : un kick aux basses pleines conclut la montée par un éclat blanc sur toutes les
+  lampes.
+  - Quand le drop est prévu, l'éclat part avec l'avance des lampes pour tomber pile.
+  - Un kick aux basses nettement plus fortes que pendant la montée le confirme.
+  - Sinon l'éclat s'éteint après 0,25 s, et la montée n'anticipe plus.
 
-Les captures sont rangées dans `%APPDATA%\dj-bridge\captures\`, chacune avec une fiche JSON du
-même nom (tempo, et pour une capture automatique l'instant où le groove a décroché). Pendant le
-live, quand le groove décroche alors que les basses restent fortes (ce n'est donc pas un break,
-la détection a perdu les kicks), DJ-Bridge enregistre de lui-même les 40 dernières secondes, 8 s
-après la perte : au plus une capture toutes les 2 minutes et 20 par session. La fenêtre le
-signale, la ligne d'état du terminal affiche `●rec`.
+### Rendu : animation, disposition, couleurs
 
-`.\target\release\dj-bridge.exe bench` rejoue toutes les captures annotées dans `bench.json`
-(même dossier) et note ce que la lumière a fait, temps par temps : allumée à l'heure (à ±40 ms,
-latence Hue comprise), en retard, ou pas du tout ; lumières en trop ; tempo juste ; groove pris
-pour un break ; flashs parasites pendant les breaks. Les vrais temps viennent d'un oracle hors
-ligne qui, connaissant tout le passage, trouve la grille près du tempo et du kick annotés. Chaque
-note est comparée à celle du passage précédent du banc ; les captures pas encore annotées sont
-listées avec leur fiche. `--detail` détaille chaque passage, `--lumieres` liste chaque lumière et
-son décalage au temps le plus proche. Exemple d'annotation :
+- **Animation** :
+  - **Pulse** : un flash par kick ;
+  - **Respiration** : la lumière suit l'énergie, un kick n'ajoute qu'une houle ;
+  - **Montée** : la lumière s'intensifie et blanchit ;
+  - **Auto** : pulse en groove, respiration en break, montée en montée, éclat au drop.
+- **Disposition**, selon la place des lampes :
+  - **Ensemble** : toutes les lampes à chaque kick ;
+  - **Vague** : le flash traverse la pièce en 120 ms, et une ondulation lente la traverse en
+    break ;
+  - **Alternance** : gauche puis droite, et toutes les lampes en tête de mesure ;
+  - **Graves / aigus** : une lampe sur deux suit les kicks, les autres les médiums et aigus ;
+  - **Auto** : vague en montée et en break. En groove, c'est le régisseur qui choisit.
+- **Accents** : en tête de phrase, toutes les lampes flashent en blanc plus franc.
+- **Régisseur** (disposition Auto) : une nouvelle section s'ouvre au drop, au retour du groove et
+  toutes les deux phrases (64 kicks sans structure). Il choisit alors la disposition selon
+  l'énergie des 4 dernières secondes comparée à celle du set :
+  - quand ça s'emballe, ensemble ou alternance ;
+  - quand ça retombe, graves / aigus ou vague.
 
-```json
-{ "captures": [ {
-  "file": "capture-1792761389.wav", "note": "reprise après break",
-  "groove": [ { "from": 18.25, "to": 40.0, "bpm": 154.0, "kick": 18.30 } ],
-  "breaks": [ [12.5, 16.3] ], "phrases": [ 17.91 ]
-} ] }
-```
+  Il décale aussi la teinte principale de ±20° pour que deux sections se distinguent.
+- **Couleurs** :
+  - **Groove** : la couleur principale ;
+  - **Creux** : en break ;
+  - **Filtres** : passe-haut ou passe-bas, quand l'équilibre grave/aigu s'écarte d'environ
+    14 dB de celui du morceau.
 
-## Fenêtre et couleurs
+  On passe de l'une à l'autre en fondu. Du noir en Creux éteint les lampes pendant les breaks.
+- **MIDI** : chaque note flashe à sa couleur, sur le cercle des quintes (do rouge, sol orange,
+  ré jaune…), et plus fort quand la vélocité est élevée.
 
-`.\target\release\dj-bridge.exe gui` ouvre une fenêtre sans toucher aux lampes : l'écran
-**Préparer la session**. L'en-tête dit si le bridge répond et quelle zone sera pilotée. Au
-centre : la source audio (**Carte son**, avec l'appareil et le pilote, ou **Sortie du PC**), le
-tempo (**Détection auto**, **BPM imposé** ou **Ableton Link**), le MIDI, puis le bouton **Lancer
-le live**. La section **Lampes** liste les lampes de la zone de divertissement : celles qu'on
-décoche sont laissées hors du flux et gardent leur état pendant le live (le choix vaut aussi pour
-`live` dans le terminal). Seules les lampes ajoutées à la zone dans l'app Hue (Paramètres > Zones
-de divertissement) apparaissent ; si la zone change dans l'app Hue, le bouton **Mettre à jour**
-de la section la relit sans fermer la fenêtre. À droite : un aperçu de la couleur principale,
-l'animation, les couleurs, l'allure des
-flashs, leur déclenchement (kicks anticipés, réactif, chaque temps) et le seuil des kicks. Les
-réglages sont enregistrés et repris à l'ouverture suivante ; après l'arrêt, le bilan de la
-session s'affiche sous le bouton.
+### Fiabilité
 
-Pendant le live, la fenêtre devient une scène : le fond prend la couleur envoyée à la lampe, la
-phase reconnue s'affiche en haut, le tempo en très grand au centre (mis à jour chaque seconde,
-avec sa source) et quatre points marquent les temps de la mesure (le premier temps n'étant pas
-repéré, la mesure peut commencer sur n'importe lequel). En haut à droite, l'entrée captée et le
-bouton rond qui arrête le live (lampes rétablies). Le dock du bas garde tout réglable en onglets :
-**Animation**, **Couleurs**, **Flashs** (allure et déclenchement), **Tempo** (imposer un BPM ou
-revenir à la détection) et **Source** (entrée, niveaux, seuil, capture des 40 dernières secondes).
+- Si le bridge ne reçoit plus le flux (redémarrage, Wi-Fi), DJ-Bridge le rouvre seul, avec une
+  attente de 0,5 à 5 s entre deux tentatives. La scène affiche « Bridge injoignable :
+  reconnexion… ».
+- Si l'entrée audio disparaît (câble, pilote, ou plus aucun bloc depuis 1 s), elle est rouverte
+  toutes les 2 s.
+- Le bilan de fin de session compte ces reprises.
 
-Les trois couleurs : **Groove** (couleur principale), **Creux** (plus de kick depuis 1,5 s :
-break, passage calme) et **Filtres** (passe-haut ou passe-bas : l'équilibre grave/aigu s'écarte
-d'au moins ~14 dB de l'habitude du morceau, mémorisée sur 30 s). Un clic sur une pastille ouvre
-son nuancier. La lampe passe de l'une à l'autre en fondu ; la luminosité de chaque couleur
-plafonne celle de la scène (du noir en temps creux éteint la lampe pendant les breaks).
+## Analyse, captures et banc d'essai
 
-La section **Animation** choisit le mouvement de la lumière (`--motion` dans le terminal) :
+- `dj-bridge analyze <capture.wav>` rejoue un enregistrement dans la même chaîne que le live et
+  résume chaque tranche de 4 s. Le résumé donne le tempo, la part de groove, les temps marqués
+  par un kick, les kicks hors temps, les flashs (anticipés, réactifs, annulés), la place dans la
+  phrase et la phase.
+  - Options : `--bpm`, `--threshold`, `--slice`.
+- **Captures automatiques** : quand le groove décroche alors que les basses restent fortes (la
+  détection a perdu les kicks, ce n'est pas un break), les 40 dernières secondes sont
+  enregistrées d'elles-mêmes, au plus une toutes les 2 minutes. Elles vont dans
+  `%APPDATA%\dj-bridge\captures\`, chacune avec une fiche JSON.
+- `dj-bridge bench` rejoue les captures annotées dans `captures\bench.json` et note la lumière
+  temps par temps : allumée à l'heure (à ±40 ms), en retard ou manquée, lumières en trop, tempo,
+  breaks reconnus, mesures et phrases.
+  - Chaque note est comparée au passage précédent.
+  - `--detail` détaille chaque capture, `--lumieres` liste chaque flash.
 
-- **Pulse** : un flash par kick ;
-- **Respiration** : la luminosité suit l'énergie du son, les kicks n'ajoutent qu'une houle ;
-- **Montée** : la lumière s'intensifie et blanchit, les flashs gagnent en force ;
-- **Auto** (par défaut) : suit les phases du morceau, reconnues à l'écoute : **groove** (kicks
-  réguliers) → pulse, **break** (plus de kick depuis 1,5 s) → respiration, **montée** (médiums et
-  aigus qui enflent de plus de 4 dB sans basse, ou kicks qui roulent à plus de 4,5 par seconde)
-  → montée, puis **drop** (premier gros kick après la montée) → éclat blanc et retour au pulse.
-  Le passage d'une animation à l'autre se fait en fondu ; la phase reconnue s'affiche au-dessus
-  du BPM, et la carte Auto du dock indique l'animation jouée en ce moment.
+  Exemple d'annotation :
 
-La section **Disposition** répartit les flashs entre les lampes de la zone (`--spread` dans le
-terminal), selon leur place dans la pièce :
+  ```json
+  { "captures": [ {
+    "file": "capture-1792761389.wav", "note": "reprise après break",
+    "groove": [ { "from": 18.25, "to": 40.0, "bpm": 154.0, "kick": 18.30 } ],
+    "breaks": [ [12.5, 16.3] ], "phrases": [ 17.91 ]
+  } ] }
+  ```
 
-- **Ensemble** : toutes les lampes à chaque kick ;
-- **Vague** : le flash traverse la pièce en 120 ms, d'un côté puis de l'autre (aller-retour) ;
-- **Alternance** : la moitié gauche puis la moitié droite, à tour de rôle, et toutes ensemble en
-  tête de mesure ;
-- **Graves / aigus** : une lampe sur deux flashe sur les kicks, les autres respirent avec les
-  médiums et les aigus ;
-- **Auto** (par défaut) : alternance sur le groove, vague en montée, ondulation lente qui traverse
-  la pièce pendant les breaks, éclat général au drop.
+## Fichiers et état des lampes
 
-La place de chaque lampe vient de la zone de divertissement (`dj-bridge areas` l'affiche, de -1 à
-gauche à 1 à droite) : pour qu'une vague traverse vraiment la pièce, positionne les lampes dans
-l'app Hue (Paramètres > Zones de divertissement > la zone > positionner les lampes). Sans
-position, elles se suivent dans l'ordre de la zone. Avec une seule lampe, toutes les dispositions
-reviennent à « Ensemble ». Pendant le live, la scène montre la couleur de chaque lampe en haut à
-droite.
+Avant de prendre la main sur la zone, DJ-Bridge photographie l'état de chaque lampe : marche,
+luminosité, couleur et scènes actives. À la fermeture, il le rétablit en fondu et relance ces
+scènes. La photo est aussi écrite dans `%APPDATA%\dj-bridge\lampes-avant-flux.json` : après un
+plantage, elle est reprise au lancement suivant (si elle a moins de 6 h), ou tout de suite avec
+`dj-bridge restore`.
 
-La section **Flashs** règle leur allure, avant comme pendant le live : **intensité** (jusqu'où
-monte un flash au-dessus de la lueur), **redescente** (de 40 ms, sec, à 1,5 s, très doux) et
-**lueur de fond** (luminosité minimale gardée entre les kicks).
+| Fichier | Contenu |
+|---|---|
+| `%APPDATA%\dj-bridge\config.json` | Identifiants du bridge, zone, latence, réglages, places et retards des lampes, scènes, jeton de la télécommande |
+| `%APPDATA%\dj-bridge\captures\` | Captures audio, leurs fiches, `bench.json` |
+| `%APPDATA%\dj-bridge\lampes-avant-flux.json` | État des lampes à rétablir |
 
-Les couleurs et l'allure des flashs sont enregistrées à la fermeture de la fenêtre et reprises par `live`. Limite
-connue : un break qui retire toute la basse ressemble à un passe-haut et prend la couleur des
-filtres.
+Ne publiez pas `config.json` : il contient les clés d'accès au bridge.
 
-## Phase 3 : mode synthé (Ableton Link + MIDI)
+## Dépannage
 
-- `live --link` rejoint la session Ableton Link du réseau local (Live, Move, Push…) : le tempo
-  et la phase des temps viennent de la session, exacts, sans détection. Les flashs anticipés
-  tombent donc pile sur les temps de la session ; avec `--flash temps`, la lampe bat chaque temps
-  même sans kick (synthé seul). Les touches de tempo sont alors sans effet : le tempo se change
-  depuis la session. `--bpm` ne sert que si l'on crée la session.
-- `live --midi` (ou `--midi "nom partiel"`, voir `devices`) écoute les notes du synthé : chaque
-  note-on flashe à sa couleur, plus fort quand la vélocité est élevée, et la lueur garde la
-  couleur de la dernière note. Les 12 notes suivent le cercle des quintes (do rouge, sol orange,
-  ré jaune…), pour que des notes harmoniquement proches aient des couleurs voisines.
-- Les deux se combinent avec l'entrée audio : `live --link --midi`.
-
-Au premier lancement avec `--link`, Windows demande d'autoriser l'accès réseau de
-`dj-bridge.exe` : il faut accepter (réseau privé) pour voir les autres participants.
-
-La compilation utilise le CMake des Build Tools (Ableton Link), le libclang de LLVM et le kit
-ASIO de Steinberg (`C:\Dev\ASIOSDK`, double licence GPLv3 / accord Steinberg) ; leurs chemins
-sur ce PC sont dans `.cargo/config.toml`.
-
-## État des lampes avant et après
-
-Avant de prendre la main sur la zone de divertissement (`live`, `gui`, `test`, `latency`), DJ-Bridge
-photographie l'état de chacune de ses lampes : marche/arrêt, luminosité, couleur ou blanc, et les
-scènes actives qui les concernent. À la fermeture, il le rétablit en fondu (400 ms) et relance
-ces scènes, une scène dynamique reprenant son animation.
-
-La photo est aussi écrite dans `%APPDATA%\dj-bridge\lampes-avant-flux.json`. Si l'appli est
-coupée brutalement (plantage, console fermée), elle est reprise au lancement suivant (si elle a
-moins de 6 h) et rétablie à sa fermeture ; ou tout de suite avec :
-`.\target\release\dj-bridge.exe restore`.
-
-Les identifiants du bridge et l'avance calibrée sont stockés dans
-`%APPDATA%\dj-bridge\config.json`, hors du dépôt.
-
-## Feuille de route
-
-1. Sortie Hue + mesure de latence ✅
-2. Entrée audio : Focusrite 2i2 (WASAPI ✅, ASIO ✅), banc de filtres, détection de kick ✅
-3. Mode synthé live : Ableton Link + MIDI, flashs anticipés de la latence mesurée ✅ (à tester)
-4. Mode DJ : détection de tempo sur l'audio + anticipation ; bonus : réseau de l'OPUS-QUAD
-5. Palette à trois couleurs, interface `egui` ✅ (à tester)
+- **`cargo` introuvable** : le terminal a été ouvert avant l'installation de Rust. Ouvrez-en un
+  nouveau.
+- **Erreur de compilation sur CMake, libclang ou ASIO** : vérifiez les trois chemins de
+  `.cargo/config.toml`.
+- **Barres de niveau vides** : vérifiez le gain d'entrée de la carte son. Dans Windows, allez dans
+  Paramètres > Confidentialité > Microphone et activez « Autoriser les applications de bureau ».
+- **ASIO indisponible** : un pilote ASIO n'accepte souvent qu'un logiciel à la fois (Ableton
+  l'occupe). DJ-Bridge se replie alors sur WASAPI et le dit.
+- **Les flashs arrivent après le son** : refaites `dj-bridge latency`. Avec plusieurs lampes,
+  réglez leurs retards avec le test de synchro.
+- **Lampe absente** : elle doit faire partie de la zone de divertissement (app Hue), puis cliquez
+  sur **Mettre à jour**.
+- **Le téléphone n'ouvre pas la télécommande** : il doit être sur le même Wi-Fi que le PC, et
+  `dj-bridge.exe` autorisé dans le pare-feu Windows (réseau privé).
+- **Lampes restées dans l'état du live** : lancez `dj-bridge restore`.
 
 ## Licence
 
