@@ -47,6 +47,9 @@ const OFFSET_SMOOTHING: f64 = 0.1;
 /// 2,5 fois la moyenne (avec ses voisines) pour recaler la grille.
 const COMB_BIN: f64 = 0.01;
 const COMB_MIN_SPAN: f64 = 3.0;
+/// Chaque trame compte au plus 2,5 dans le peigne : un roulement trois fois plus fort que les kicks
+/// ne tire pas la grille vers lui pendant les 6 s où il reste dans la fenêtre.
+const COMB_CAP: f32 = 2.5;
 /// Trames gardées pour le peigne du tempo ; celui de la phase ne regarde que les 6 dernières
 /// secondes.
 const FRAME_MEMORY: f64 = 10.0;
@@ -212,7 +215,7 @@ impl CombProfile {
         let mut sums = vec![0.0f64; bins];
         for &(t, strength) in frames {
             let position = (t - last).rem_euclid(period) / period;
-            sums[((position * bins as f64) as usize).min(bins - 1)] += f64::from(strength);
+            sums[((position * bins as f64) as usize).min(bins - 1)] += f64::from(strength.min(COMB_CAP));
         }
         let smoothed: Vec<f64> =
             (0..bins).map(|i| sums[(i + bins - 1) % bins] + sums[i] + sums[(i + 1) % bins]).collect();

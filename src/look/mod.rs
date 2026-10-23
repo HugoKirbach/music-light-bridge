@@ -15,7 +15,7 @@ mod lamps;
 mod phases;
 
 pub use lamps::{Accent, Spread};
-pub use phases::Phase;
+pub use phases::{Phase, Pulse};
 use lamps::Lamp;
 use phases::PhaseTracker;
 
@@ -28,7 +28,6 @@ const PHRASE_PUNCH: f32 = 0.85;
 /// Intensité d'un flash de note : de 35 % (vélocité minimale) à 100 %.
 const NOTE_MIN_STRENGTH: f32 = 0.35;
 /// Sans kick depuis 1,5 s, la musique est dans un temps creux.
-const CALM_AFTER: f32 = 1.5;
 /// Durée du fondu d'une couleur de scène à l'autre.
 const SCENE_FADE: f32 = 0.6;
 /// Mémoire de l'équilibre grave/aigu habituel du morceau.
@@ -163,6 +162,8 @@ pub struct ReactiveLook {
     time: f32,
     /// Secondes écoulées depuis le dernier kick détecté.
     since_kick: f32,
+    /// La grille de temps confirme des kicks réguliers (`None` tant que le tempo est inconnu).
+    grid_groove: Option<bool>,
     /// Part des couleurs « temps creux » et « filtres » dans la scène, en fondu.
     calm: f32,
     filtered: f32,
@@ -188,6 +189,7 @@ impl Default for ReactiveLook {
             kicks: 0,
             time: 0.0,
             since_kick: 0.0,
+            grid_groove: None,
             calm: 0.0,
             filtered: 0.0,
             tilt_reference: None,
@@ -248,6 +250,12 @@ impl ReactiveLook {
                 Spread::Split => {}
             }
         }
+    }
+
+    /// État de la grille de temps à cet instant : des kicks réguliers sur les temps (`Some(true)`),
+    /// ou non, ou tempo inconnu (`None`).
+    pub fn set_grid_groove(&mut self, groove: Option<bool>) {
+        self.grid_groove = groove;
     }
 
     /// Un kick vient d'être détecté (flashé ou non) : la musique n'est pas dans un temps creux.
@@ -323,7 +331,8 @@ impl ReactiveLook {
             }
         }
 
-        let dropped = self.phases.update(dt, levels, self.since_kick <= CALM_AFTER);
+        let pulse = Pulse { since_kick: self.since_kick, grid_groove: self.grid_groove };
+        let dropped = self.phases.update(dt, levels, pulse);
         if dropped && matches!(self.motion, Motion::Auto | Motion::BuildUp) {
             // Le drop : un éclat blanc à pleine puissance, partout.
             for lamp in &mut self.lamps {
@@ -342,7 +351,7 @@ impl ReactiveLook {
             *weight = approach(*weight, if i == target { 1.0 } else { 0.0 }, dt, MOTION_FADE);
         }
 
-        let calm = if self.since_kick > CALM_AFTER { 1.0 } else { 0.0 };
+        let calm = if self.phases.grooving { 0.0 } else { 1.0 };
         let filtered = self.filter_amount(levels.tilt, dt);
         self.calm = approach(self.calm, calm, dt, SCENE_FADE);
         self.filtered = approach(self.filtered, filtered, dt, SCENE_FADE);
@@ -690,5 +699,38 @@ mod tests {
         look.kick_at(Accent::Phrase);
         let phrase = look.render(FRAME, Levels::default());
         assert!(phrase.g > beat.g && phrase.b > beat.b, "{beat:?} {phrase:?}");
+    }
+
+    /// Joue `seconds` avec la grille dans l'état `grid`, les basses à `bass`, un kick tous les
+    /// `every` images (jamais si 0) ; rend la dernière phase.
+    fn groove_run(look: &mut ReactiveLook, seconds: f32, grid: bool, bass: f32, every: usize) -> Phase {
+        let levels = Levels { bass, raw_bass: bass, tilt: Some(0.0), ..Levels::default() };
+        look.set_grid_groove(Some(grid));
+        for frame in 0..(seconds * FRAMES_PER_SECOND as f32) as usize {
+            if every > 0 && frame % every == 0 {
+                look.kick_detected();
+            }
+            look.render(FRAME, levels);
+        }
+        look.phase()
+    }
+
+    #[test]
+    fn a_break_with_a_few_hits_stays_a_break_until_the_grid_finds_the_kicks_again() {
+        let mut look = ReactiveLook::new(PALETTE);
+        assert_eq!(groove_run(&mut look, 10.0, true, 0.5, 24), Phase::Groove);
+        // Break : la basse continue à moitié, un coup isolé toutes les 1,2 s.
+        assert_eq!(groove_run(&mut look, 3.0, false, 0.25, 72), Phase::Calm);
+        // Un roulement (kicks rapprochés) sans que la grille les confirme : toujours un break.
+        assert_eq!(groove_run(&mut look, 1.0, false, 0.25, 12), Phase::Calm, "roulement");
+        // La grille retrouve des kicks réguliers avec les basses : le groove reprend.
+        assert_eq!(groove_run(&mut look, 1.0, true, 0.5, 24), Phase::Groove);
+    }
+
+    #[test]
+    fn a_short_grid_hiccup_in_a_loud_groove_is_not_a_break() {
+        let mut look = ReactiveLook::new(PALETTE);
+        groove_run(&mut look, 10.0, true, 0.5, 24);
+        assert_eq!(groove_run(&mut look, 0.8, false, 0.5, 24), Phase::Groove);
     }
 }

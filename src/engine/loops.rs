@@ -58,7 +58,9 @@ pub(super) fn light_loop(
             locked,
             groove: planner.in_groove(&clock, features.seconds(now)),
         });
-        shared.grooving.store(planner.in_groove(&clock, features.seconds(now)), Ordering::Relaxed);
+        let grooving = planner.in_groove(&clock, features.seconds(now));
+        shared.grooving.store(grooving, Ordering::Relaxed);
+        look.set_grid_groove(clock.period().map(|_| grooving));
         match action {
             Action::Flash { reactive } => {
                 // Place du temps flashé dans la structure : tête de phrase ou de mesure.
