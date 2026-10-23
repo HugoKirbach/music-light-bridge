@@ -207,6 +207,7 @@ pub enum Icon {
     Play,
     Stop,
     Record,
+    Refresh,
 }
 
 pub fn icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32) {
@@ -239,6 +240,19 @@ pub fn icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32) {
         }
         Icon::Record => {
             painter.circle_filled(p(11.0, 11.0), 7.0 * s, DANGER);
+        }
+        Icon::Refresh => {
+            // Cercle presque fermé, flèche au bout.
+            let arc: Vec<Pos2> = (0..=20)
+                .map(|i| {
+                    let a = 0.6 + 4.9 * i as f32 / 20.0;
+                    p(11.0 + 7.0 * a.cos(), 11.0 + 7.0 * a.sin())
+                })
+                .collect();
+            let end = *arc.last().unwrap_or(&p(11.0, 11.0));
+            painter.add(Shape::line(arc, stroke));
+            let head = vec![end + vec2(-1.0, -4.5) * s, end + vec2(4.5, 1.0) * s, end + vec2(-1.5, 2.5) * s];
+            painter.add(Shape::convex_polygon(head, color, Stroke::NONE));
         }
     }
 }
@@ -356,6 +370,23 @@ pub fn big_button(ui: &mut Ui, size: Vec2, fill: Color32, ink: Color32, with_ico
     icon(painter, with_icon, Rect::from_center_size(pos2(left + 8.0, rect.center().y), Vec2::splat(16.0)), ink);
     painter.galley(pos2(left + 26.0, rect.center().y - galley.size().y / 2.0), galley, ink);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Petit bouton discret avec une icône, grisé quand l'interface est désactivée.
+pub fn small_button(ui: &mut Ui, with_icon: Icon, label: &str) -> Response {
+    let enabled = ui.is_enabled();
+    let color = if enabled { TEXT } else { LABEL };
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font(13.0, SEMIBOLD), color);
+    let size = vec2(12.0 + 14.0 + 8.0 + galley.size().x + 12.0, 30.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let painter = ui.painter();
+    let fill = if enabled && response.hovered() { SELECTED } else { RAISED };
+    painter.rect_filled(rect, 8.0, fill);
+    painter.rect_stroke(rect, 8.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+    let glyph = Rect::from_center_size(pos2(rect.left() + 12.0 + 7.0, rect.center().y), Vec2::splat(14.0));
+    icon(painter, with_icon, glyph, if enabled { ACCENT } else { LABEL });
+    painter.galley(pos2(glyph.right() + 8.0, rect.center().y - galley.size().y / 2.0), galley, color);
+    if enabled { response.on_hover_cursor(egui::CursorIcon::PointingHand) } else { response }
 }
 
 /// Choix à cocher en forme de pastille : case à gauche, libellé à droite.

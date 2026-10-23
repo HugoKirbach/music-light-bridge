@@ -93,7 +93,8 @@ tempo (**Détection auto**, **BPM imposé** ou **Ableton Link**), le MIDI, puis 
 le live**. La section **Lampes** liste les lampes de la zone de divertissement : celles qu'on
 décoche sont laissées hors du flux et gardent leur état pendant le live (le choix vaut aussi pour
 `live` dans le terminal). Seules les lampes ajoutées à la zone dans l'app Hue (Paramètres > Zones
-de divertissement) apparaissent ; après en avoir ajouté une, **Actualiser** relit la zone. À droite : un aperçu de la couleur principale, l'animation, les couleurs, l'allure des
+de divertissement) apparaissent ; si la zone change dans l'app Hue, le bouton **Mettre à jour**
+de la section la relit sans fermer la fenêtre. À droite : un aperçu de la couleur principale, l'animation, les couleurs, l'allure des
 flashs, leur déclenchement (kicks anticipés, réactif, chaque temps) et le seuil des kicks. Les
 réglages sont enregistrés et repris à l'ouverture suivante ; après l'arrêt, le bilan de la
 session s'affiche sous le bouton.

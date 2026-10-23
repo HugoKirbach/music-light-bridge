@@ -129,7 +129,19 @@ impl App {
         self.device_row(ui, width);
 
         ui.add_space(12.0);
-        theme::section(ui, "2 · LAMPES");
+        ui.horizontal(|ui| {
+            theme::section(ui, "2 · LAMPES");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let pending = matches!(*self.bridge.lock().unwrap_or_else(PoisonError::into_inner), Bridge::Pending);
+                let label = if pending { "Lecture de la zone…" } else { "Mettre à jour" };
+                let button = ui.add_enabled_ui(!pending && self.cfg.bridge.is_some(), |ui| {
+                    theme::small_button(ui, Icon::Refresh, label)
+                });
+                if button.inner.on_hover_text("Relire la zone de divertissement, si elle a changé dans l'app Hue").clicked() {
+                    self.refresh_bridge();
+                }
+            });
+        });
         self.lamps_row(ui);
 
         ui.add_space(12.0);
@@ -239,9 +251,16 @@ impl App {
     fn lamps_row(&mut self, ui: &mut Ui) {
         let bridge = self.bridge.clone();
         let bridge = bridge.lock().unwrap_or_else(PoisonError::into_inner);
-        let Bridge::Ready { lamps, .. } = &*bridge else {
-            ui.label(theme::text("Les lampes s'affichent dès que le bridge répond.", theme::regular(13.0), LABEL));
-            return;
+        let lamps = match &*bridge {
+            Bridge::Ready { lamps, .. } => lamps,
+            Bridge::Failed(reason) => {
+                ui.label(theme::text(format!("Zone illisible : {reason}"), theme::regular(13.0), DANGER));
+                return;
+            }
+            _ => {
+                ui.label(theme::text("Les lampes s'affichent dès que le bridge répond.", theme::regular(13.0), LABEL));
+                return;
+            }
         };
         let mut toggled = None;
         ui.horizontal_wrapped(|ui| {
@@ -274,7 +293,7 @@ impl App {
             None => {}
         }
         ui.label(theme::text(
-            "Les lampes décochées gardent leur état pendant le live. Une lampe absente ? Ajoute-la à la zone de divertissement dans l'app Hue, puis « Actualiser ».",
+            "Les lampes décochées gardent leur état pendant le live. Zone modifiée dans l'app Hue ? « Mettre à jour » la relit.",
             theme::regular(12.0),
             LABEL,
         ));

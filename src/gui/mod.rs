@@ -146,6 +146,14 @@ impl App {
 
     /// Relit les entrées audio et MIDI, et demande au bridge la zone et ses lampes.
     fn refresh_devices(&mut self) {
+        self.refresh_bridge();
+        self.inputs = audio::list_inputs().map(|list| list.into_iter().map(|i| i.name).collect()).unwrap_or_default();
+        self.outputs = audio::list_outputs().unwrap_or_default();
+        self.midi_ports = midi::list_inputs().unwrap_or_default();
+    }
+
+    /// Redemande au bridge la zone et ses lampes, par exemple après un changement dans l'app Hue.
+    fn refresh_bridge(&mut self) {
         if let Some(credentials) = self.cfg.bridge.clone() {
             *self.bridge.lock().unwrap_or_else(PoisonError::into_inner) = Bridge::Pending;
             let (slot, wanted) = (self.bridge.clone(), self.cfg.area_id.clone());
@@ -160,9 +168,6 @@ impl App {
                 *slot.lock().unwrap_or_else(PoisonError::into_inner) = state;
             });
         }
-        self.inputs = audio::list_inputs().map(|list| list.into_iter().map(|i| i.name).collect()).unwrap_or_default();
-        self.outputs = audio::list_outputs().unwrap_or_default();
-        self.midi_ports = midi::list_inputs().unwrap_or_default();
     }
 
     fn show(&mut self, text: impl Into<String>) {
