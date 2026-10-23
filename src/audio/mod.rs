@@ -6,7 +6,7 @@ mod input;
 #[cfg(test)]
 pub mod synth;
 
-pub use input::{AudioInput, Backend, list_inputs, list_outputs};
+pub use input::{AudioInput, Backend, CAPTURE_SECONDS, list_inputs, list_outputs};
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -78,6 +78,7 @@ pub struct Features {
     /// Instant (depuis `epoch`) où l'échantillon déclencheur du dernier kick a été capté.
     last_kick_ns: AtomicU64,
     bass: AtomicF32,
+    raw_bass: AtomicF32,
     mid: AtomicF32,
     high: AtomicF32,
     /// Équilibre grave/aigu ; `NaN` dans le silence.
@@ -107,6 +108,7 @@ impl Features {
             kicks: AtomicU32::new(0),
             last_kick_ns: AtomicU64::new(0),
             bass: AtomicF32::default(),
+            raw_bass: AtomicF32::default(),
             mid: AtomicF32::default(),
             high: AtomicF32::default(),
             tilt: AtomicF32::new(f32::NAN),
@@ -160,6 +162,7 @@ impl Features {
             high: self.high.load(),
             tilt: known(self.tilt.load()),
             presence: known(self.presence.load()),
+            raw_bass: self.raw_bass.load(),
         }
     }
 
@@ -226,6 +229,7 @@ impl Features {
         self.high.store(levels.high);
         self.tilt.store(levels.tilt.unwrap_or(f32::NAN));
         self.presence.store(levels.presence.unwrap_or(f32::NAN));
+        self.raw_bass.store(levels.raw_bass);
     }
 
     fn set_input_latency(&self, latency: Duration) {

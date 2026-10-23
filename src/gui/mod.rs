@@ -105,6 +105,8 @@ struct App {
     message: Option<(Instant, String)>,
     /// Bilan de la dernière session, affiché après l'arrêt.
     summary: Option<String>,
+    /// Captures automatiques déjà signalées pendant ce live.
+    auto_captures_seen: u32,
 }
 
 impl App {
@@ -139,6 +141,7 @@ impl App {
             next_refresh: Instant::now(),
             message: None,
             summary: None,
+            auto_captures_seen: 0,
         };
         app.refresh_devices();
         app
@@ -232,6 +235,7 @@ impl App {
                 self.next_refresh = Instant::now();
                 self.shown_bpm = None;
                 self.summary = None;
+                self.auto_captures_seen = 0;
                 self.message = None;
                 self.engine = Some(engine);
             }
@@ -384,6 +388,10 @@ impl eframe::App for App {
                     self.shown_bpm = status.bpm;
                     self.shown_source = status.source;
                     self.next_refresh = Instant::now() + BPM_REFRESH;
+                }
+                if status.auto_captures > self.auto_captures_seen {
+                    self.auto_captures_seen = status.auto_captures;
+                    self.show("Le groove a décroché : capture automatique enregistrée pour le banc d'essai.");
                 }
                 self.stage(ui, &status);
             }

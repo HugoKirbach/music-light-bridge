@@ -532,7 +532,7 @@ mod tests {
     }
 
     fn sound(bass: f32, presence: f32) -> Levels {
-        Levels { bass, mid: 0.5, high: 0.5, tilt: Some(1.0), presence: Some(presence) }
+        Levels { bass, mid: 0.5, high: 0.5, tilt: Some(1.0), presence: Some(presence), raw_bass: bass }
     }
 
     #[test]

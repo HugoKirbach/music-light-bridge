@@ -44,8 +44,12 @@ const OFFSET_SMOOTHING: f64 = 0.1;
 /// 2,5 fois la moyenne (avec ses voisines) pour recaler la grille.
 const COMB_BIN: f64 = 0.01;
 const COMB_MIN_SPAN: f64 = 3.0;
+/// Trames gardées pour le peigne du tempo ; celui de la phase ne regarde que les 6 dernières
+/// secondes.
+const FRAME_MEMORY: f64 = 10.0;
 const COMB_CONTRAST: f64 = 2.5;
-/// Un autre tempo ne remplace celui de l'horloge que si son peigne contraste 1,25 fois plus.
+/// Un autre tempo (ou une autre position des temps) ne remplace celui de l'horloge que si son
+/// peigne contraste 1,25 fois plus.
 const COMB_SWITCH: f64 = 1.25;
 /// Tempos dont le peigne contraste à 2 % près du meilleur : le plateau dont on prend le milieu.
 const COMB_PLATEAU: f64 = 0.98;
@@ -140,11 +144,19 @@ fn dominant_beat(onsets: &[f64], period: f64) -> Option<f64> {
     (concentration >= MIN_PHASE_CONCENTRATION).then(|| reference + sin.atan2(cos) / TAU * period)
 }
 
-/// Instant d'un temps d'après le peigne : la force d'attaque des trames, rangée par position
-/// dans le temps (cases de 10 ms), s'accumule là où tombent les kicks. Rien si les trames
-/// couvrent moins de 3 s ou si la meilleure position ne domine pas assez la moyenne.
-fn comb_beat(frames: &[(f64, f32)], period: f64) -> Option<f64> {
-    comb(frames, period).filter(|&(_, contrast)| contrast > COMB_CONTRAST).map(|(beat, _)| beat)
+/// Instant d'un temps d'après le peigne sur les dernières secondes : la force d'attaque des
+/// trames, rangée par position dans le temps (cases de 10 ms), s'accumule là où tombent les kicks.
+/// `None` sans assez de trames (moins de 3 s) ; `Some(None)` quand le peigne garde la grille
+/// actuelle : sa meilleure position ne domine pas assez la moyenne, ou ne bat pas nettement celle
+/// des temps actuels (`current`, un temps de l'horloge). Dans certains morceaux, kick et
+/// contretemps se valent sur quelques secondes, et la grille ne doit pas sauter de l'un à l'autre.
+fn comb_beat(frames: &[(f64, f32)], period: f64, current: Option<f64>) -> Option<Option<f64>> {
+    let last = frames.last()?.0;
+    let recent = &frames[frames.partition_point(|&(t, _)| t < last - RECENT_WINDOW)..];
+    let profile = CombProfile::new(recent, period)?;
+    let (beat, contrast) = profile.best();
+    let held = current.map_or(0.0, |current| profile.at(current));
+    Some((contrast > COMB_CONTRAST && contrast > held * COMB_SWITCH).then_some(beat))
 }
 
 /// Tempo d'après le peigne : celui, entre `bpm_range`, dont la grille concentre le mieux la force
@@ -178,24 +190,52 @@ fn comb_tempo(frames: &[(f64, f32)], bpm_range: (f64, f64), current: Option<f64>
     (contrast > COMB_CONTRAST).then_some(TempoEstimate { bpm, anchor, confidence: 1.0 })
 }
 
+/// Profil du peigne : la force d'attaque des trames rangée par position dans le temps, en cases
+/// de 10 ms (chacune avec ses deux voisines : un kick peut tomber à cheval sur deux trames).
+struct CombProfile {
+    smoothed: Vec<f64>,
+    mean: f64,
+    last: f64,
+    period: f64,
+}
+
+impl CombProfile {
+    fn new(frames: &[(f64, f32)], period: f64) -> Option<Self> {
+        let (&(first, _), &(last, _)) = (frames.first()?, frames.last()?);
+        if last - first < COMB_MIN_SPAN {
+            return None;
+        }
+        let bins = ((period / COMB_BIN).round() as usize).max(4);
+        let mut sums = vec![0.0f64; bins];
+        for &(t, strength) in frames {
+            let position = (t - last).rem_euclid(period) / period;
+            sums[((position * bins as f64) as usize).min(bins - 1)] += f64::from(strength);
+        }
+        let smoothed: Vec<f64> =
+            (0..bins).map(|i| sums[(i + bins - 1) % bins] + sums[i] + sums[(i + 1) % bins]).collect();
+        let mean = smoothed.iter().sum::<f64>() / bins as f64;
+        (mean > 0.0).then_some(Self { smoothed, mean, last, period })
+    }
+
+    /// Instant d'un temps à la meilleure position, et sa valeur rapportée à la moyenne.
+    fn best(&self) -> (f64, f64) {
+        let (best, &peak) = self.smoothed.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap_or((0, &0.0));
+        // La trame qui porte le bond finit ~10 ms après l'attaque : on vise le début de la case.
+        let beat = self.last + best as f64 / self.smoothed.len() as f64 * self.period - COMB_BIN;
+        (beat, peak / self.mean)
+    }
+
+    /// Valeur (rapportée à la moyenne) de la position d'un temps placé à l'instant `beat`.
+    fn at(&self, beat: f64) -> f64 {
+        let bins = self.smoothed.len();
+        let position = (beat + COMB_BIN - self.last).rem_euclid(self.period) / self.period;
+        self.smoothed[((position * bins as f64).round() as usize) % bins] / self.mean
+    }
+}
+
 /// Instant d'un temps et contraste du peigne (meilleure position sur la moyenne).
 fn comb(frames: &[(f64, f32)], period: f64) -> Option<(f64, f64)> {
-    let (&(first, _), &(last, _)) = (frames.first()?, frames.last()?);
-    if last - first < COMB_MIN_SPAN {
-        return None;
-    }
-    let bins = ((period / COMB_BIN).round() as usize).max(4);
-    let mut sums = vec![0.0f64; bins];
-    for &(t, strength) in frames {
-        let position = (t - last).rem_euclid(period) / period;
-        sums[((position * bins as f64) as usize).min(bins - 1)] += f64::from(strength);
-    }
-    // Une case et ses deux voisines : un kick peut tomber à cheval sur deux trames.
-    let smoothed: Vec<f64> = (0..bins).map(|i| sums[(i + bins - 1) % bins] + sums[i] + sums[(i + 1) % bins]).collect();
-    let mean = smoothed.iter().sum::<f64>() / bins as f64;
-    let (best, &peak) = smoothed.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1))?;
-    // La trame qui porte le bond finit ~10 ms après l'attaque : on vise le début de la case.
-    (mean > 0.0).then(|| (last + best as f64 / bins as f64 * period - COMB_BIN, peak / mean))
+    CombProfile::new(frames, period).map(|profile| profile.best())
 }
 
 /// Grille des temps : un temps toutes les `period` secondes, calée sur `anchor`.
@@ -377,7 +417,8 @@ impl Tracker {
         let onsets = self.onsets.make_contiguous();
         let recent = &onsets[onsets.partition_point(|&t| t < now - RECENT_WINDOW)..];
         let frames = self.frames.make_contiguous();
-        let target = comb_beat(frames, period).or_else(|| dominant_beat(recent, period));
+        let current = self.clock.nearest_beat(now);
+        let target = comb_beat(frames, period, current).unwrap_or_else(|| dominant_beat(recent, period));
         if let Some(target) = target
             && let Some(beat) = self.clock.nearest_beat(target)
             && (target - beat).abs() > ON_BEAT * period
@@ -389,7 +430,7 @@ impl Tracker {
     /// Force d'attaque (voir `OnsetStrength`) de la trame de 10 ms qui finit à l'instant `t`.
     pub fn on_onset(&mut self, t: f64, strength: f32) {
         self.frames.push_back((t, strength));
-        self.forget_frames_before(t - RECENT_WINDOW);
+        self.forget_frames_before(t - FRAME_MEMORY);
     }
 
     fn forget_frames_before(&mut self, t: f64) {

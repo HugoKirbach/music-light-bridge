@@ -71,9 +71,24 @@ impl Slice {
     }
 }
 
-struct Replay {
+/// Ce que la chaîne a fait, instant par instant, pour le banc d'essai.
+#[derive(Debug, Default)]
+pub struct Timeline {
+    /// Ordres de flash (anticipés ou réactifs), et annulations de flash anticipé.
+    pub flashes: Vec<f64>,
+    pub cancels: Vec<f64>,
+    /// Force d'attaque de chaque trame de 10 ms : (fin de trame, valeur).
+    pub onsets: Vec<(f64, f32)>,
+    /// Phase reconnue, à chaque image (60 par seconde).
+    pub phases: Vec<(f64, Phase)>,
+    /// Tempo de l'horloge, à chaque réestimation.
+    pub tempos: Vec<(f64, Option<f64>)>,
+}
+
+pub struct Replay {
     slices: Vec<Slice>,
     tracker: Tracker,
+    pub timeline: Timeline,
 }
 
 pub fn run(cfg: &Config, options: Options) -> Result<()> {
@@ -127,7 +142,7 @@ pub fn run(cfg: &Config, options: Options) -> Result<()> {
 }
 
 /// Fait passer l'enregistrement dans la chaîne du mode live, au fil des échantillons.
-fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay {
+pub fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay {
     let step = 1.0 / f64::from(rate);
     let mut analyzer = Analyzer::new(rate as f32, options.threshold);
     let mut tracker = Tracker::new(options.bpm_range);
@@ -138,6 +153,7 @@ fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay
     let mut arrivals: VecDeque<(f64, f64)> = VecDeque::new();
     let mut slices = Vec::new();
     let mut slice = Slice::default();
+    let mut timeline = Timeline::default();
     // Phase reconnue (break, montée…), comme la boucle d'éclairage la voit.
     let mut look = ReactiveLook::new(Palette::default());
     let mut next_frame = 0.0;
@@ -168,6 +184,7 @@ fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay
 
         if let Some(strength) = analyzer.take_onset() {
             tracker.on_onset(t, strength);
+            timeline.onsets.push((t, strength));
         }
         let arrived = arrivals.front().is_some_and(|&(at, _)| at <= t);
         if t >= next_poll || arrived {
@@ -176,10 +193,12 @@ fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay
             match planner.poll(&clock, t, kick) {
                 Action::Flash { reactive } => {
                     look.kick();
+                    timeline.flashes.push(t);
                     if reactive { slice.reactive += 1 } else { slice.anticipated += 1 }
                 }
                 Action::Cancel => {
                     look.cancel_flash();
+                    timeline.cancels.push(t);
                     slice.cancelled += 1;
                 }
                 Action::None => {}
@@ -189,10 +208,12 @@ fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay
         if t >= next_frame {
             look.render(Duration::from_secs_f64(FRAME), analyzer.levels());
             slice.phase_frames[usize::from(look.phase().index())] += 1;
+            timeline.phases.push((t, look.phase()));
             next_frame += FRAME;
         }
         if t >= next_update {
             tracker.update(t);
+            timeline.tempos.push((t, tracker.clock().bpm()));
             next_update += TEMPO_UPDATE;
         }
         if t >= slice.start + options.slice {
@@ -206,7 +227,7 @@ fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Replay
         slice.bpm = tracker.clock().bpm();
         slices.push(slice);
     }
-    Replay { slices, tracker }
+    Replay { slices, tracker, timeline }
 }
 
 #[cfg(test)]

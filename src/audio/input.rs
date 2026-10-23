@@ -20,7 +20,7 @@ const PREFERRED_INPUT: &str = "focusrite";
 /// Pilote ASIO choisi quand aucun n'est demandé.
 const PREFERRED_ASIO: &str = "focusrite usb";
 /// Durée gardée en mémoire pour la capture (touche `r` du mode live).
-const CAPTURE_SECONDS: u32 = 40;
+pub const CAPTURE_SECONDS: u32 = 40;
 
 /// Pilote audio utilisé pour la capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]

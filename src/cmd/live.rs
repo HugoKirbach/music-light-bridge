@@ -160,9 +160,13 @@ fn status_text(status: &Status) -> String {
         0 => String::new(),
         n => format!(" ⚠{n}"),
     };
+    let auto = match status.auto_captures {
+        0 => String::new(),
+        n => format!(" ●rec{n}"),
+    };
     let levels = status.levels;
     format!(
-        "B{} M{} A{} {}{} ♩{tempo} {source} {} {} s{:.2} {metric}{alert}",
+        "B{} M{} A{} {}{} ♩{tempo} {source} {} {} s{:.2} {metric}{alert}{auto}",
         tui::meter(levels.bass, METER_WIDTH),
         tui::meter(levels.mid, METER_WIDTH),
         tui::meter(levels.high, METER_WIDTH),

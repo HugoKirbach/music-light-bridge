@@ -332,6 +332,8 @@ pub struct Levels {
     /// Niveau brut des médiums et des aigus (dBFS) : il enfle pendant une montée (riser,
     /// roulement de caisse claire) ; `None` dans le silence.
     pub presence: Option<f32>,
+    /// Enveloppe brute des basses, non normalisée : sert à comparer un passage à un autre.
+    pub raw_bass: f32,
 }
 
 /// Niveau en dBFS ; rien dans le silence.
@@ -344,67 +346,58 @@ fn tilt(bass: f32, high: f32) -> Option<f32> {
     (bass.max(high) > GAIN_FLOOR).then(|| (bass.max(TILT_FLOOR) / high.max(TILT_FLOOR)).ln())
 }
 
-/// Force d'attaque de kick, une valeur toutes les 10 ms : le bond d'énergie du punch (autour de
-/// 160 Hz, où vit l'attaque d'un kick même quand le sidechain efface la sous-basse), renforcé
-/// quand un clic l'accompagne. Notes de basse, claps et bosses de sous-basse en font nettement
-/// moins : sommée sur la grille, elle désigne la position des temps.
+/// Force d'attaque de kick, une valeur toutes les 10 ms : la somme des bonds d'énergie de quatre
+/// bandes sous 250 Hz (50, 90, 150 et 230 Hz), chacune redressée à part. Quand le sidechain
+/// efface la sous-basse au moment du kick, le bond du haut du grave compte quand même ; un clap,
+/// un stab ou un charleston, même avec une attaque aiguë énorme, en font nettement moins.
+/// Sommée sur la grille, elle désigne la position des kicks.
 #[derive(Debug, Clone)]
 pub struct OnsetStrength {
-    punch: Envelope,
-    click: Envelope,
+    bands: [(Biquad, Envelope); ONSET_BANDS.len()],
+    peaks: [f32; ONSET_BANDS.len()],
+    previous: [f32; ONSET_BANDS.len()],
     hop: u32,
     count: u32,
-    punch_peak: f32,
-    click_peak: f32,
-    previous_punch: f32,
-    previous_click: f32,
-    /// Bonds de clic des dernières trames : le clic précède le punch de 10 à 40 ms.
-    recent_clicks: [f32; ONSET_CLICK_FRAMES],
     ready: Option<f32>,
 }
 
 /// Durée d'une trame de force d'attaque (s).
 pub const ONSET_HOP: f64 = 0.01;
-const ONSET_CLICK_FRAMES: usize = 4;
-/// Poids du clic : un punch précédé d'un clic franc (×e) compte double.
-const ONSET_CLICK_WEIGHT: f32 = 1.0;
+const ONSET_BANDS: [f32; 4] = [50.0, 90.0, 150.0, 230.0];
+const ONSET_Q: f32 = 1.0;
 /// En dessous (-80 dBFS), le bond n'a pas de sens.
 const ONSET_FLOOR: f32 = 1e-4;
 
 impl OnsetStrength {
     pub fn new(rate: f32) -> Self {
         Self {
-            punch: Envelope::new(rate, 0.002, 0.03),
-            click: Envelope::new(rate, CLICK_ATTACK, CLICK_RELEASE),
+            bands: ONSET_BANDS.map(|center| (Biquad::band_pass(rate, center, ONSET_Q), Envelope::new(rate, 0.002, 0.03))),
+            peaks: [0.0; ONSET_BANDS.len()],
+            previous: [ONSET_FLOOR; ONSET_BANDS.len()],
             hop: (rate * ONSET_HOP as f32).round() as u32,
             count: 0,
-            punch_peak: 0.0,
-            click_peak: 0.0,
-            previous_punch: ONSET_FLOOR,
-            previous_click: ONSET_FLOOR,
-            recent_clicks: [0.0; ONSET_CLICK_FRAMES],
             ready: None,
         }
     }
 
-    /// Traite un échantillon filtré autour de 160 Hz et le même autour de 2,5 kHz.
+    /// Traite un échantillon brut.
     #[inline]
-    pub fn process(&mut self, punch: f32, click: f32) {
-        self.punch_peak = self.punch_peak.max(self.punch.process(punch.abs()));
-        self.click_peak = self.click_peak.max(self.click.process(click.abs()));
+    pub fn process(&mut self, x: f32) {
+        for ((filter, envelope), peak) in self.bands.iter_mut().zip(&mut self.peaks) {
+            *peak = peak.max(envelope.process(filter.process(x).abs()));
+        }
         self.count += 1;
         if self.count < self.hop {
             return;
         }
-        let punch = self.punch_peak.max(ONSET_FLOOR);
-        let click = self.click_peak.max(ONSET_FLOOR);
-        let rise = (punch / self.previous_punch).ln().max(0.0);
-        self.recent_clicks.rotate_right(1);
-        self.recent_clicks[0] = (click / self.previous_click).ln().max(0.0);
-        let clicked = self.recent_clicks.iter().copied().fold(0.0, f32::max);
-        self.ready = Some(rise * (1.0 + ONSET_CLICK_WEIGHT * clicked));
-        (self.previous_punch, self.previous_click) = (punch, click);
-        (self.count, self.punch_peak, self.click_peak) = (0, 0.0, 0.0);
+        let mut rise = 0.0;
+        for (peak, previous) in self.peaks.iter_mut().zip(&mut self.previous) {
+            let level = peak.max(ONSET_FLOOR);
+            rise += (level / *previous).ln().max(0.0);
+            (*previous, *peak) = (level, 0.0);
+        }
+        self.ready = Some(rise);
+        self.count = 0;
     }
 
     /// Valeur de la trame qui vient de se terminer, une seule fois.
@@ -466,6 +459,7 @@ impl Analyzer {
             high,
             tilt: tilt(self.raw[0], self.raw[2]),
             presence: decibels(self.raw[1] + self.raw[2]),
+            raw_bass: self.raw[0],
         }
     }
 
@@ -479,7 +473,7 @@ impl Analyzer {
         let treble = self.click_filter.process(x);
         let body = self.body_filter.process(x);
         let punch = self.punch_filter.process(x);
-        self.onset.process(punch, treble);
+        self.onset.process(x);
         self.kick.process(bass, body, punch, treble, expectation)
     }
 }

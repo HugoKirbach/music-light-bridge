@@ -83,6 +83,12 @@ impl Config {
         Ok(dir.join("dj-bridge").join("config.json"))
     }
 
+    /// Dossier des captures audio (touche `r`, bouton Capturer, captures automatiques) et du
+    /// banc d'essai.
+    pub fn captures_dir() -> Result<PathBuf> {
+        Ok(Self::path()?.parent().context("dossier de configuration introuvable")?.join("captures"))
+    }
+
     pub fn load() -> Result<Self> {
         let path = Self::path()?;
         match fs::read_to_string(&path) {

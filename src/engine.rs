@@ -14,11 +14,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde_json::json;
 use tokio::runtime::Runtime;
 
 use crate::audio::analysis::{KICK_DETECTION_DELAY, Levels};
 use crate::audio::capture::Capture;
-use crate::audio::{AudioInput, Backend, Features, Grid};
+use crate::audio::{AudioInput, Backend, CAPTURE_SECONDS, Features, Grid};
 use crate::config::Config;
 use crate::flash::{Action, CONFIRM_MARGIN, FlashMode, FlashPlanner};
 use crate::hue::api;
@@ -40,6 +41,16 @@ const CONFIRM_RANGE: (f64, f64) = (0.03, 0.1);
 const LIT: Duration = Duration::from_millis(100);
 pub const THRESHOLD_RANGE: (f32, f32) = (1.1, 4.0);
 const LINK_TEMPO: &str = "tempo piloté par Ableton Link : change-le depuis la session";
+/// Captures automatiques : le groove doit avoir tenu 8 s, la capture part 8 s après sa perte si
+/// les basses sont restées à plus de 60 % de leur niveau pendant le groove (moyenne sur 4 s), au
+/// plus une toutes les 2 min et 20 par session.
+const AUTO_POLL: Duration = Duration::from_millis(250);
+const AUTO_MIN_GROOVE: Duration = Duration::from_secs(8);
+const AUTO_AFTER: Duration = Duration::from_secs(8);
+const AUTO_BASS_MEMORY: f32 = 4.0;
+const AUTO_LOUD: f32 = 0.6;
+const AUTO_SPACING: Duration = Duration::from_secs(120);
+const AUTO_MAX: u32 = 20;
 
 pub struct Options {
     pub input: Option<String>,
@@ -101,6 +112,8 @@ pub struct Status {
     /// Temps en cours dans une mesure de 4 (0 à 3), si le tempo est connu. La grille ne sait pas
     /// où tombe le premier temps : la mesure affichée peut commencer sur n'importe lequel.
     pub beat: Option<u8>,
+    /// Captures enregistrées d'elles-mêmes, le groove ayant décroché dans un passage fort.
+    pub auto_captures: u32,
 }
 
 /// Bilan affiché à l'arrêt.
@@ -136,6 +149,9 @@ struct Shared {
     link: bool,
     link_peers: AtomicU64,
     flashes: AtomicU32,
+    /// Le groove tient (publié par la boucle d'éclairage), et captures automatiques enregistrées.
+    grooving: AtomicBool,
+    auto_captures: AtomicU32,
     note_flashes: AtomicU32,
     /// Instant (s, horloge commune) de la dernière note, en bits de `f64`.
     last_note: AtomicU64,
@@ -253,6 +269,8 @@ impl Engine {
             link: options.link,
             link_peers: AtomicU64::new(0),
             flashes: AtomicU32::new(0),
+            grooving: AtomicBool::new(false),
+            auto_captures: AtomicU32::new(0),
             note_flashes: AtomicU32::new(0),
             last_note: AtomicU64::new(f64::NEG_INFINITY.to_bits()),
             color: AtomicU32::new(0),
@@ -274,6 +292,14 @@ impl Engine {
         {
             let (features, shared) = (features.clone(), shared.clone());
             helpers.push(thread::Builder::new().name("tempo".into()).spawn(move || tempo_loop(&shared, &features))?);
+        }
+        {
+            let (features, shared, capture) = (features.clone(), shared.clone(), audio.capture.clone());
+            helpers.push(
+                thread::Builder::new()
+                    .name("captures auto".into())
+                    .spawn(move || auto_capture_loop(&shared, &features, &capture))?,
+            );
         }
         if options.link {
             let (features, shared, bpm) = (features.clone(), shared.clone(), options.bpm);
@@ -339,6 +365,7 @@ impl Engine {
             phase: Phase::from_index(self.shared.phase.load(Ordering::Relaxed)),
             active_motion: Motion::from_index(self.shared.active_motion.load(Ordering::Relaxed)),
             beat,
+            auto_captures: self.shared.auto_captures.load(Ordering::Relaxed),
         }
     }
 
@@ -406,16 +433,8 @@ impl Engine {
 
     /// Écrit les dernières secondes de l'entrée audio dans un WAV, à rejouer avec `dj-bridge analyze`.
     pub fn save_capture(&self) -> Result<PathBuf> {
-        let (rate, samples) = {
-            let capture = self.capture.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            (capture.rate(), capture.snapshot())
-        };
-        let dir = Config::path()?.parent().context("dossier de configuration introuvable")?.join("captures");
-        fs::create_dir_all(&dir)?;
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let path = dir.join(format!("capture-{stamp}.wav"));
-        wav::write_mono_f32(&path, rate, &samples)?;
-        Ok(path)
+        let bpm = self.shared.tracker().clock().bpm();
+        write_capture(&self.capture, &json!({ "auto": false, "bpm": bpm }))
     }
 
     /// Arrête les fils, ferme le flux, rétablit l'état d'origine des lampes et dresse le bilan.
@@ -586,6 +605,7 @@ fn light_loop(
             locked,
             groove: planner.in_groove(&clock, features.seconds(now)),
         });
+        shared.grooving.store(planner.in_groove(&clock, features.seconds(now)), Ordering::Relaxed);
         match action {
             Action::Flash { .. } => look.kick(),
             Action::Cancel => look.cancel_flash(),
@@ -647,5 +667,136 @@ fn link_loop(shared: &Shared, features: &Features, bpm: Option<f64>) {
         shared.tracker().set_link(beat.bpm, beat.beat_time);
         shared.link_peers.store(beat.peers, Ordering::Relaxed);
         thread::sleep(LINK_POLL);
+    }
+}
+
+/// Écrit les dernières secondes de l'entrée audio dans le dossier des captures, avec une fiche
+/// JSON du même nom (contexte de la capture, pour l'annoter au banc d'essai).
+fn write_capture(capture: &Mutex<Capture>, sheet: &serde_json::Value) -> Result<PathBuf> {
+    let (rate, samples) = {
+        let capture = capture.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        (capture.rate(), capture.snapshot())
+    };
+    let dir = Config::captures_dir()?;
+    fs::create_dir_all(&dir)?;
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let path = (0..)
+        .map(|n| dir.join(if n == 0 { format!("capture-{stamp}.wav") } else { format!("capture-{stamp}-{n}.wav") }))
+        .find(|path| !path.exists())
+        .context("nom de capture introuvable")?;
+    wav::write_mono_f32(&path, rate, &samples)?;
+    fs::write(path.with_extension("json"), serde_json::to_string_pretty(sheet)?)?;
+    Ok(path)
+}
+
+/// Décide des captures automatiques : quand le groove décroche alors que les basses restent aussi
+/// fortes qu'avant, ce n'est pas un break, la détection a perdu les kicks. Les instants sont en
+/// secondes.
+#[derive(Debug, Default)]
+struct AutoTrigger {
+    grooving_since: Option<f64>,
+    /// Basses brutes pendant le groove (moyenne glissante).
+    groove_bass: f32,
+    /// Perte du groove : instant, puis cumul et nombre des niveaux de basse depuis.
+    lost: Option<(f64, f32, u32)>,
+    last_saved: Option<f64>,
+    saved: u32,
+}
+
+impl AutoTrigger {
+    /// Une mesure ; rend le temps écoulé depuis la perte du groove quand il faut capturer.
+    fn step(&mut self, now: f64, dt: f32, grooving: bool, bass: f32) -> Option<f64> {
+        if grooving {
+            self.grooving_since.get_or_insert(now);
+            self.groove_bass += (bass - self.groove_bass) * (dt / AUTO_BASS_MEMORY).min(1.0);
+            self.lost = None;
+            return None;
+        }
+        if let Some(since) = self.grooving_since.take()
+            && now - since >= AUTO_MIN_GROOVE.as_secs_f64()
+        {
+            self.lost = Some((now, 0.0, 0));
+        }
+        let (at, sum, count) = self.lost.as_mut()?;
+        *sum += bass;
+        *count += 1;
+        let after = now - *at;
+        if after < AUTO_AFTER.as_secs_f64() {
+            return None;
+        }
+        let loud = *sum / *count as f32 >= AUTO_LOUD * self.groove_bass;
+        let spaced = self.last_saved.is_none_or(|saved| now - saved >= AUTO_SPACING.as_secs_f64());
+        self.lost = None;
+        (loud && spaced && self.saved < AUTO_MAX).then(|| {
+            self.last_saved = Some(now);
+            self.saved += 1;
+            after
+        })
+    }
+}
+
+/// Enregistre de lui-même les dernières secondes quand le groove décroche dans un passage fort
+/// (voir `AutoTrigger`). La capture, prise 8 s après, couvre l'avant et l'après.
+fn auto_capture_loop(shared: &Shared, features: &Features, capture: &Mutex<Capture>) {
+    let mut trigger = AutoTrigger::default();
+    let start = Instant::now();
+    let dt = AUTO_POLL.as_secs_f32();
+    while !shared.stopped() {
+        thread::sleep(AUTO_POLL);
+        let now = start.elapsed().as_secs_f64();
+        let grooving = shared.grooving.load(Ordering::Relaxed);
+        let Some(after) = trigger.step(now, dt, grooving, features.levels().raw_bass) else { continue };
+        let sheet = json!({
+            "auto": true,
+            "raison": "groove perdu alors que les basses restent fortes",
+            "groove_perdu_a": f64::from(CAPTURE_SECONDS) - after,
+            "bpm": shared.tracker().clock().bpm(),
+        });
+        if write_capture(capture, &sheet).is_ok() {
+            shared.auto_captures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fait tourner le déclencheur toutes les 250 ms : (durée, groove, basses) par étape.
+    fn run(steps: &[(f64, bool, f32)]) -> Vec<f64> {
+        let mut trigger = AutoTrigger::default();
+        let (mut now, mut fired) = (0.0, Vec::new());
+        for &(duration, grooving, bass) in steps {
+            let end = now + duration;
+            while now < end {
+                now += 0.25;
+                if trigger.step(now, 0.25, grooving, bass).is_some() {
+                    fired.push(now);
+                }
+            }
+        }
+        fired
+    }
+
+    #[test]
+    fn a_lost_groove_in_a_loud_passage_is_captured_after_eight_seconds() {
+        let fired = run(&[(20.0, true, 1.0), (12.0, false, 0.9)]);
+        assert_eq!(fired.len(), 1, "{fired:?}");
+        assert!((fired[0] - 28.0).abs() < 0.3, "{fired:?}");
+    }
+
+    #[test]
+    fn a_break_a_short_groove_or_a_quick_recovery_is_not_captured() {
+        assert!(run(&[(20.0, true, 1.0), (12.0, false, 0.1)]).is_empty(), "break : les basses tombent");
+        assert!(run(&[(5.0, true, 1.0), (12.0, false, 0.9)]).is_empty(), "groove trop court");
+        assert!(run(&[(20.0, true, 1.0), (4.0, false, 0.9), (10.0, true, 1.0)]).is_empty(), "groove revenu");
+    }
+
+    #[test]
+    fn captures_are_spaced_by_two_minutes() {
+        let lose = [(20.0, true, 1.0), (12.0, false, 0.9)];
+        let fired = run(&[lose, lose, lose, lose, lose].concat());
+        assert_eq!(fired.len(), 2, "{fired:?}");
+        assert!(fired[1] - fired[0] >= 120.0);
     }
 }

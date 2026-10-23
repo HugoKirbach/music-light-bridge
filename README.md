@@ -108,6 +108,32 @@ creux et la respiration, sans flash). Les tranches où
 moins de la moitié des temps ont un kick sont signalées par ⚠. Options : `--bpm`, `--threshold`,
 `--slice` (durée des tranches).
 
+### Captures automatiques et banc d'essai
+
+Les captures sont rangées dans `%APPDATA%\dj-bridge\captures\`, chacune avec une fiche JSON du
+même nom (tempo, et pour une capture automatique l'instant où le groove a décroché). Pendant le
+live, quand le groove décroche alors que les basses restent fortes (ce n'est donc pas un break,
+la détection a perdu les kicks), DJ-Bridge enregistre de lui-même les 40 dernières secondes, 8 s
+après la perte : au plus une capture toutes les 2 minutes et 20 par session. La fenêtre le
+signale, la ligne d'état du terminal affiche `●rec`.
+
+`.\target\release\dj-bridge.exe bench` rejoue toutes les captures annotées dans `bench.json`
+(même dossier) et note ce que la lumière a fait, temps par temps : allumée à l'heure (à ±40 ms,
+latence Hue comprise), en retard, ou pas du tout ; lumières en trop ; tempo juste ; groove pris
+pour un break ; flashs parasites pendant les breaks. Les vrais temps viennent d'un oracle hors
+ligne qui, connaissant tout le passage, trouve la grille près du tempo et du kick annotés. Chaque
+note est comparée à celle du passage précédent du banc ; les captures pas encore annotées sont
+listées avec leur fiche. `--detail` détaille chaque passage, `--lumieres` liste chaque lumière et
+son décalage au temps le plus proche. Exemple d'annotation :
+
+```json
+{ "captures": [ {
+  "file": "capture-1792761389.wav", "note": "reprise après break",
+  "groove": [ { "from": 18.25, "to": 40.0, "bpm": 154.0, "kick": 18.30 } ],
+  "breaks": [ [12.5, 16.3] ]
+} ] }
+```
+
 ## Fenêtre et couleurs
 
 `.\target\release\dj-bridge.exe gui` ouvre une fenêtre sans toucher aux lampes : l'écran

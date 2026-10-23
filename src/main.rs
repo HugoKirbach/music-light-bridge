@@ -79,6 +79,15 @@ enum Command {
     Live(LiveArgs),
     /// Fenêtre : régler le mode live puis le lancer d'un clic
     Gui,
+    /// Banc d'essai : rejoue les captures annotées (bench.json) et note la lumière temps par temps
+    Bench {
+        /// Détaille chaque passage annoté
+        #[arg(long)]
+        detail: bool,
+        /// Liste aussi chaque lumière et son décalage au temps le plus proche (ms)
+        #[arg(long = "lumieres")]
+        lights: bool,
+    },
     /// Rejoue une capture audio (touche `r` du mode live) et résume la détection tranche par tranche
     Analyze {
         /// Fichier WAV à analyser
@@ -180,6 +189,7 @@ fn main() -> Result<()> {
             cmd::live::run(rt, &cfg, options)
         }
         Command::Gui => gui::run(rt, cfg),
+        Command::Bench { detail, lights } => cmd::bench::run(&cfg, detail, lights),
         Command::Analyze { path, threshold, bpm, bpm_min, bpm_max, slice } => cmd::analyze::run(
             &cfg,
             cmd::analyze::Options { path, threshold, bpm, bpm_range: (bpm_min, bpm_max), slice },
