@@ -171,6 +171,10 @@ pub struct ReactiveLook {
     tilt_reference: Option<f32>,
     /// Couleur de la dernière note MIDI ; elle remplace celle de la scène.
     note_color: Option<Color>,
+    /// Avance des lampes (s) : le drop prévu d'une montée s'allume d'autant plus tôt ; et drop
+    /// déjà montré d'avance, qui ne se rejoue pas à sa confirmation.
+    drop_advance: f32,
+    drop_shown: bool,
 }
 
 impl Default for ReactiveLook {
@@ -194,6 +198,8 @@ impl Default for ReactiveLook {
             filtered: 0.0,
             tilt_reference: None,
             note_color: None,
+            drop_advance: 0.0,
+            drop_shown: false,
         }
     }
 }
@@ -315,6 +321,17 @@ impl ReactiveLook {
         }
     }
 
+    /// Avance des lampes (s), dont le drop prévu d'une montée s'allume d'autant plus tôt.
+    pub fn set_drop_advance(&mut self, advance: f32) {
+        self.drop_advance = advance;
+    }
+
+    fn fire_drop(&mut self) {
+        for lamp in &mut self.lamps {
+            lamp.fire(1.0, 1.0);
+        }
+    }
+
     /// Éteint les flashs en cours (kick anticipé qui n'est pas venu).
     pub fn cancel_flash(&mut self) {
         for lamp in &mut self.lamps {
@@ -348,12 +365,19 @@ impl ReactiveLook {
         }
 
         let pulse = Pulse { since_kick: self.since_kick, grid_groove: self.grid_groove };
+        let drops = matches!(self.motion, Motion::Auto | Motion::BuildUp);
+        // Le drop : un éclat blanc à pleine puissance, partout ; d'avance quand la structure le
+        // prévoit, pour qu'il tombe pile.
+        if drops && self.phases.anticipate_drop(self.drop_advance) {
+            self.fire_drop();
+            self.drop_shown = true;
+        }
         let dropped = self.phases.update(dt, levels, pulse);
-        if dropped && matches!(self.motion, Motion::Auto | Motion::BuildUp) {
-            // Le drop : un éclat blanc à pleine puissance, partout.
-            for lamp in &mut self.lamps {
-                lamp.fire(1.0, 1.0);
-            }
+        if std::mem::take(&mut self.phases.false_drop) && std::mem::take(&mut self.drop_shown) {
+            self.cancel_flash();
+        }
+        if dropped && drops && !std::mem::take(&mut self.drop_shown) {
+            self.fire_drop();
         }
         let target = match self.active_motion() {
             Motion::Breath => 1,
@@ -588,35 +612,72 @@ mod tests {
         assert_eq!(look.phase(), Phase::Groove);
     }
 
+    /// Joue de `from` à `until` (s) un morceau à 150 BPM dont la structure est connue : une
+    /// phrase de 16 temps dure 6,4 s, têtes à 0, 6,4, 12,8 et 19,2 s. Un kick toutes les
+    /// `kick_every` trames, aux basses `bass(t)`. Renvoie l'avancement de la montée et le temps
+    /// avant son drop.
+    fn structured(look: &mut ReactiveLook, from: f32, until: f32, kick_every: usize, bass: impl Fn(f32) -> f32) -> (Option<f32>, Option<f32>) {
+        let (period, phrase) = (0.4f32, 6.4f32);
+        for frame in (from * 60.0).round() as usize..(until * 60.0).round() as usize {
+            let t = frame as f32 / 60.0;
+            look.set_structure(Some((period, (phrase - t.rem_euclid(phrase)) / period)));
+            if frame % kick_every == 0 {
+                look.kick_detected();
+                look.kick();
+            }
+            look.render(FRAME, sound(bass(t), -20.0));
+        }
+        (look.build_progress(), look.drop_in())
+    }
+
     #[test]
     fn a_build_up_aims_its_drop_at_a_phrase_head() {
         let mut look = white_look(Motion::Auto);
-        // 150 BPM : une phrase de 16 temps dure 6,4 s, têtes à 0, 6,4, 12,8 et 19,2 s.
-        let (period, phrase) = (0.4f32, 6.4f32);
-        let progress_at = |look: &mut ReactiveLook, from: f32, until: f32, kick_every: usize| {
-            for frame in (from * 60.0) as usize..(until * 60.0) as usize {
-                let t = frame as f32 / 60.0;
-                look.set_structure(Some((period, (phrase - t.rem_euclid(phrase)) / period)));
-                if frame % kick_every == 0 {
-                    look.kick_detected();
-                    look.kick();
-                }
-                look.render(FRAME, sound(0.8, -20.0));
-            }
-            (look.build_progress(), look.drop_in())
-        };
-        progress_at(&mut look, 0.0, 4.0, 24);
+        structured(&mut look, 0.0, 4.0, 24, |_| 0.8);
         // Un roulement de kicks à 4 s : la montée vise la tête de 12,8 s (celle de 6,4 s est trop
         // proche de son début).
-        let (early, drop_in) = progress_at(&mut look, 4.0, 6.0, 6);
+        let (early, drop_in) = structured(&mut look, 4.0, 6.0, 6, |_| 0.8);
         assert!(early.is_some_and(|p| p < 0.3), "{early:?}");
         assert!(drop_in.is_some_and(|s| (s - 6.8).abs() < 0.3), "{drop_in:?}");
-        let (late, _) = progress_at(&mut look, 6.0, 11.0, 6);
+        let (late, _) = structured(&mut look, 6.0, 11.0, 6, |_| 0.8);
         assert!(late.is_some_and(|p| (0.6..0.9).contains(&p)), "{late:?}");
         // Pas de drop à 12,8 s : il est attendu à la tête suivante, la tension reste au plein.
-        let (full, drop_in) = progress_at(&mut look, 11.0, 13.2, 6);
+        let (full, drop_in) = structured(&mut look, 11.0, 13.2, 6, |_| 0.8);
         assert_eq!(full, Some(1.0));
         assert!(drop_in.is_some_and(|s| (s - 6.0).abs() < 0.3), "{drop_in:?}");
+    }
+
+    #[test]
+    fn a_predicted_drop_lights_up_ahead_and_is_not_replayed() {
+        let mut look = white_look(Motion::Auto);
+        look.set_drop_advance(0.2);
+        structured(&mut look, 0.0, 4.0, 24, |_| 0.8);
+        // Roulement filtré (basses faibles) jusqu'au drop de 12,8 s.
+        structured(&mut look, 4.0, 12.5, 6, |_| 0.3);
+        assert!(!look.drop_shown);
+        structured(&mut look, 12.5, 12.65, 6, |_| 0.3);
+        assert!(look.drop_shown, "l'éclat part 0,2 s avant le drop");
+        // Le drop tombe : un kick aux basses pleines, l'éclat n'est pas rejoué.
+        structured(&mut look, 12.65, 12.8, 1000, |_| 0.3);
+        structured(&mut look, 12.8, 14.0, 24, |_| 0.9);
+        assert_eq!(look.phase(), Phase::Groove);
+        assert!(!look.drop_shown && !look.phases.anticipation_missed);
+    }
+
+    #[test]
+    fn a_drop_that_does_not_come_cuts_its_flash_and_is_not_predicted_again() {
+        let mut look = white_look(Motion::Auto);
+        look.set_drop_advance(0.2);
+        structured(&mut look, 0.0, 4.0, 24, |_| 0.8);
+        structured(&mut look, 4.0, 12.65, 6, |_| 0.3);
+        assert!(look.drop_shown);
+        // Le roulement continue, sans drop : l'éclat s'éteint 0,25 s après l'instant prévu.
+        structured(&mut look, 12.65, 13.1, 6, |_| 0.3);
+        assert!(!look.drop_shown && look.phases.anticipation_missed);
+        assert_eq!(look.phase(), Phase::BuildUp);
+        // Et la tête suivante n'est plus montrée d'avance.
+        structured(&mut look, 13.1, 19.1, 6, |_| 0.3);
+        assert!(!look.drop_shown);
     }
 
     #[test]

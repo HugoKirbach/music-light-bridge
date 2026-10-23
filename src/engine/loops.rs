@@ -76,6 +76,7 @@ pub(super) fn light_loop(
         shared.grooving.store(grooving, Ordering::Relaxed);
         look.set_grid_groove(clock.period().map(|_| grooving));
         look.set_structure(structure);
+        look.set_drop_advance(total_advance.as_secs_f32());
         match action {
             Action::Flash { reactive } => {
                 // Place du temps flashé dans la structure : tête de phrase ou de mesure.

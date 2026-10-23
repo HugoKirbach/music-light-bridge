@@ -22,6 +22,12 @@ const BUILD_RAMP: f32 = 8.0;
 const BEATS_PER_PHRASE: f32 = 16.0;
 const BUILD_MIN_BEATS: f32 = 8.0;
 const DROP_LATE: f32 = 0.5;
+/// Un drop montré d'avance se confirme par un kick aux basses fortes de 0,1 s avant à 0,25 s
+/// après l'instant prévu (le kick est détecté un peu après qu'il sonne).
+const DROP_EARLY: f32 = 0.1;
+const DROP_CONFIRM: f32 = 0.25;
+/// … et des basses nettement au-dessus de celles de la montée (un kick du roulement ne suffit pas).
+const DROP_JUMP: f32 = 1.3;
 /// Le drop : un kick aux basses fortes, après une seconde de basses faibles.
 const DROP_BASS: f32 = 0.6;
 const DROP_QUIET_BASS: f32 = 0.35;
@@ -107,6 +113,12 @@ pub(super) struct PhaseTracker {
     /// Début de la montée en cours, et instant prévu de son drop (une tête de phrase).
     pub(super) build_start: f32,
     pub(super) drop_at: Option<f32>,
+    /// Drop montré d'avance (instant prévu), en attente de sa confirmation ; une montée dont le
+    /// drop anticipé n'est pas venu n'en anticipe plus.
+    pub(super) anticipated: Option<f32>,
+    pub(super) anticipation_missed: bool,
+    /// Le drop anticipé n'est pas venu : l'éclat doit s'éteindre (lu une fois).
+    pub(super) false_drop: bool,
 }
 
 /// Ce que la phase sait des kicks : secondes depuis le dernier détecté, et si la grille de temps
@@ -143,7 +155,8 @@ impl PhaseTracker {
             }
             None => 0.0,
         };
-        let quiet_bass_before = self.bass_memory < DROP_QUIET_BASS;
+        let bass_before = self.bass_memory;
+        let quiet_bass_before = bass_before < DROP_QUIET_BASS;
         self.bass_memory = approach(self.bass_memory, levels.bass, dt, BASS_MEMORY);
         let kicked = std::mem::take(&mut self.kicked);
         // Une simple hausse de présence ne suffit pas quand les basses sont là : c'est un drop
@@ -151,8 +164,22 @@ impl PhaseTracker {
         let building = (rise > BUILD_RISE_DB && self.bass_memory < BUILD_MAX_BASS) || rolling;
         self.stall = if building { 0.0 } else { self.stall + dt };
 
+        // Drop anticipé : confirmé par un kick aux basses fortes autour de l'instant prévu.
+        let expected = self.anticipated.filter(|&at| self.time >= at - DROP_EARLY);
+        let confirmed = expected.is_some() && kicked && levels.bass > DROP_BASS.max(DROP_JUMP * bass_before);
+        if confirmed {
+            self.anticipated = None;
+        } else if self.anticipated.is_some_and(|at| self.time > at + DROP_CONFIRM) {
+            self.anticipated = None;
+            self.anticipation_missed = true;
+            self.false_drop = true;
+        }
         let mut dropped = false;
         let next = match self.phase {
+            Phase::BuildUp if confirmed => {
+                dropped = true;
+                Phase::Groove
+            }
             Phase::BuildUp
                 if kicked
                     && self.phase_time > BUILD_MIN
@@ -171,10 +198,16 @@ impl PhaseTracker {
             _ if grooving => Phase::Groove,
             _ => Phase::Calm,
         };
+        if dropped {
+            // Le roulement qui menait au drop est fini : ses kicks ne relancent pas une montée.
+            self.anticipated = None;
+            self.kick_times.retain(|&t| t >= self.time);
+        }
         if next != self.phase {
             if next == Phase::BuildUp {
                 self.build_start = self.time;
                 self.drop_at = None;
+                self.anticipation_missed = false;
             }
             self.phase = next;
             self.phase_time = 0.0;
@@ -218,6 +251,19 @@ impl PhaseTracker {
     /// Secondes avant le drop prévu de la montée en cours.
     pub(super) fn drop_in(&self) -> Option<f32> {
         (self.phase == Phase::BuildUp).then_some(self.drop_at?).map(|at| at - self.time)
+    }
+
+    /// Le drop prévu tombe dans moins de `advance` : vrai une fois par drop, qui est alors
+    /// attendu pour confirmation.
+    pub(super) fn anticipate_drop(&mut self, advance: f32) -> bool {
+        let Some(at) = self.drop_at.filter(|_| self.phase == Phase::BuildUp && !self.anticipation_missed) else {
+            return false;
+        };
+        if self.anticipated.is_some() || at - self.time > advance {
+            return false;
+        }
+        self.anticipated = Some(at);
+        true
     }
 }
 

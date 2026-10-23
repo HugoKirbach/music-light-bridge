@@ -162,6 +162,7 @@ pub fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Re
     let mut timeline = Timeline::default();
     // Phase reconnue (break, montée…), comme la boucle d'éclairage la voit.
     let mut look = ReactiveLook::new(Palette::default());
+    look.set_drop_advance(advance as f32);
     let mut next_frame = 0.0;
     let mut next_poll = 0.0;
     let mut next_update = TEMPO_UPDATE;
