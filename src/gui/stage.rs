@@ -359,6 +359,9 @@ impl App {
             if let Some(reason) = &info.fallback {
                 ui.label(theme::text(format!("ASIO indisponible : {reason}"), theme::regular(12.0), DIM));
             }
+            if let Some(url) = &info.remote_url {
+                ui.label(theme::text(format!("Télécommande : {url}"), theme::font(13.0, SEMIBOLD), Color32::WHITE));
+            }
             let levels = status.levels;
             for (name, level) in [("Graves", levels.bass), ("Médiums", levels.mid), ("Aigus", levels.high)] {
                 meter(ui, name, level);

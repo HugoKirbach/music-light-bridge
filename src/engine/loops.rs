@@ -91,6 +91,9 @@ pub(super) fn light_loop(
             Action::Cancel => look.cancel_flash(),
             Action::None => {}
         }
+        if shared.drop_now.swap(false, Ordering::Relaxed) {
+            look.drop_now();
+        }
         if let Some(preset) = note.and_then(|(pitch, _)| shared.preset_for(pitch)) {
             shared.apply(&preset);
         } else if let Some((pitch, velocity)) = note {

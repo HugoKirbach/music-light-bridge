@@ -145,6 +145,9 @@ struct LiveArgs {
     /// Sans régisseur : en disposition auto, le groove alterne toujours, dans la couleur choisie
     #[arg(long)]
     no_director: bool,
+    /// Ouvre la télécommande mobile : une page pour téléphone sur le réseau local (adresse affichée)
+    #[arg(long)]
+    remote: bool,
     /// Rejoint la session Ableton Link : tempo et phase viennent de la session
     #[arg(long)]
     link: bool,
@@ -155,7 +158,7 @@ struct LiveArgs {
 }
 
 impl LiveArgs {
-    fn into_options(self, palette: Palette, dynamics: Dynamics) -> engine::Options {
+    fn into_options(self, palette: Palette, dynamics: Dynamics, remote: Option<String>) -> engine::Options {
         engine::Options {
             input: self.input,
             audio: self.audio,
@@ -170,6 +173,7 @@ impl LiveArgs {
             motion: self.motion,
             spread: self.spread,
             director: !self.no_director,
+            remote,
         }
     }
 }
@@ -195,7 +199,8 @@ fn main() -> Result<()> {
         Command::Devices { test: false, .. } => cmd::setup::devices(),
         Command::Devices { test: true, input, audio } => cmd::setup::test_input(input, audio),
         Command::Live(args) => {
-            let options = args.into_options(cfg.palette, cfg.dynamics);
+            let remote = if args.remote { Some(cfg.remote_token()?) } else { None };
+            let options = args.into_options(cfg.palette, cfg.dynamics, remote);
             cmd::live::run(rt, &cfg, options)
         }
         Command::Gui => gui::run(rt, cfg),

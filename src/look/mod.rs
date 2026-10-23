@@ -340,6 +340,11 @@ impl ReactiveLook {
         self.drop_advance = advance;
     }
 
+    /// Drop à la main (télécommande) : éclat blanc à pleine puissance, partout.
+    pub fn drop_now(&mut self) {
+        self.fire_drop();
+    }
+
     fn fire_drop(&mut self) {
         for lamp in &mut self.lamps {
             lamp.fire(1.0, 1.0);

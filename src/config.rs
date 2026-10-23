@@ -44,6 +44,9 @@ pub struct Config {
     /// Scènes enregistrées : un clic (ou une note MIDI) rappelle couleurs, flashs et animation.
     #[serde(default)]
     pub presets: Vec<Preset>,
+    /// Jeton secret de l'adresse de la télécommande mobile, créé à sa première ouverture.
+    #[serde(default)]
+    pub remote_token: Option<String>,
 }
 
 /// Scène enregistrée : tout ce qui fait l'allure du live, sauf la source et le tempo.
@@ -83,6 +86,8 @@ pub struct LiveSettings {
     pub spread: Spread,
     /// Régisseur : la disposition Auto et la teinte varient d'une section à l'autre.
     pub director: bool,
+    /// Ouvre la télécommande mobile pendant le live.
+    pub remote: bool,
     pub threshold: f32,
 }
 
@@ -98,6 +103,7 @@ impl Default for LiveSettings {
             motion: Motion::Auto,
             spread: Spread::Auto,
             director: true,
+            remote: false,
             threshold: DEFAULT_THRESHOLD,
         }
     }
@@ -113,6 +119,18 @@ pub struct BridgeCredentials {
 }
 
 impl Config {
+    /// Jeton de la télécommande mobile, créé (et enregistré) la première fois : l'adresse reste
+    /// la même d'un live à l'autre, le téléphone peut la garder en favori.
+    pub fn remote_token(&mut self) -> Result<String> {
+        if let Some(token) = &self.remote_token {
+            return Ok(token.clone());
+        }
+        let token = crate::engine::new_token();
+        self.remote_token = Some(token.clone());
+        self.save()?;
+        Ok(token)
+    }
+
     pub fn path() -> Result<PathBuf> {
         let dir = dirs::config_dir().context("dossier de configuration introuvable")?;
         Ok(dir.join("dj-bridge").join("config.json"))

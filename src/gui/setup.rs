@@ -152,6 +152,10 @@ impl App {
         theme::section(ui, "4 · MIDI");
         self.midi_row(ui);
 
+        ui.add_space(12.0);
+        theme::section(ui, "5 · TÉLÉCOMMANDE");
+        self.remote_row(ui);
+
         ui.add_space(16.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
@@ -407,6 +411,26 @@ impl App {
                             let text = if count == 1 { "1 appareil MIDI".to_owned() } else { format!("{count} appareils MIDI") };
                             ui.label(theme::text(text, theme::regular(13.0), MUTED));
                         }
+                    });
+                });
+            });
+    }
+
+    fn remote_row(&mut self, ui: &mut Ui) {
+        Frame::new()
+            .fill(CARD)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(10)
+            .inner_margin(Margin::symmetric(16, 10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(32.0);
+                ui.horizontal(|ui| {
+                    let label = theme::text("Piloter le live depuis un téléphone", theme::regular(14.0), TEXT);
+                    ui.checkbox(&mut self.settings.remote, label);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let hint = "Même Wi-Fi que le PC ; l'adresse s'affiche au lancement";
+                        ui.label(theme::text(hint, theme::regular(13.0), MUTED));
                     });
                 });
             });

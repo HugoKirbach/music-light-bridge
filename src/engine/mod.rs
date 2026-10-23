@@ -35,9 +35,11 @@ use crate::wav;
 mod captures;
 mod delays;
 mod loops;
+mod remote;
 
 use captures::{auto_capture_loop, write_capture};
 use loops::{light_loop, link_loop, tempo_loop, unpack};
+pub use remote::new_token;
 
 const TEMPO_UPDATE: Duration = Duration::from_secs(1);
 /// Fréquence de lecture de la session Ableton Link (tempo et phase).
@@ -86,6 +88,8 @@ pub struct Options {
     pub spread: Spread,
     /// Régisseur de la disposition Auto.
     pub director: bool,
+    /// Télécommande mobile sur le réseau local, avec ce jeton dans son adresse.
+    pub remote: Option<String>,
 }
 
 /// Ce qui est connu au démarrage.
@@ -104,6 +108,8 @@ pub struct Info {
     pub advance: Duration,
     /// L'état des lampes à rétablir vient d'une session interrompue.
     pub resumed_snapshot: bool,
+    /// Adresse de la télécommande mobile, si elle est ouverte.
+    pub remote_url: Option<String>,
 }
 
 /// Instantané de l'état, pour l'affichage.
@@ -123,9 +129,16 @@ pub struct Status {
     pub input_lost: bool,
     /// Le bridge ne répond plus : le flux tente de se rouvrir.
     pub bridge_lost: bool,
-    /// Dernière scène rappelée, et nombre de rappels (une note MIDI peut en rappeler une).
+    /// Dernière scène rappelée.
     pub preset: Option<String>,
-    pub presets_applied: u32,
+    /// Réglages changés hors de la fenêtre (scène rappelée par note MIDI, télécommande) : la
+    /// fenêtre reprend alors ceux-ci quand le compte change.
+    pub outside_changes: u32,
+    pub motion: Motion,
+    pub spread: Spread,
+    pub director: bool,
+    pub palette: Palette,
+    pub dynamics: Dynamics,
     /// Autres participants de la session Link, si elle est rejointe.
     pub link_peers: Option<u64>,
     /// Couleur envoyée à la lampe, en sRGB 8 bits.
@@ -202,10 +215,13 @@ struct Shared {
     audio_restarts: AtomicU32,
     bridge_restarts: AtomicU32,
     bridge_lost: AtomicBool,
-    /// Scènes rappelables par note MIDI, et dernière rappelée (nom, nombre de rappels).
+    /// Scènes rappelables par note MIDI, dernière rappelée, et réglages changés hors de la
+    /// fenêtre (note MIDI, télécommande).
     presets: Mutex<Vec<Preset>>,
     preset: Mutex<Option<String>>,
-    presets_applied: AtomicU32,
+    outside_changes: AtomicU32,
+    /// Drop demandé par la télécommande : éclat blanc partout.
+    drop_now: AtomicBool,
     note_flashes: AtomicU32,
     /// Instant (s, horloge commune) de la dernière note, en bits de `f64`.
     last_note: AtomicU64,
@@ -247,7 +263,7 @@ impl Shared {
         self.mode.store(preset.flash.index(), Ordering::Relaxed);
         self.director.store(preset.director, Ordering::Relaxed);
         *lock(&self.preset) = Some(preset.name.clone());
-        self.presets_applied.fetch_add(1, Ordering::Relaxed);
+        self.outside_changes.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Scène rappelée par la note MIDI `note`, s'il y en a une.
@@ -288,6 +304,8 @@ pub struct Engine {
     /// Entrée audio à rouvrir si elle se perd, et dernière tentative.
     input: (Option<String>, Backend),
     audio_retry: Instant,
+    /// Serveur de la télécommande mobile.
+    remote: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Engine {
@@ -392,7 +410,8 @@ impl Engine {
             bridge_lost: AtomicBool::new(false),
             presets: Mutex::new(cfg.presets.clone()),
             preset: Mutex::new(None),
-            presets_applied: AtomicU32::new(0),
+            outside_changes: AtomicU32::new(0),
+            drop_now: AtomicBool::new(false),
             note_flashes: AtomicU32::new(0),
             last_note: AtomicU64::new(f64::NEG_INFINITY.to_bits()),
             color: AtomicU32::new(0),
@@ -411,6 +430,15 @@ impl Engine {
             })?
         };
         let mut helpers = Vec::new();
+        let (remote, remote_url) = match &options.remote {
+            Some(token) => {
+                let (listener, port) = remote::bind(&rt)?;
+                let url = format!("http://{}:{port}/{token}/", remote::lan_address(&bridge.ip));
+                let state = Arc::new((shared.clone(), features.clone()));
+                (Some(rt.spawn(remote::serve(listener, state, token.clone()))), Some(url))
+            }
+            None => (None, None),
+        };
         {
             let (features, shared) = (features.clone(), shared.clone());
             helpers.push(thread::Builder::new().name("tempo".into()).spawn(move || tempo_loop(&shared, &features))?);
@@ -440,6 +468,7 @@ impl Engine {
             link: options.link,
             advance,
             resumed_snapshot,
+            remote_url,
         };
         Ok(Self {
             info,
@@ -453,6 +482,7 @@ impl Engine {
             midi,
             lamp_map,
             input: (options.input.clone(), options.audio),
+            remote,
             audio_retry: Instant::now(),
         })
     }
@@ -493,7 +523,12 @@ impl Engine {
             input_lost: self.audio_lost(),
             bridge_lost: self.shared.bridge_lost.load(Ordering::Relaxed),
             preset: lock(&self.shared.preset).clone(),
-            presets_applied: self.shared.presets_applied.load(Ordering::Relaxed),
+            outside_changes: self.shared.outside_changes.load(Ordering::Relaxed),
+            motion: Motion::from_index(self.shared.motion.load(Ordering::Relaxed)),
+            spread: Spread::from_index(self.shared.spread.load(Ordering::Relaxed)),
+            director: self.shared.director.load(Ordering::Relaxed),
+            palette: self.shared.palette(),
+            dynamics: self.shared.dynamics(),
             link_peers: self.shared.link.then(|| self.shared.link_peers.load(Ordering::Relaxed)),
             color: unpack(color),
             phase: Phase::from_index(self.shared.phase.load(Ordering::Relaxed)),
@@ -663,6 +698,9 @@ impl Engine {
 
     fn shutdown(&mut self) -> Result<Summary> {
         self.shared.stop.store(true, Ordering::Relaxed);
+        if let Some(remote) = self.remote.take() {
+            remote.abort();
+        }
         let light = self.light.take().context("moteur déjà arrêté")?;
         let (stream, result) = light.join().map_err(|_| anyhow!("la boucle d'éclairage a planté"))?;
         for helper in self.helpers.drain(..) {
@@ -720,6 +758,9 @@ impl fmt::Display for Info {
         }
         if let Some(port) = &self.midi_port {
             write!(f, "\nMIDI : « {port} » ; chaque note flashe à sa couleur.")?;
+        }
+        if let Some(url) = &self.remote_url {
+            write!(f, "\nTélécommande mobile : {url} (téléphone sur le même Wi-Fi que le PC).")?;
         }
         if self.link {
             write!(f, "\nAbleton Link : tempo et phase suivent la session (autorise l'accès réseau si Windows le demande).")?;

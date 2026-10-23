@@ -110,11 +110,12 @@ struct App {
     summary: Option<String>,
     /// Captures automatiques déjà signalées pendant ce live.
     auto_captures_seen: u32,
-    /// Scène rappelée en dernier, nom et note saisis pour en enregistrer une, rappels déjà suivis.
+    /// Scène rappelée en dernier, nom et note saisis pour en enregistrer une, et changements faits
+    /// hors de la fenêtre déjà repris.
     active_preset: Option<String>,
     preset_name: String,
     preset_note: String,
-    presets_seen: u32,
+    outside_changes_seen: u32,
 }
 
 impl App {
@@ -153,7 +154,7 @@ impl App {
             active_preset: None,
             preset_name: String::new(),
             preset_note: String::new(),
-            presets_seen: 0,
+            outside_changes_seen: 0,
         };
         app.refresh_devices();
         app
@@ -227,6 +228,13 @@ impl App {
         self.settings.link = self.tempo == TempoChoice::Link;
         self.settings.bpm = if self.tempo == TempoChoice::Auto { None } else { bpm };
         self.save_config();
+        let remote = match self.settings.remote {
+            true => match self.cfg.remote_token() {
+                Ok(token) => Some(token),
+                Err(e) => return self.show(format!("Télécommande : {e:#}")),
+            },
+            false => None,
+        };
         let options = engine::Options {
             input: self.settings.input.clone(),
             audio: self.settings.audio,
@@ -237,6 +245,7 @@ impl App {
             motion: self.settings.motion,
             spread: self.settings.spread,
             director: self.settings.director,
+            remote,
             link: self.settings.link,
             midi: self.settings.midi.clone().map(Some),
             palette: self.palette,
@@ -250,8 +259,11 @@ impl App {
                 self.shown_bpm = None;
                 self.summary = None;
                 self.auto_captures_seen = 0;
-                self.presets_seen = 0;
+                self.outside_changes_seen = 0;
                 self.message = None;
+                if let Some(url) = &engine.info.remote_url {
+                    self.show(format!("Télécommande : ouvre {url} sur ton téléphone (onglet Source)."));
+                }
                 self.engine = Some(engine);
             }
             Err(e) => self.show(format!("Lancement impossible : {e:#}")),
@@ -429,7 +441,7 @@ impl eframe::App for App {
                     self.shown_source = status.source;
                     self.next_refresh = Instant::now() + BPM_REFRESH;
                 }
-                self.follow_presets(&status);
+                self.follow_outside_changes(&status);
                 if status.auto_captures > self.auto_captures_seen {
                     self.auto_captures_seen = status.auto_captures;
                     self.show("Le groove a décroché : capture automatique enregistrée pour le banc d'essai.");

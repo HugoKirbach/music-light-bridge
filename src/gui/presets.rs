@@ -28,16 +28,20 @@ impl App {
         self.active_preset = Some(preset.name.clone());
     }
 
-    /// Une note MIDI a rappelé une scène pendant le live : la fenêtre la reprend.
-    pub(super) fn follow_presets(&mut self, status: &Status) {
-        if status.presets_applied == self.presets_seen {
+    /// Une note MIDI ou la télécommande a changé les réglages pendant le live : la fenêtre les
+    /// reprend.
+    pub(super) fn follow_outside_changes(&mut self, status: &Status) {
+        if status.outside_changes == self.outside_changes_seen {
             return;
         }
-        self.presets_seen = status.presets_applied;
-        let recalled = status.preset.as_ref().and_then(|name| self.cfg.presets.iter().find(|p| &p.name == name)).cloned();
-        if let Some(preset) = recalled {
-            self.take_preset(&preset);
-        }
+        self.outside_changes_seen = status.outside_changes;
+        self.palette = status.palette;
+        self.dynamics = status.dynamics;
+        self.settings.motion = status.motion;
+        self.settings.spread = status.spread;
+        self.settings.flash = status.mode;
+        self.settings.director = status.director;
+        self.active_preset.clone_from(&status.preset);
     }
 
     /// Enregistre les réglages actuels sous le nom saisi (une scène du même nom est remplacée).
