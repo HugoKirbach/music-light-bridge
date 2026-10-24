@@ -878,6 +878,21 @@ mod tests {
     }
 
     #[test]
+    fn the_drop_brings_the_groove_back_before_the_grid_confirms_it() {
+        let mut look = ReactiveLook::new(PALETTE);
+        groove_run(&mut look, 30.0, true, 0.5, 24);
+        assert_eq!(groove_run(&mut look, 6.0, false, 0.1, 72), Phase::Calm);
+        // Un impact isolé aux basses pleines : toujours le break.
+        groove_run(&mut look, 1.0 / 60.0, false, 0.5, 1);
+        assert_eq!(groove_run(&mut look, 2.0, false, 0.1, 0), Phase::Calm, "impact isolé");
+        // Le drop : deux kicks aux basses pleines, la grille ne les a pas encore confirmés.
+        assert_eq!(groove_run(&mut look, 0.5, false, 0.5, 24), Phase::Groove);
+        // Et le groove tient le temps que la grille le rattrape.
+        assert_eq!(groove_run(&mut look, 1.5, false, 0.5, 24), Phase::Groove);
+        assert_eq!(groove_run(&mut look, 4.0, true, 0.5, 24), Phase::Groove);
+    }
+
+    #[test]
     fn a_lighter_track_grooves_again_once_the_old_bass_level_is_forgotten() {
         let mut look = ReactiveLook::new(PALETTE);
         groove_run(&mut look, 30.0, true, 0.5, 24);

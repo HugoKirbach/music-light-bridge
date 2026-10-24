@@ -49,6 +49,11 @@ const RETURN_STEADY: f32 = 8.0;
 const GONE_BASS: f32 = 0.25;
 const BASS_GONE: f32 = 2.0;
 const GROOVE_BASS_FALL: f32 = 60.0;
+/// Retour immédiat au drop : deux kicks à 90 % des basses habituelles en moins d'une seconde.
+const DROP_RETURN_BASS: f32 = 0.9;
+const DROP_RETURN_PAIR: f32 = 1.0;
+/// … une fois qu'un vrai groove (grille tenue 4 s) a fixé le niveau de basse habituel.
+const GROOVE_HEARD: f32 = 4.0;
 const GROOVE_BASS_FORGET: f32 = 90.0;
 /// Le break se confirme quand la grille a perdu les kicks depuis 1 s et qu'il en arrive moins de
 /// trois en 2 s (ou plus du tout, ou que les basses tombent).
@@ -118,6 +123,10 @@ pub(super) struct PhaseTracker {
     pub(super) grid_lost: f32,
     /// Durée depuis laquelle les basses ont disparu (sous 25 % de leur niveau habituel).
     pub(super) bass_gone_time: f32,
+    /// Dernier kick aux basses pleines hors groove (un deuxième coup sur coup signe le drop).
+    pub(super) loud_kick: Option<f32>,
+    /// Un vrai groove a été entendu (grille tenue 4 s) : le niveau de basse habituel est fiable.
+    pub(super) groove_heard: bool,
     /// Structure connue : période du temps (s) et temps restant avant la prochaine tête de phrase.
     pub(super) structure: Option<(f32, f32)>,
     /// Début de la montée en cours, et instant prévu de son drop (une tête de phrase).
@@ -307,9 +316,23 @@ impl PhaseTracker {
         let bass_back = self.bass_now >= RETURN_BASS * self.groove_bass;
         // Quelques coups isolés (roulement, impact) ne font pas un groove.
         let sparse = (self.kick_times.len() as f32) < SPARSE_KICKS;
+        // Le drop : deux kicks aux basses pleines coup sur coup, sans attendre que la grille les
+        // confirme (un impact isolé ne suffit pas).
+        let loud_kick = pulse.since_kick < 1.5 * dt && raw_bass >= DROP_RETURN_BASS * self.groove_bass;
+        if self.grooving && self.grid_held >= GROOVE_HEARD {
+            self.groove_heard = true;
+        }
+        let dropped = self.groove_heard && loud_kick && self.loud_kick.is_some_and(|t| self.time - t <= DROP_RETURN_PAIR);
+        if loud_kick {
+            self.loud_kick = Some(self.time);
+        }
         self.grooving = if self.grooving {
             let kicks_lost = self.grid_lost >= BREAK_CONFIRM && (kick_gap || sparse || bass_low);
             !(kicks_lost || self.bass_gone_time >= BASS_GONE)
+        } else if dropped {
+            // La grille rattrape le drop ensuite : on ne compte pas le break comme kicks perdus.
+            self.grid_lost = 0.0;
+            true
         } else {
             grid && !bass_low && (bass_back || self.grid_held >= RETURN_STEADY)
         };
