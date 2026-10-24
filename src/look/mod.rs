@@ -863,6 +863,31 @@ mod tests {
     }
 
     #[test]
+    fn percussion_on_the_beats_of_a_break_without_bass_is_not_a_groove() {
+        // Capture 1792832368 : groove aux basses à 0,10 ; break à 0,02 dont les percussions
+        // tombent sur les temps, et que la grille prend pour des kicks.
+        let mut look = ReactiveLook::new(PALETTE);
+        assert_eq!(groove_run(&mut look, 30.0, true, 0.5, 24), Phase::Groove);
+        // La grille ne lâche pas : les basses seules signent le break, 2 s après être tombées.
+        assert_eq!(groove_run(&mut look, 4.0, true, 0.1, 24), Phase::Calm);
+        for _ in 0..16 {
+            assert_eq!(groove_run(&mut look, 0.5, true, 0.1, 24), Phase::Calm, "le break oscille");
+        }
+        // Le drop : les basses reviennent, le groove reprend aussitôt.
+        assert_eq!(groove_run(&mut look, 1.0, true, 0.5, 24), Phase::Groove);
+    }
+
+    #[test]
+    fn a_lighter_track_grooves_again_once_the_old_bass_level_is_forgotten() {
+        let mut look = ReactiveLook::new(PALETTE);
+        groove_run(&mut look, 30.0, true, 0.5, 24);
+        // Morceau suivant aux basses bien plus légères : un temps pris pour un break…
+        assert_eq!(groove_run(&mut look, 10.0, true, 0.1, 24), Phase::Calm);
+        // … puis le niveau habituel s'oublie et le groove revient.
+        assert_eq!(groove_run(&mut look, 120.0, true, 0.1, 24), Phase::Groove);
+    }
+
+    #[test]
     fn a_short_grid_hiccup_in_a_loud_groove_is_not_a_break() {
         let mut look = ReactiveLook::new(PALETTE);
         groove_run(&mut look, 10.0, true, 0.5, 24);

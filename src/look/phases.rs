@@ -33,15 +33,23 @@ const DROP_BASS: f32 = 0.6;
 const DROP_QUIET_BASS: f32 = 0.35;
 const BASS_MEMORY: f32 = 1.0;
 /// Break : la grille ne trouve plus de kicks réguliers, et plus aucun kick depuis 1,5 s ou des
-/// basses tombées sous 40 % de leur niveau habituel en groove (mémoire de 8 s, niveau actuel sur
-/// 0,5 s). Retour au groove : kicks réguliers sur la grille, avec des basses revenues à la moitié
-/// de leur niveau, ou depuis 4 s.
+/// basses tombées sous 40 % de leur niveau habituel en groove (il monte en 8 s, ne baisse qu'en 60 s ;
+/// niveau actuel sur 0,5 s). Des basses disparues (sous 25 %, un kick seul en garde davantage)
+/// pendant 2 s font aussi un break, même si des percussions tombent sur les temps. Retour au
+/// groove : kicks réguliers sur la grille, avec des basses revenues aux trois quarts de leur niveau,
+/// ou au-dessus de ces 40 % depuis 8 s (des percussions de break ne tiennent pas la grille si
+/// longtemps). Hors groove, le niveau habituel s'oublie lentement (90 s) :
+/// un morceau aux basses plus légères finit par groover.
 const CALM_AFTER: f32 = 1.5;
 const GROOVE_BASS_TIME: f32 = 8.0;
 const BASS_NOW_TIME: f32 = 0.5;
 const BREAK_BASS: f32 = 0.4;
-const RETURN_BASS: f32 = 0.5;
-const RETURN_STEADY: f32 = 4.0;
+const RETURN_BASS: f32 = 0.75;
+const RETURN_STEADY: f32 = 8.0;
+const GONE_BASS: f32 = 0.25;
+const BASS_GONE: f32 = 2.0;
+const GROOVE_BASS_FALL: f32 = 60.0;
+const GROOVE_BASS_FORGET: f32 = 90.0;
 /// Le break se confirme quand la grille a perdu les kicks depuis 1 s et qu'il en arrive moins de
 /// trois en 2 s (ou plus du tout, ou que les basses tombent).
 const BREAK_CONFIRM: f32 = 1.0;
@@ -108,6 +116,8 @@ pub(super) struct PhaseTracker {
     pub(super) grid_held: f32,
     /// Durée depuis laquelle la grille ne les confirme plus.
     pub(super) grid_lost: f32,
+    /// Durée depuis laquelle les basses ont disparu (sous 25 % de leur niveau habituel).
+    pub(super) bass_gone_time: f32,
     /// Structure connue : période du temps (s) et temps restant avant la prochaine tête de phrase.
     pub(super) structure: Option<(f32, f32)>,
     /// Début de la montée en cours, et instant prévu de son drop (une tête de phrase).
@@ -272,9 +282,20 @@ impl PhaseTracker {
     /// relance pas le groove, il faut que la grille retrouve des kicks réguliers.
     fn update_groove(&mut self, dt: f32, raw_bass: f32, pulse: Pulse) {
         self.bass_now = approach(self.bass_now, raw_bass, dt, BASS_NOW_TIME);
-        if self.grooving || self.groove_bass == 0.0 {
-            self.groove_bass = approach(self.groove_bass.max(raw_bass * 0.5), raw_bass, dt, GROOVE_BASS_TIME);
+        let bass_low = self.groove_bass > 0.0 && self.bass_now < BREAK_BASS * self.groove_bass;
+        // Le niveau habituel monte vite avec le groove mais n'en suit que lentement la baisse : un
+        // break qui s'installe ne l'entraîne pas avec lui. Hors groove, il s'oublie lentement.
+        if self.groove_bass == 0.0 {
+            self.groove_bass = raw_bass * 0.5;
+        } else if self.grooving {
+            let time = if self.bass_now > self.groove_bass { GROOVE_BASS_TIME } else { GROOVE_BASS_FALL };
+            self.groove_bass = approach(self.groove_bass, self.bass_now, dt, time);
+        } else if self.bass_now < self.groove_bass {
+            self.groove_bass = approach(self.groove_bass, self.bass_now, dt, GROOVE_BASS_FORGET);
         }
+        // Plus de basse du tout (un kick seul en garde davantage) : break, même sur la grille.
+        let bass_gone = self.groove_bass > 0.0 && self.bass_now < GONE_BASS * self.groove_bass;
+        self.bass_gone_time = if bass_gone { self.bass_gone_time + dt } else { 0.0 };
         let kick_gap = pulse.since_kick > CALM_AFTER;
         let Some(grid) = pulse.grid_groove else {
             // Tempo inconnu : un kick récent suffit, comme avant.
@@ -283,14 +304,14 @@ impl PhaseTracker {
         };
         self.grid_held = if grid { self.grid_held + dt } else { 0.0 };
         self.grid_lost = if grid { 0.0 } else { self.grid_lost + dt };
-        let bass_low = self.groove_bass > 0.0 && self.bass_now < BREAK_BASS * self.groove_bass;
         let bass_back = self.bass_now >= RETURN_BASS * self.groove_bass;
         // Quelques coups isolés (roulement, impact) ne font pas un groove.
         let sparse = (self.kick_times.len() as f32) < SPARSE_KICKS;
         self.grooving = if self.grooving {
-            !(self.grid_lost >= BREAK_CONFIRM && (kick_gap || sparse || bass_low))
+            let kicks_lost = self.grid_lost >= BREAK_CONFIRM && (kick_gap || sparse || bass_low);
+            !(kicks_lost || self.bass_gone_time >= BASS_GONE)
         } else {
-            grid && (bass_back || self.grid_held >= RETURN_STEADY)
+            grid && !bass_low && (bass_back || self.grid_held >= RETURN_STEADY)
         };
     }
 }

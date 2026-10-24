@@ -313,9 +313,13 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
 
 - **Groove** : la grille confirme des kicks réguliers.
 - **Break** : la grille a perdu les kicks depuis 1 s, et soit ils sont rares, soit les basses
-  sont tombées sous 40 % de leur niveau habituel. Un roulement ou un impact isolé ne relance pas
-  le groove : il faut que la grille retrouve des kicks réguliers, avec des basses revenues ou
-  pendant 4 s.
+  sont tombées sous 40 % de leur niveau habituel. Si les basses ont disparu (sous 25 %) pendant
+  2 s, c'est aussi un break, même quand des percussions tombent sur les temps.
+  - Le niveau habituel monte vite avec le groove mais ne baisse qu'en une minute : un break qui
+    s'installe ne l'entraîne pas.
+  - Un roulement, un impact ou des percussions sur les temps ne relancent pas le groove. Il faut
+    que la grille retrouve des kicks réguliers, avec des basses revenues aux trois quarts (le
+    drop), ou au-dessus de 40 % pendant 8 s (un morceau aux basses plus légères).
 - **Montée** : les médiums et aigus enflent de plus de 4 dB sans basse, ou les kicks roulent à
   plus de 4,5 par seconde.
   - Quand la structure est connue, le drop est prévu sur la première tête de phrase au moins
