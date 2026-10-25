@@ -13,7 +13,8 @@ const WHITE: Rgb = Rgb { r: u16::MAX, g: u16::MAX, b: u16::MAX };
 pub(super) fn light_loop(
     rt: &Runtime,
     stream: &mut HueStream,
-    lamps: &[(u8, f32)],
+    // Canaux pilotés, et leur place dans la pièce (dans le même ordre).
+    (channels, space): (&[u8], &Space),
     features: &Features,
     notes: &Notes,
     shared: &Shared,
@@ -21,8 +22,8 @@ pub(super) fn light_loop(
 ) -> Result<()> {
     let mut planner = FlashPlanner::new(shared.mode(), advance.as_secs_f64(), CONFIRM_RANGE.1);
     let mut look = ReactiveLook::new(shared.palette());
-    look.set_lamps(&lamps.iter().map(|&(_, x)| x).collect::<Vec<f32>>());
-    let mut frame: Vec<(u8, Rgb)> = lamps.iter().map(|&(id, _)| (id, Rgb::OFF)).collect();
+    look.set_space(space);
+    let mut frame: Vec<(u8, Rgb)> = channels.iter().map(|&id| (id, Rgb::OFF)).collect();
     let mut seen = features.kicks();
     let mut seen_notes = notes.count();
     let mut last = Instant::now();

@@ -14,10 +14,19 @@ const ENERGY_FAST: f32 = 4.0;
 const ENERGY_SLOW: f32 = 60.0;
 const HIGH_ENERGY: f32 = 1.1;
 const LOW_ENERGY: f32 = 0.85;
-/// Dispositions du groove selon l'énergie.
-const HIGH: [Spread; 2] = [Spread::Together, Spread::Alternate];
-const MEDIUM: [Spread; 4] = [Spread::Alternate, Spread::Wave, Spread::Together, Spread::Split];
-const LOW: [Spread; 2] = [Spread::Split, Spread::Wave];
+/// Dispositions du groove selon l'énergie, parmi celles que la pièce permet.
+const HIGH: [Spread; 5] = [Spread::Together, Spread::Alternate, Spread::Corners, Spread::PingPong, Spread::Rotate];
+const MEDIUM: [Spread; 8] = [
+    Spread::Alternate,
+    Spread::Wave,
+    Spread::Together,
+    Spread::Diagonal,
+    Spread::Split,
+    Spread::Depth,
+    Spread::Ripple,
+    Spread::Rotate,
+];
+const LOW: [Spread; 4] = [Spread::Split, Spread::Wave, Spread::Ripple, Spread::Depth];
 /// Décalages de teinte (en tours) des sections successives : ±20°.
 const HUES: [f32; 3] = [0.0, 0.055, -0.055];
 const HUE_FADE: f32 = 2.0;
@@ -25,6 +34,8 @@ const HUE_FADE: f32 = 2.0;
 #[derive(Debug)]
 pub(super) struct Director {
     pub(super) enabled: bool,
+    /// Dispositions que la place des lampes rend possibles.
+    pub(super) possible: Vec<Spread>,
     section: usize,
     kicks: u32,
     energy_fast: f32,
@@ -37,6 +48,7 @@ impl Default for Director {
     fn default() -> Self {
         Self {
             enabled: true,
+            possible: Spread::ALL.to_vec(),
             section: 0,
             kicks: 0,
             energy_fast: 0.0,
@@ -77,6 +89,11 @@ impl Director {
         } else {
             &MEDIUM
         };
+        let pool: Vec<Spread> = pool.iter().copied().filter(|spread| self.possible.contains(spread)).collect();
+        if pool.is_empty() {
+            self.spread = Spread::Together;
+            return;
+        }
         let previous = self.spread;
         self.spread = (0..pool.len())
             .map(|i| pool[(self.section + i) % pool.len()])

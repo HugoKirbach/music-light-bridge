@@ -12,6 +12,7 @@ use crate::audio::Backend;
 use crate::audio::analysis::DEFAULT_THRESHOLD;
 use crate::flash::FlashMode;
 use crate::look::{Dynamics, Motion, Palette, Spread};
+use crate::room::{Layout, Placement, Room};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -30,12 +31,10 @@ pub struct Config {
     /// Derniers réglages choisis dans la fenêtre.
     #[serde(default)]
     pub live: LiveSettings,
-    /// Lampes de la zone laissées hors du mode live (identifiants CLIP v2) : elles gardent leur
-    /// état pendant le flux. Une lampe ajoutée à la zone est donc pilotée par défaut.
+    /// Ancien réglage, repris dans la première disposition : lampes laissées hors du live.
     #[serde(default)]
     pub excluded_lights: Vec<String>,
-    /// Place de chaque lampe dans la pièce choisie dans la fenêtre (identifiant CLIP v2 → x de -1 à
-    /// gauche à 1 à droite) ; à défaut, celle de la zone Hue.
+    /// Ancien réglage, repris dans la première disposition : place de gauche (-1) à droite (1).
     #[serde(default)]
     pub lamp_positions: std::collections::BTreeMap<String, f32>,
     /// Retard propre de chaque lampe (ms) : une lampe plus lente reçoit ses flashs plus tôt.
@@ -47,6 +46,13 @@ pub struct Config {
     /// Jeton secret de l'adresse de la télécommande mobile, créé à sa première ouverture.
     #[serde(default)]
     pub remote_token: Option<String>,
+    /// Pièces et dispositions des lampes, et celles utilisées par le live (rangs).
+    #[serde(default)]
+    pub rooms: Vec<Room>,
+    #[serde(default)]
+    pub active_room: usize,
+    #[serde(default)]
+    pub active_layout: usize,
 }
 
 /// Scène enregistrée : tout ce qui fait l'allure du live, sauf la source et le tempo.
@@ -145,9 +151,10 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = Self::path()?;
         match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text)
+            Ok(text) => serde_json::from_str::<Self>(&text)
+                .map(Self::with_room)
                 .with_context(|| format!("configuration illisible : {}", path.display())),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Self::default().with_room()),
             Err(e) => Err(e).with_context(|| format!("lecture de {}", path.display())),
         }
     }
@@ -159,6 +166,51 @@ impl Config {
         }
         fs::write(&path, serde_json::to_string_pretty(self)?)
             .with_context(|| format!("écriture de {}", path.display()))
+    }
+
+    /// Garantit une pièce et une disposition actives. La première fois, elles reprennent les
+    /// anciens réglages : lampes écartées et places de gauche à droite.
+    pub fn with_room(mut self) -> Self {
+        if self.rooms.is_empty() {
+            let mut room = Room::new("Ma pièce");
+            let layout = &mut room.layouts[0];
+            layout.excluded = self.excluded_lights.clone();
+            for (id, &x) in &self.lamp_positions {
+                let placement = Placement { x: (x.clamp(-1.0, 1.0) + 1.0) / 2.0 * room.width, ..room.default_placement(0.0) };
+                room.layouts[0].lamps.insert(id.clone(), placement);
+            }
+            self.rooms.push(room);
+        }
+        for room in self.rooms.iter_mut().filter(|room| room.layouts.is_empty()) {
+            room.layouts.push(Layout::new("Par défaut"));
+        }
+        self.active_room = self.active_room.min(self.rooms.len() - 1);
+        self.active_layout = self.active_layout.min(self.rooms[self.active_room].layouts.len() - 1);
+        self
+    }
+
+    /// Pièce active.
+    pub fn room(&self) -> &Room {
+        &self.rooms[self.active_room]
+    }
+
+    pub fn room_mut(&mut self) -> &mut Room {
+        &mut self.rooms[self.active_room]
+    }
+
+    /// Disposition active de la pièce active.
+    pub fn layout(&self) -> &Layout {
+        &self.room().layouts[self.active_layout]
+    }
+
+    pub fn layout_mut(&mut self) -> &mut Layout {
+        let layout = self.active_layout;
+        &mut self.room_mut().layouts[layout]
+    }
+
+    /// Lampes de la zone laissées hors du live par la disposition active.
+    pub fn excluded(&self) -> &[String] {
+        &self.layout().excluded
     }
 
     pub fn bridge(&self) -> Result<&BridgeCredentials> {
@@ -195,5 +247,26 @@ mod tests {
         let cfg: Config = serde_json::from_str(r#"{ "bridge": null, "area_id": null }"#).expect("ancienne config");
         assert!(cfg.presets.is_empty());
         assert!(cfg.live.director);
+    }
+
+    #[test]
+    fn old_lamp_settings_become_the_first_layout() {
+        let json = r#"{ "bridge": null, "area_id": null, "excluded_lights": ["cuisine"],
+                        "lamp_positions": { "hue-go": -1.0, "bureau": 1.0 } }"#;
+        let cfg = serde_json::from_str::<Config>(json).unwrap().with_room();
+        assert_eq!(cfg.rooms.len(), 1);
+        assert_eq!(cfg.excluded(), ["cuisine"]);
+        let lamps = &cfg.layout().lamps;
+        assert_eq!((lamps["hue-go"].x, lamps["bureau"].x), (0.0, cfg.room().width));
+    }
+
+    #[test]
+    fn active_room_and_layout_stay_in_range() {
+        let mut cfg = Config::default().with_room();
+        cfg.active_room = 3;
+        cfg.active_layout = 7;
+        let cfg = cfg.with_room();
+        assert_eq!((cfg.active_room, cfg.active_layout), (0, 0));
+        assert_eq!(cfg.layout().name, "Par défaut");
     }
 }

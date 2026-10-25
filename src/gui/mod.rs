@@ -2,6 +2,7 @@
 //! couleurs, animation) ; pendant le live, une scène plein écran qui prend la couleur de la lampe,
 //! le tempo en très grand et les réglages qui restent modifiables dans un dock en bas.
 
+mod plan;
 mod presets;
 mod setup;
 mod stage;
@@ -116,6 +117,9 @@ struct App {
     preset_name: String,
     preset_note: String,
     outside_changes_seen: u32,
+    /// Lampe choisie sur le plan (pour sa hauteur), et pièce ou disposition qu'on renomme.
+    selected_lamp: Option<String>,
+    renaming: Option<(plan::Renaming, String)>,
 }
 
 impl App {
@@ -155,6 +159,8 @@ impl App {
             preset_name: String::new(),
             preset_note: String::new(),
             outside_changes_seen: 0,
+            selected_lamp: None,
+            renaming: None,
         };
         app.refresh_devices();
         app
@@ -472,13 +478,7 @@ fn motion_text(motion: Motion) -> (&'static str, &'static str) {
 
 /// Titre court et explication d'une disposition des lampes.
 fn spread_text(spread: Spread) -> (&'static str, &'static str) {
-    match spread {
-        Spread::Auto => ("Auto", "Suit les phases"),
-        Spread::Together => ("Ensemble", "Toutes à chaque kick"),
-        Spread::Wave => ("Vague", "Traverse la pièce"),
-        Spread::Alternate => ("Alternance", "Gauche, puis droite"),
-        Spread::Split => ("Graves / aigus", "Kicks et ambiance"),
-    }
+    (spread.label(), spread.hint())
 }
 
 fn flash_text(mode: FlashMode) -> (&'static str, &'static str) {

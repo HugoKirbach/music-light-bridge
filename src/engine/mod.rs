@@ -26,7 +26,7 @@ use crate::hue::api;
 use crate::hue::snapshot::Restored;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
 use crate::link::LinkSession;
-use crate::look::{Accent, Dynamics, Motion, Palette, Phase, ReactiveLook, Spread};
+use crate::look::{Accent, Space, Dynamics, Motion, Palette, Phase, ReactiveLook, Spread};
 use crate::midi::{MidiListener, Notes, note_hue};
 use crate::tempo::{MANUAL_BPM_LIMITS, TempoSource, Tracker};
 use crate::timing;
@@ -110,6 +110,10 @@ pub struct Info {
     pub resumed_snapshot: bool,
     /// Adresse de la télécommande mobile, si elle est ouverte.
     pub remote_url: Option<String>,
+    /// Pièce et disposition des lampes, et les dispositions qu'elle rend possibles.
+    pub room: String,
+    pub layout: String,
+    pub movements: Vec<Spread>,
 }
 
 /// Instantané de l'état, pour l'affichage.
@@ -220,6 +224,8 @@ struct Shared {
     presets: Mutex<Vec<Preset>>,
     preset: Mutex<Option<String>>,
     outside_changes: AtomicU32,
+    /// Dispositions que la pièce permet.
+    movements: Vec<Spread>,
     /// Drop demandé par la télécommande : éclat blanc partout.
     drop_now: AtomicBool,
     note_flashes: AtomicU32,
@@ -324,30 +330,29 @@ impl Engine {
         let area = rt.block_on(api::select_area(bridge, cfg.area_id.as_deref()))?;
         // Sans la liste des lampes (bridge ancien), toute la zone est pilotée.
         let lamps = rt.block_on(api::area_lamps(bridge, &area)).unwrap_or_default();
-        let channels = api::piloted_channels(&area, &lamps, &cfg.excluded_lights);
+        let channels = api::piloted_channels(&area, &lamps, cfg.excluded());
         if channels.is_empty() {
             bail!("aucune lampe à piloter : coche au moins une lampe de la zone");
         }
-        // Canaux pilotés et leur place dans la pièce, de gauche à droite : celle choisie dans la
-        // fenêtre pour leur lampe, sinon celle de la zone Hue.
-        let lamps_in_room: Vec<(u8, f32)> = channels
-            .iter()
-            .map(|&id| {
+        // Place de chaque canal dans la pièce : celle de sa lampe dans la disposition active, sinon
+        // sa place de gauche à droite dans la zone Hue.
+        let space = Space::of_room(
+            cfg.room(),
+            cfg.active_layout,
+            channels.iter().map(|&id| {
                 let lamp = lamps.iter().find(|lamp| lamp.channels.contains(&id));
-                let chosen = lamp.and_then(|lamp| cfg.lamp_positions.get(&lamp.id).copied());
-                // Un ruban garde la place de chacun de ses segments ; une lampe, celle de la zone (ou
-                // sa place par défaut si les lampes n'ont jamais été placées).
                 let hue = match lamp {
                     Some(lamp) if lamp.channels.len() == 1 => lamp.x,
                     _ => area.channels.iter().find(|c| c.channel_id == id).map_or(0.0, |c| c.position.x),
                 };
-                (id, chosen.unwrap_or(hue))
-            })
-            .collect();
+                (lamp.map_or("", |lamp| lamp.id.as_str()), hue)
+            }),
+        );
+        let movements = space.possible();
         // Lampes pilotées et leurs canaux (rangs dans `channels`), et retard de chaque canal.
         let lamp_map: Vec<(String, String, Vec<usize>)> = lamps
             .iter()
-            .filter(|lamp| !cfg.excluded_lights.contains(&lamp.id))
+            .filter(|lamp| !cfg.excluded().contains(&lamp.id))
             .map(|lamp| {
                 let ranks = channels.iter().enumerate().filter(|(_, id)| lamp.channels.contains(id)).map(|(i, _)| i).collect();
                 (lamp.id.clone(), lamp.name.clone(), ranks)
@@ -362,7 +367,7 @@ impl Engine {
         }
         let piloted: Vec<String> = lamps
             .iter()
-            .filter(|lamp| !cfg.excluded_lights.contains(&lamp.id))
+            .filter(|lamp| !cfg.excluded().contains(&lamp.id))
             .map(|lamp| lamp.name.clone())
             .collect();
 
@@ -411,6 +416,7 @@ impl Engine {
             presets: Mutex::new(cfg.presets.clone()),
             preset: Mutex::new(None),
             outside_changes: AtomicU32::new(0),
+            movements: movements.clone(),
             drop_now: AtomicBool::new(false),
             note_flashes: AtomicU32::new(0),
             last_note: AtomicU64::new(f64::NEG_INFINITY.to_bits()),
@@ -424,7 +430,7 @@ impl Engine {
             let (rt, features, notes, shared) = (rt.clone(), features.clone(), notes.clone(), shared.clone());
             let mut stream = stream;
             thread::Builder::new().name("lumière".into()).spawn(move || {
-                let result = light_loop(&rt, &mut stream, &lamps_in_room, &features, &notes, &shared, advance);
+                let result = light_loop(&rt, &mut stream, (&channels, &space), &features, &notes, &shared, advance);
                 shared.stop.store(true, Ordering::Relaxed);
                 (stream, result)
             })?
@@ -469,6 +475,9 @@ impl Engine {
             advance,
             resumed_snapshot,
             remote_url,
+            room: cfg.room().name.clone(),
+            layout: cfg.layout().name.clone(),
+            movements,
         };
         Ok(Self {
             info,
@@ -756,6 +765,8 @@ impl fmt::Display for Info {
         if !self.lamps.is_empty() {
             write!(f, "\nLampes pilotées : {}.", self.lamps.join(", "))?;
         }
+        let movements: Vec<&str> = self.movements.iter().filter(|&&m| m != Spread::Auto).map(|m| m.label()).collect();
+        write!(f, "\nPièce « {} », configuration « {} » : {}.", self.room, self.layout, movements.join(", "))?;
         if let Some(port) = &self.midi_port {
             write!(f, "\nMIDI : « {port} » ; chaque note flashe à sa couleur.")?;
         }

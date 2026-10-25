@@ -198,7 +198,7 @@ pub fn areas(rt: &Runtime, cfg: &mut Config, select: Option<String>) -> Result<(
                 .filter_map(|id| area.channels.iter().find(|c| c.channel_id == *id))
                 .map(|c| format!("{:+.2}", c.position.x))
                 .collect();
-            let excluded = if cfg.excluded_lights.contains(&lamp.id) { "  (écartée du live)" } else { "" };
+            let excluded = if cfg.excluded().contains(&lamp.id) { "  (écartée du live)" } else { "" };
             println!("      {:<24} place {}{excluded}", lamp.name, places.join(" "));
         }
     }

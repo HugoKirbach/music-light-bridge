@@ -12,6 +12,7 @@ mod link;
 mod look;
 mod metronome;
 mod phrase;
+mod room;
 mod midi;
 mod tempo;
 mod timing;

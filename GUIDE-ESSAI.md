@@ -136,11 +136,30 @@ Section **Scènes** dans la fenêtre (en bas à droite) et onglet **Scènes** da
 - **DROP** envoie un éclat blanc ;
 - l'adresse reste la même au lancement suivant (tu peux la mettre en favori).
 
+## [23] Pièces, configurations et mouvements calculés
+
+La section Lampes de la fenêtre décrit maintenant la pièce. La bande gauche → droite du [11]
+devient un plan vu de dessus. Tes réglages actuels sont repris dans « Ma pièce / Par défaut ».
+**À essayer :**
+1. Règle largeur et profondeur, puis place le DJ et tes 4 lampes sur le plan. Clique chaque lampe
+   pour régler sa hauteur (sol, mi-hauteur, plafond).
+2. Sous le plan, regarde les mouvements en couleur. Survole ceux en gris pour la raison.
+3. **Copier** une configuration, la renommer, en cocher d'autres lampes ou les déplacer ;
+   passer de l'une à l'autre. Crée aussi une deuxième pièce.
+4. Lance le live et essaie chaque nouvelle disposition dans l'onglet Animation : Avant → fond,
+   Diagonale, Bas → haut, Rotation, Onde du DJ, Devant / fond, Coins opposés.
+
+**Ce qui est attendu :**
+- chaque mouvement suit le plan, avec les bonnes lampes dans le bon ordre ;
+- en Auto, la montée grimpe vers le plafond et le break tourne autour de la pièce si les lampes
+  l'entourent ;
+- seuls les mouvements possibles sont proposés, dans la fenêtre et sur le téléphone.
+
 ---
 
 ## Ce qui a été vérifié de mon côté
 
-- Compilation, `clippy` sans avertissement, 85 tests unitaires.
+- Compilation, `clippy` sans avertissement, 103 tests unitaires.
 - Banc d'essai sur les 5 captures annotées : note d'ensemble 80, inchangée par les numéros 15 à
   21.
 - La fenêtre (capture d'écran) et la page mobile (aperçu dans un navigateur, à la taille d'un

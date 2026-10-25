@@ -58,7 +58,7 @@ impl App {
             theme::pill(ui, theme::spaced(state, theme::font(12.0, BOLD), MUTED, 1.0), RAISED, Some(dot));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &*bridge {
                 Bridge::Ready { area, lamps } => {
-                    let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded_lights.contains(&lamp.id)).count();
+                    let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded().contains(&lamp.id)).count();
                     let lamps = match (lamps.len(), piloted) {
                         (1, 1) => "1 lampe".to_owned(),
                         (total, piloted) if total == piloted => format!("{total} lampes"),
@@ -270,7 +270,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
             for lamp in lamps {
-                let checked = !self.cfg.excluded_lights.contains(&lamp.id);
+                let checked = !self.cfg.excluded().contains(&lamp.id);
                 let chip = theme::chip(ui, &lamp.name, checked);
                 let chip = if lamp.channels.len() > 1 {
                     chip.on_hover_text(format!("{} segments, éclairés ensemble", lamp.channels.len()))
@@ -282,53 +282,25 @@ impl App {
                 }
             }
         });
-        let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded_lights.contains(&lamp.id)).count();
-        // Place des lampes pilotées dans la pièce : celle choisie ici, sinon celle de la zone Hue.
-        let placed: Vec<(String, String, f32)> = lamps
-            .iter()
-            .filter(|lamp| !self.cfg.excluded_lights.contains(&lamp.id))
-            .map(|lamp| (lamp.id.clone(), lamp.name.clone(), self.cfg.lamp_positions.get(&lamp.id).copied().unwrap_or(lamp.x)))
-            .collect();
+        let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded().contains(&lamp.id)).count();
+        let lamps = lamps.clone();
         drop(bridge);
-        if placed.len() > 1 {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(theme::text("Place dans la pièce, de gauche à droite", theme::regular(13.0), MUTED));
-                if !self.cfg.lamp_positions.is_empty() {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let reset = ui.add(egui::Label::new(theme::text("Places de l'app Hue", theme::regular(13.0), ACCENT)).sense(Sense::click()));
-                        if reset.on_hover_text("Oublier les places choisies ici").clicked() {
-                            self.cfg.lamp_positions.clear();
-                            self.save_config();
-                        }
-                    });
-                }
-            });
-            match theme::room_strip(ui, &placed) {
-                Some((id, x, false)) => {
-                    self.cfg.lamp_positions.insert(id, x);
-                }
-                Some((id, x, true)) => {
-                    self.cfg.lamp_positions.insert(id, x);
-                    self.save_config();
-                }
-                None => {}
-            }
-        }
+        ui.add_space(4.0);
+        self.room_panel(ui, &lamps);
         match toggled {
             Some((_, true)) if piloted == 1 => self.show("Garde au moins une lampe pour le live."),
             Some((id, true)) => {
-                self.cfg.excluded_lights.push(id);
+                self.cfg.layout_mut().excluded.push(id);
                 self.save_config();
             }
             Some((id, false)) => {
-                self.cfg.excluded_lights.retain(|excluded| *excluded != id);
+                self.cfg.layout_mut().excluded.retain(|excluded| *excluded != id);
                 self.save_config();
             }
             None => {}
         }
         ui.label(theme::text(
-            "Les lampes décochées gardent leur état pendant le live. Zone modifiée dans l'app Hue ? « Mettre à jour » la relit.",
+            "Lampes décochées : elles gardent leur état pendant le live (choix propre à chaque configuration). Zone modifiée dans l'app Hue ? « Mettre à jour » la relit.",
             theme::regular(12.0),
             LABEL,
         ));
@@ -478,7 +450,15 @@ impl App {
 
         ui.add_space(12.0);
         theme::section(ui, "DISPOSITION");
-        for row in Spread::ALL.chunks(2) {
+        // Celles que la pièce permet (et celle choisie, même si elle ne l'est plus).
+        let mut possible = match &*self.bridge.lock().unwrap_or_else(PoisonError::into_inner) {
+            Bridge::Ready { lamps, .. } => self.possible_spreads(lamps),
+            _ => Spread::ALL.to_vec(),
+        };
+        if !possible.contains(&self.settings.spread) {
+            possible.push(self.settings.spread);
+        }
+        for row in possible.chunks(2) {
             ui.horizontal(|ui| {
                 for &spread in row {
                     let (title, _) = spread_text(spread);

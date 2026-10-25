@@ -47,14 +47,14 @@
 <script>
   const LABELS = {
     motion: ["Auto", "Pulse", "Respiration", "Montée"],
-    spread: ["Auto", "Ensemble", "Vague", "Alternance", "Graves / aigus"],
     flash: ["Kicks", "Réactif", "Chaque temps"],
     director: ["Désactivé", "Activé"],
   };
   const base = location.pathname.replace(/\/?$/, "/");
   const rgb = c => `rgb(${c[0]},${c[1]},${c[2]})`;
 
-  function buttons(id, labels, selected, action) {
+  // `values` : la valeur envoyée pour chaque bouton (son rang par défaut).
+  function buttons(id, labels, selected, action, values = labels.map((_, i) => i)) {
     const box = document.getElementById(id);
     const key = labels.join("|") + "#" + selected;
     if (box.dataset.key === key) return;
@@ -62,8 +62,8 @@
     box.replaceChildren(...labels.map((label, i) => {
       const b = document.createElement("button");
       b.textContent = label;
-      if (i === selected) b.className = "on";
-      b.onclick = () => send(action, i);
+      if (values[i] === selected) b.className = "on";
+      b.onclick = () => send(action, values[i]);
       return b;
     }));
   }
@@ -88,7 +88,7 @@
     if (s.presets.length) buttons("presets", s.presets, s.presets.indexOf(s.preset), "preset");
     else presets.innerHTML = '<span class="empty">Aucune scène : enregistre-les dans la fenêtre du PC.</span>';
     buttons("motion", LABELS.motion, s.motion, "motion");
-    buttons("spread", LABELS.spread, s.spread, "spread");
+    buttons("spread", s.spreads.map(p => p[1]), s.spread, "spread", s.spreads.map(p => p[0]));
     buttons("flash", LABELS.flash, s.flash, "flash");
     buttons("director", LABELS.director, s.director ? 1 : 0, "director");
   }

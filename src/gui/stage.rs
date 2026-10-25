@@ -212,9 +212,14 @@ impl App {
                 }
             }
         });
-        ui.horizontal(|ui| {
-            let size = vec2((width - 40.0) / 5.0, 58.0);
-            for spread in Spread::ALL {
+        // Les dispositions que la pièce permet (et celle choisie), six par rangée.
+        let mut possible = self.engine.as_ref().map_or_else(|| Spread::ALL.to_vec(), |engine| engine.info.movements.clone());
+        if !possible.contains(&self.settings.spread) {
+            possible.push(self.settings.spread);
+        }
+        ui.horizontal_wrapped(|ui| {
+            let size = vec2((width - 50.0) / 6.0, 58.0);
+            for spread in possible {
                 let (title, mut subtitle) = (spread_text(spread).0, spread_text(spread).1.to_owned());
                 if spread == Spread::Auto && self.settings.spread == Spread::Auto {
                     subtitle = format!("En ce moment : {}", spread_text(status.active_spread).0.to_lowercase());

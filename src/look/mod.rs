@@ -14,8 +14,10 @@ use crate::hue::stream::Rgb;
 mod director;
 mod lamps;
 mod phases;
+mod space;
 
 pub use lamps::{Accent, Spread};
+pub use space::Space;
 pub use phases::{Phase, Pulse};
 use director::Director;
 use lamps::Lamp;
@@ -179,6 +181,8 @@ pub struct ReactiveLook {
     drop_shown: bool,
     /// Régisseur de la disposition Auto.
     director: Director,
+    /// Dispositions que la place des lampes rend possibles.
+    possible: Vec<Spread>,
 }
 
 impl Default for ReactiveLook {
@@ -205,6 +209,7 @@ impl Default for ReactiveLook {
             drop_advance: 0.0,
             drop_shown: false,
             director: Director::default(),
+            possible: vec![Spread::Auto, Spread::Together],
         }
     }
 }
@@ -214,21 +219,24 @@ impl ReactiveLook {
         Self { palette, ..Self::default() }
     }
 
-    /// Place des lampes dans la pièce, de gauche à droite (x de la zone Hue, de -1 à 1), dans
-    /// l'ordre où `render_lamps` rendra leurs couleurs.
+    /// Lampes alignées de gauche à droite (x de la zone Hue, de -1 à 1), faute de pièce décrite.
+    #[cfg(test)]
     pub fn set_lamps(&mut self, positions: &[f32]) {
-        let count = positions.len().max(1);
-        let x = |i: usize| positions.get(i).copied().unwrap_or(0.0);
-        let mut order: Vec<usize> = (0..count).collect();
-        order.sort_by(|&a, &b| x(a).total_cmp(&x(b)).then(a.cmp(&b)));
+        self.set_space(&Space::line(positions));
+    }
+
+    /// Lampes dans la pièce, dans l'ordre où `render_lamps` rendra leurs couleurs : leur place
+    /// règle chaque mouvement, et les mouvements possibles bornent les choix du régisseur.
+    pub fn set_space(&mut self, space: &Space) {
+        let coords = space.coords();
+        let count = coords.len().max(1);
         self.lamps = vec![Lamp::default(); count];
-        for (rank, &i) in order.iter().enumerate() {
-            let lamp = &mut self.lamps[i];
-            lamp.place = if count > 1 { rank as f32 / (count - 1) as f32 } else { 0.0 };
-            lamp.right = count > 1 && rank >= count / 2;
-            lamp.odd = rank % 2 == 1;
+        for (lamp, at) in self.lamps.iter_mut().zip(coords) {
+            lamp.at = at;
         }
         self.colors = vec![Rgb::OFF; count];
+        self.possible = space.possible();
+        self.director.possible.clone_from(&self.possible);
     }
 
     /// Flash de kick, à pleine intensité, sans savoir où il tombe dans la mesure : un kick sur
@@ -246,22 +254,30 @@ impl ReactiveLook {
         let spread = self.active_spread();
         let single = self.lamps.len() == 1;
         let parity = self.kicks % 2 == 1;
+        // Rotation : la lampe du tour qui s'allume à ce kick.
+        let turn = self.kicks as usize % self.lamps.len().max(1);
         self.kicks += 1;
+        let bar = accent != Accent::Beat;
         for lamp in &mut self.lamps {
+            let at = lamp.at;
+            // Balayage : le flash part d'un bout et met `WAVE_SWEEP` à traverser les lampes.
+            let mut sweep = |coordinate: f32| lamp.pending = Some((WAVE_SWEEP * coordinate, 1.0, WHITE_PUNCH));
+            let back_and_forth = |coordinate: f32| if parity { 1.0 - coordinate } else { coordinate };
             match spread {
                 _ if accent == Accent::Phrase => lamp.fire(1.0, PHRASE_PUNCH),
                 _ if single => lamp.fire(1.0, WHITE_PUNCH),
                 Spread::Auto | Spread::Together => lamp.fire(1.0, WHITE_PUNCH),
-                Spread::Wave => {
-                    let distance = if parity { 1.0 - lamp.place } else { lamp.place };
-                    lamp.pending = Some((WAVE_SWEEP * distance, 1.0, WHITE_PUNCH));
-                }
-                Spread::Alternate if accent != Accent::Beat || lamp.right == parity => {
-                    lamp.fire(1.0, WHITE_PUNCH);
-                }
-                Spread::Alternate => {}
-                Spread::Split if !lamp.odd => lamp.fire(1.0, WHITE_PUNCH),
-                Spread::Split => {}
+                Spread::Wave => sweep(back_and_forth(at.x)),
+                Spread::Diagonal => sweep(back_and_forth(at.diagonal)),
+                Spread::Depth => sweep(at.y),
+                Spread::Rise => sweep(at.z),
+                Spread::Ripple => sweep(at.distance),
+                Spread::Alternate if bar || at.right == parity => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::PingPong if bar || at.back == parity => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::Corners if bar || at.corner == parity => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::Rotate if at.turn == turn => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::Split if !at.odd => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::Alternate | Spread::PingPong | Spread::Corners | Spread::Rotate | Spread::Split => {}
             }
         }
     }
@@ -310,10 +326,18 @@ impl ReactiveLook {
     }
 
     /// Disposition effectivement jouée : celle choisie, ou celle de la phase en mode Auto.
+    /// Première des dispositions `wanted` possible ici, sinon toutes ensemble.
+    fn first_possible(&self, wanted: &[Spread]) -> Spread {
+        wanted.iter().copied().find(|spread| self.possible.contains(spread)).unwrap_or(Spread::Together)
+    }
+
     pub fn active_spread(&self) -> Spread {
         match (self.spread, self.phases.phase) {
             (Spread::Auto, Phase::Groove) => self.director.groove_spread(),
-            (Spread::Auto, Phase::BuildUp | Phase::Calm) => Spread::Wave,
+            // La montée grimpe vers le plafond si des lampes y sont ; le break tourne autour de la
+            // pièce si les lampes l'entourent.
+            (Spread::Auto, Phase::BuildUp) => self.first_possible(&[Spread::Rise, Spread::Wave, Spread::Depth]),
+            (Spread::Auto, Phase::Calm) => self.first_possible(&[Spread::Rotate, Spread::Wave, Spread::Depth]),
             (spread, _) => spread,
         }
     }
@@ -445,12 +469,11 @@ impl ReactiveLook {
             let flash = lamp.flash * intensity;
             // Pulse : le flash part de la lueur de fond et monte, selon l'intensité choisie.
             let pulse = (glow + (1.0 - glow) * flash, lamp.punch * flash);
-            // Respiration : suit l'énergie, un kick n'ajoute qu'une houle. En vague, une
-            // ondulation lente traverse la pièce.
-            let ripple = if several && spread == Spread::Wave {
-                1.0 - RIPPLE_DEPTH * (0.5 + 0.5 * (TAU * (self.time / RIPPLE_PERIOD - lamp.place)).sin())
-            } else {
-                1.0
+            // Respiration : suit l'énergie, un kick n'ajoute qu'une houle. Une ondulation lente
+            // parcourt la pièce le long du mouvement (tout autour en rotation).
+            let ripple = match lamps::sweep_coordinate(spread, &lamp.at) {
+                Some(place) if several => 1.0 - RIPPLE_DEPTH * (0.5 + 0.5 * (TAU * (self.time / RIPPLE_PERIOD - place)).sin()),
+                _ => 1.0,
             };
             let breathing = 0.8 * self.breath * ripple + BREATH_KICK * flash;
             let breath = ((floor + (1.0 - floor) * breathing).min(1.0), 0.0);
@@ -463,7 +486,7 @@ impl ReactiveLook {
                 (w_pulse * pulse.0 + w_breath * breath.0 + w_build * build_up.0) / total,
                 (w_pulse * pulse.1 + w_breath * breath.1 + w_build * build_up.1) / total,
             );
-            if several && spread == Spread::Split && lamp.odd {
+            if several && spread == Spread::Split && lamp.at.odd {
                 // Lampes « aigus » : elles suivent médiums et aigus, sans flash de kick.
                 value = (floor + (1.0 - floor) * (TREBLE_GLOW * self.treble + 0.6 * flash)).min(1.0);
                 white = 0.0;
@@ -490,6 +513,7 @@ impl ReactiveLook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::space::Spot;
 
     const FRAME: Duration = Duration::from_micros(16_667);
     const FRAMES_PER_SECOND: usize = 60;
@@ -795,6 +819,79 @@ mod tests {
         look.cancel_flash();
         look.kick_at(Accent::Beat);
         assert_eq!(lit(&mut look, FRAME), [false, false, false, true], "retour depuis la droite");
+    }
+
+    /// Une lampe par coin, de 5 × 4 m, DJ au milieu du devant : devant gauche au sol, devant droite
+    /// et fond gauche à mi-hauteur, fond droite au plafond.
+    fn corners(spread: Spread) -> ReactiveLook {
+        let mut look = room(spread);
+        let spot = |x, y, z| Spot { x, y, z };
+        look.set_space(&Space {
+            spots: vec![spot(0.5, 0.5, 0.0), spot(4.5, 0.5, 0.5), spot(0.5, 3.5, 0.5), spot(4.5, 3.5, 1.0)],
+            dj: [2.5, 0.0],
+        });
+        look
+    }
+
+    /// Lampes allumées dans l'ordre de `corners` : devant gauche, devant droite, fond gauche, fond
+    /// droite.
+    fn lit_corners(look: &mut ReactiveLook, dt: Duration) -> [bool; 4] {
+        let colors = look.render_lamps(dt, Levels::default()).to_vec();
+        std::array::from_fn(|i| brightness(colors[i]) > u16::MAX / 2)
+    }
+
+    #[test]
+    fn rotation_goes_around_the_room_one_lamp_per_kick() {
+        let mut look = corners(Spread::Rotate);
+        let mut order = Vec::new();
+        for _ in 0..4 {
+            look.kick_at(Accent::Beat);
+            let lit = lit_corners(&mut look, FRAME);
+            assert_eq!(lit.iter().filter(|&&on| on).count(), 1, "{lit:?}");
+            order.push(lit.iter().position(|&on| on).unwrap());
+            look.cancel_flash();
+        }
+        // Vue de dessus, devant en bas : devant gauche, fond gauche, fond droite, devant droite, en
+        // partant de n'importe laquelle.
+        let start = order.iter().position(|&i| i == 0).unwrap();
+        order.rotate_left(start);
+        assert_eq!(order, [0, 2, 3, 1]);
+    }
+
+    #[test]
+    fn ping_pong_and_corners_answer_each_other() {
+        let mut look = corners(Spread::PingPong);
+        look.kick_at(Accent::Beat);
+        assert_eq!(lit_corners(&mut look, FRAME), [true, true, false, false], "devant");
+        look.cancel_flash();
+        look.kick_at(Accent::Beat);
+        assert_eq!(lit_corners(&mut look, FRAME), [false, false, true, true], "fond");
+        let mut look = corners(Spread::Corners);
+        look.kick_at(Accent::Beat);
+        let first = lit_corners(&mut look, FRAME);
+        assert!(first == [true, false, false, true] || first == [false, true, true, false], "{first:?}");
+    }
+
+    #[test]
+    fn sweeps_start_where_they_should() {
+        // Onde du DJ : les lampes du devant d'abord ; bas → haut : celle au sol d'abord.
+        for (spread, first) in [(Spread::Ripple, [true, true, false, false]), (Spread::Rise, [true, false, false, false])] {
+            let mut look = corners(spread);
+            look.kick_at(Accent::Beat);
+            assert_eq!(lit_corners(&mut look, FRAME), first, "{spread:?}");
+            assert_eq!(lit_corners(&mut look, Duration::from_millis(130)), [true; 4], "{spread:?}");
+        }
+    }
+
+    #[test]
+    fn auto_climbs_in_a_build_up_and_turns_in_a_break_when_the_room_allows() {
+        let look = corners(Spread::Auto);
+        assert_eq!(look.first_possible(&[Spread::Rise, Spread::Wave]), Spread::Rise);
+        assert_eq!(look.first_possible(&[Spread::Rotate, Spread::Wave]), Spread::Rotate);
+        // Lampes alignées au même niveau : ni montée ni rotation, la vague les remplace.
+        let line = room(Spread::Auto);
+        assert_eq!(line.first_possible(&[Spread::Rise, Spread::Wave]), Spread::Wave);
+        assert_eq!(line.first_possible(&[Spread::Rotate, Spread::Wave]), Spread::Wave);
     }
 
     #[test]

@@ -72,6 +72,7 @@ impl Remote for (Arc<Shared>, Arc<Features>) {
             "lamps": shared.lamp_colors.iter().map(|c| unpack(c.load(Ordering::Relaxed))).collect::<Vec<_>>(),
             "motion": shared.motion.load(Ordering::Relaxed),
             "spread": shared.spread.load(Ordering::Relaxed),
+            "spreads": shared.movements.iter().map(|&s| (s.index(), s.label())).collect::<Vec<_>>(),
             "flash": FLASH_MODES.iter().position(|&mode| mode == shared.mode()),
             "director": shared.director.load(Ordering::Relaxed),
             "preset": *lock(&shared.preset),
@@ -243,7 +244,7 @@ mod tests {
                 Command::Drop,
             ]
         );
-        assert_eq!(route("/abc/do?action=spread&value=9", &fake, "abc").0, "400 Bad Request");
+        assert_eq!(route("/abc/do?action=spread&value=99", &fake, "abc").0, "400 Bad Request");
         assert_eq!(route("/abc/do?action=reboot", &fake, "abc").0, "400 Bad Request");
     }
 

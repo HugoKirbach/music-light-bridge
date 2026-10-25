@@ -33,8 +33,10 @@ et répartit la lumière entre les lampes selon leur place dans la pièce.
   drop peut être allumé d'avance quand la structure le prévoit.
 - **Régisseur automatique.** Il change la disposition et la teinte d'une section à l'autre, selon
   l'énergie du set.
-- **Plusieurs lampes.** Chacune a sa place dans la pièce et son retard propre, ce qui permet des
-  vagues, des alternances gauche/droite, ou de séparer graves et aigus.
+- **Pièces et configurations.** On dessine la pièce (cotes, place du DJ), et chaque configuration
+  y place les lampes et leur hauteur. DJ-Bridge en tire les mouvements possibles : vagues et
+  balayages dans tous les sens, rotation autour de la pièce, onde depuis le DJ, groupes qui se
+  répondent. Chaque lampe a aussi son retard propre.
 - **Scènes** enregistrées, rappelables d'un clic, d'une note MIDI ou du téléphone.
 - **Télécommande mobile** : une page pour téléphone sur le réseau local.
 - **Synthé** : Ableton Link pour le tempo exact, et chaque note MIDI flashe à sa couleur.
@@ -139,10 +141,9 @@ zone pilotée et le nombre de lampes.
 1. **Source audio.**
    - **Carte son** : choix de l'appareil et du pilote (ASIO s'il est libre, sinon WASAPI).
    - **Sortie du PC** : capte ce que joue Windows (WASAPI loopback).
-2. **Lampes.**
+2. **Lampes** : la pièce, ses configurations et le plan (voir [Pièces et
+   configurations](#pièces-et-configurations)).
    - Cochez les lampes de la zone à piloter. Les autres gardent leur état pendant le live.
-   - Placez chaque lampe de gauche à droite en la faisant glisser sur la bande « pièce ». Cette
-     place sert aux vagues et aux alternances.
    - **Mettre à jour** relit la zone si elle a changé dans l'app Hue.
 3. **Tempo.**
    - **Détection auto** (plage 100–190 BPM).
@@ -154,8 +155,8 @@ zone pilotée et le nombre de lampes.
 
 **Colonne de droite :** aperçu de la couleur principale, puis les sections suivantes.
 - **Animation** : Auto, Pulse, Respiration, Montée.
-- **Disposition** : Auto, Ensemble, Vague, Alternance, Graves / aigus, et la case **Régisseur
-  auto**.
+- **Disposition** : la façon de répartir les flashs entre les lampes, parmi celles que la
+  configuration rend possibles, et la case **Régisseur auto**.
 - **Couleurs** : Groove, Creux, Filtres.
 - **Flashs** : intensité, redescente, lueur de fond.
 - **Déclenchement** : Kicks anticipés, Réactif, Chaque temps.
@@ -185,6 +186,28 @@ Le dock du bas garde tout réglable en onglets :
 
 Le bouton rond en haut à droite arrête le live et rétablit les lampes. Le bilan de la session
 s'affiche ensuite sous le bouton de lancement.
+
+### Pièces et configurations
+
+La section **Lampes** décrit où sont les lampes. DJ-Bridge en tire les mouvements possibles.
+
+- **Pièce** : un rectangle vu de dessus, avec sa largeur et sa profondeur en mètres. Le devant
+  (en bas du plan) est le côté du DJ. **Nouvelle** ajoute une pièce, **Renommer** et
+  **Supprimer** gèrent la pièce choisie.
+- **Configuration** : une pièce peut en avoir plusieurs (« Soirée », « Mix calme »…). Chacune
+  garde les lampes cochées, la place et la hauteur de chaque lampe. **Copier** crée une
+  configuration à partir de celle affichée. Le live utilise la pièce et la configuration choisies
+  ici.
+- **Plan** : faites glisser chaque lampe et le **DJ** (par pas de 10 cm). Cliquez une lampe pour
+  choisir sa hauteur : **Sol**, **Mi-hauteur** ou **Plafond** (les lampes du plafond sont
+  cerclées).
+- **Mouvements possibles** : sous le plan, les dispositions que la configuration permet sont en
+  couleur. Les autres sont grisées, et leur survol dit pourquoi (par exemple « les lampes doivent
+  entourer la pièce » pour la rotation). Seules les dispositions possibles sont proposées, dans la
+  fenêtre comme sur le téléphone.
+
+À la première ouverture, une pièce « Ma pièce » de 5 × 4 m reprend les lampes écartées et leurs
+places de gauche à droite.
 
 ### Accorder plusieurs lampes
 
@@ -235,7 +258,7 @@ et scènes réglés dans la fenêtre.
 | `--bpm-min` / `--bpm-max` | Plage de la détection automatique (100–190) |
 | `--flash kicks\|reactif\|temps` | Kicks anticipés (défaut), chaque kick sans avance, chaque temps |
 | `--motion auto\|pulse\|breath\|build-up` | Animation |
-| `--spread auto\|together\|wave\|alternate\|split` | Disposition |
+| `--spread auto\|together\|wave\|alternate\|split\|depth\|diagonal\|rise\|rotate\|ripple\|ping-pong\|corners` | Disposition ; la pièce et la configuration sont celles choisies dans la fenêtre |
 | `--no-director` | Sans régisseur : en disposition auto, le groove alterne toujours |
 | `--link` | Rejoindre la session Ableton Link |
 | `--midi ["nom partiel"]` | Écouter une entrée MIDI |
@@ -339,19 +362,31 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
   - **Respiration** : la lumière suit l'énergie, un kick n'ajoute qu'une houle ;
   - **Montée** : la lumière s'intensifie et blanchit ;
   - **Auto** : pulse en groove, respiration en break, montée en montée, éclat au drop.
-- **Disposition**, selon la place des lampes :
+- **Disposition**, calculée depuis le plan de la configuration. Les balayages traversent les
+  lampes en 120 ms, chaque lampe au moment qui correspond à sa vraie place :
   - **Ensemble** : toutes les lampes à chaque kick ;
-  - **Vague** : le flash traverse la pièce en 120 ms, et une ondulation lente la traverse en
-    break ;
-  - **Alternance** : gauche puis droite, et toutes les lampes en tête de mesure ;
+  - **Vague** : de gauche à droite, puis retour ;
+  - **Avant → fond** : du côté du DJ vers le fond ;
+  - **Diagonale** : d'un coin à l'autre, puis retour ;
+  - **Bas → haut** : du sol vers le plafond (il faut au moins deux hauteurs) ;
+  - **Onde du DJ** : depuis le DJ vers les lampes les plus loin ;
+  - **Rotation** : une lampe à chaque kick, tout autour de la pièce (il faut au moins trois
+    lampes qui entourent la pièce) ;
+  - **Alternance**, **Devant / fond**, **Coins opposés** : deux groupes à tour de rôle (gauche et
+    droite, devant et fond, une diagonale et l'autre), tous ensemble en tête de mesure ;
   - **Graves / aigus** : une lampe sur deux suit les kicks, les autres les médiums et aigus ;
-  - **Auto** : vague en montée et en break. En groove, c'est le régisseur qui choisit.
+  - **Auto** : en montée, bas → haut si des lampes sont en hauteur (sinon vague) ; en break, une
+    ondulation lente qui tourne autour de la pièce si les lampes l'entourent (sinon la traverse) ;
+    en groove, c'est le régisseur qui choisit.
+
+  Un mouvement demande des lampes assez étalées dans son sens (au moins 80 cm). Pendant un break,
+  la respiration ondule le long du mouvement choisi.
 - **Accents** : en tête de phrase, toutes les lampes flashent en blanc plus franc.
 - **Régisseur** (disposition Auto) : une nouvelle section s'ouvre au drop, au retour du groove et
-  toutes les deux phrases (64 kicks sans structure). Il choisit alors la disposition selon
-  l'énergie des 4 dernières secondes comparée à celle du set :
-  - quand ça s'emballe, ensemble ou alternance ;
-  - quand ça retombe, graves / aigus ou vague.
+  toutes les deux phrases (64 kicks sans structure). Il choisit alors, parmi les mouvements que la
+  configuration permet, selon l'énergie des 4 dernières secondes comparée à celle du set :
+  - quand ça s'emballe, ensemble, alternance, coins opposés, devant / fond ou rotation ;
+  - quand ça retombe, graves / aigus, vague, onde du DJ ou avant → fond.
 
   Il décale aussi la teinte principale de ±20° pour que deux sections se distinguent.
 - **Couleurs** :
@@ -410,7 +445,7 @@ plantage, elle est reprise au lancement suivant (si elle a moins de 6 h), ou tou
 
 | Fichier | Contenu |
 |---|---|
-| `%APPDATA%\dj-bridge\config.json` | Identifiants du bridge, zone, latence, réglages, places et retards des lampes, scènes, jeton de la télécommande |
+| `%APPDATA%\dj-bridge\config.json` | Identifiants du bridge, zone, latence, réglages, pièces et configurations des lampes, retards des lampes, scènes, jeton de la télécommande |
 | `%APPDATA%\dj-bridge\captures\` | Captures audio, leurs fiches, `bench.json` |
 | `%APPDATA%\dj-bridge\lampes-avant-flux.json` | État des lampes à rétablir |
 
