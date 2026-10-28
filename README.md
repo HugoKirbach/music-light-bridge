@@ -362,8 +362,10 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
   - **Respiration** : la lumière suit l'énergie, un kick n'ajoute qu'une houle ;
   - **Montée** : la lumière s'intensifie et blanchit ;
   - **Auto** : pulse en groove, respiration en break, montée en montée, éclat au drop.
-- **Disposition**, calculée depuis le plan de la configuration. Les balayages traversent les
-  lampes en 120 ms, chaque lampe au moment qui correspond à sa vraie place :
+- **Disposition**, calculée depuis le plan de la configuration. Chaque lampe qui flashe s'allume
+  sur le kick même, jamais après. Les mouvements dirigés (vague, avant → fond, diagonale,
+  bas → haut, onde du DJ) avancent d'un kick à l'autre. Les lampes y sont groupées selon leur
+  place, quatre groupes au plus, et chaque kick allume le groupe suivant :
   - **Ensemble** : toutes les lampes à chaque kick ;
   - **Vague** : de gauche à droite, puis retour ;
   - **Avant → fond** : du côté du DJ vers le fond ;

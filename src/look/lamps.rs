@@ -12,21 +12,21 @@ pub enum Spread {
     Auto,
     /// Toutes les lampes ensemble
     Together,
-    /// Le flash traverse la pièce de gauche à droite, puis revient
+    /// Un kick après l'autre, de gauche à droite puis retour
     Wave,
     /// Gauche et droite à tour de rôle, toutes ensemble en tête de mesure
     Alternate,
     /// Une lampe sur deux flashe sur les kicks, les autres respirent avec médiums et aigus
     Split,
-    /// Le flash part du devant (côté DJ) et file vers le fond
+    /// Un kick après l'autre, du devant (côté DJ) vers le fond
     Depth,
-    /// Le flash traverse la pièce en diagonale, d'un coin à l'autre puis retour
+    /// Un kick après l'autre, d'un coin à l'autre puis retour
     Diagonal,
-    /// Le flash monte du sol vers le plafond
+    /// Un kick après l'autre, du sol vers le plafond
     Rise,
     /// La lumière tourne autour de la pièce, une lampe à chaque kick
     Rotate,
-    /// Le flash part du DJ et s'étend vers les lampes les plus loin
+    /// Un kick après l'autre, du DJ vers les lampes les plus loin
     Ripple,
     /// Devant et fond à tour de rôle
     PingPong,
@@ -90,14 +90,14 @@ impl Spread {
         match self {
             Self::Auto => "Auto : le régisseur choisit sur le groove, vague (ou montée) en montée, ondulation en break",
             Self::Together => "Ensemble : toutes les lampes à chaque kick",
-            Self::Wave => "Vague : le flash traverse la pièce de gauche à droite, puis revient",
+            Self::Wave => "Vague : un kick après l'autre, la lumière passe de gauche à droite, puis revient",
             Self::Alternate => "Alternance : gauche et droite à tour de rôle, toutes en tête de mesure",
             Self::Split => "Graves / aigus : une lampe sur deux sur les kicks, les autres respirent",
-            Self::Depth => "Avant → fond : le flash part du côté du DJ et file vers le fond de la pièce",
-            Self::Diagonal => "Diagonale : le flash traverse la pièce d'un coin à l'autre, puis revient",
-            Self::Rise => "Bas → haut : le flash monte des lampes au sol vers celles du plafond",
+            Self::Depth => "Avant → fond : un kick après l'autre, la lumière part du côté du DJ vers le fond",
+            Self::Diagonal => "Diagonale : un kick après l'autre, la lumière va d'un coin à l'autre, puis revient",
+            Self::Rise => "Bas → haut : un kick après l'autre, la lumière monte du sol vers le plafond",
             Self::Rotate => "Rotation : la lumière tourne autour de la pièce, une lampe à chaque kick",
-            Self::Ripple => "Onde du DJ : le flash part du DJ et s'étend vers les lampes les plus loin",
+            Self::Ripple => "Onde du DJ : un kick après l'autre, la lumière part du DJ vers les lampes les plus loin",
             Self::PingPong => "Devant / fond : les lampes du devant puis celles du fond, toutes en tête de mesure",
             Self::Corners => "Coins opposés : une diagonale puis l'autre, toutes en tête de mesure",
         }
@@ -131,8 +131,6 @@ pub(super) struct Lamp {
     pub(super) punch: f32,
     /// Flash déclenché depuis le dernier rendu : il s'affiche sans décroissance.
     pub(super) fresh: bool,
-    /// Flash qui part dans quelques ms (vague) : délai restant (s), force, part de blanc.
-    pub(super) pending: Option<(f32, f32, f32)>,
 }
 
 impl Lamp {
@@ -155,4 +153,36 @@ pub(super) fn sweep_coordinate(spread: Spread, at: &Coords) -> Option<f32> {
         Spread::Rotate => Some(at.angle),
         Spread::Auto | Spread::Together | Spread::Split => None,
     }
+}
+
+/// Groupes d'une poursuite le long d'un mouvement : les lampes à la même place (à 15 % près de
+/// l'étendue) forment un groupe, quatre au plus. Rend le groupe de chaque lampe et leur nombre.
+pub(super) fn chase_steps(coordinates: &[f32]) -> (Vec<usize>, usize) {
+    const SAME: f32 = 0.15;
+    const MAX_STEPS: usize = 4;
+    let mut sorted = coordinates.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let mut groups: Vec<f32> = Vec::new();
+    for value in sorted {
+        if groups.last().is_none_or(|&start| value - start > SAME) {
+            groups.push(value);
+        }
+    }
+    let count = groups.len().max(1);
+    let steps = count.min(MAX_STEPS);
+    let group = |value: f32| groups.iter().rposition(|&start| value >= start - 1e-6).unwrap_or(0);
+    (coordinates.iter().map(|&value| group(value) * steps / count).collect(), steps)
+}
+
+/// Groupe allumé au kick n° `kick` d'une poursuite de `steps` groupes : du premier au dernier en
+/// boucle, ou aller-retour.
+pub(super) fn chase_index(kick: usize, steps: usize, back_and_forth: bool) -> usize {
+    if steps < 2 {
+        return 0;
+    }
+    if !back_and_forth {
+        return kick % steps;
+    }
+    let lap = kick % (2 * steps - 2);
+    if lap < steps { lap } else { 2 * steps - 2 - lap }
 }

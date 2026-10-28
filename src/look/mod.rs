@@ -48,8 +48,6 @@ const BREATH_RELEASE: f32 = 0.9;
 const BREATH_KICK: f32 = 0.25;
 /// Fondu d'une animation à l'autre.
 const MOTION_FADE: f32 = 0.4;
-/// Vague : le flash met 120 ms à traverser la pièce.
-const WAVE_SWEEP: f32 = 0.12;
 /// Ondulation des breaks en vague : elle traverse la pièce en 4 s et creuse la respiration de 35 %.
 const RIPPLE_PERIOD: f32 = 4.0;
 const RIPPLE_DEPTH: f32 = 0.35;
@@ -253,31 +251,38 @@ impl ReactiveLook {
         }
         let spread = self.active_spread();
         let single = self.lamps.len() == 1;
-        let parity = self.kicks % 2 == 1;
+        let kick = self.kicks as usize;
+        let parity = kick % 2 == 1;
         // Rotation : la lampe du tour qui s'allume à ce kick.
-        let turn = self.kicks as usize % self.lamps.len().max(1);
+        let turn = kick % self.lamps.len().max(1);
+        // Poursuite le long d'un mouvement : le groupe de lampes qui s'allume à ce kick. Tout part
+        // sur le kick ; le mouvement se lit d'un kick à l'autre.
+        let chased_spread = matches!(spread, Spread::Wave | Spread::Diagonal | Spread::Depth | Spread::Rise | Spread::Ripple);
+        let chase = chased_spread.then(|| {
+            let coordinates: Vec<f32> =
+                self.lamps.iter().filter_map(|lamp| lamps::sweep_coordinate(spread, &lamp.at)).collect();
+            let (steps, count) = lamps::chase_steps(&coordinates);
+            let back_and_forth = matches!(spread, Spread::Wave | Spread::Diagonal);
+            (steps, lamps::chase_index(kick, count, back_and_forth))
+        });
         self.kicks += 1;
         let bar = accent != Accent::Beat;
-        for lamp in &mut self.lamps {
+        for (i, lamp) in self.lamps.iter_mut().enumerate() {
             let at = lamp.at;
-            // Balayage : le flash part d'un bout et met `WAVE_SWEEP` à traverser les lampes.
-            let mut sweep = |coordinate: f32| lamp.pending = Some((WAVE_SWEEP * coordinate, 1.0, WHITE_PUNCH));
-            let back_and_forth = |coordinate: f32| if parity { 1.0 - coordinate } else { coordinate };
+            let chased = chase.as_ref().is_some_and(|(steps, current)| steps[i] == *current);
             match spread {
                 _ if accent == Accent::Phrase => lamp.fire(1.0, PHRASE_PUNCH),
                 _ if single => lamp.fire(1.0, WHITE_PUNCH),
                 Spread::Auto | Spread::Together => lamp.fire(1.0, WHITE_PUNCH),
-                Spread::Wave => sweep(back_and_forth(at.x)),
-                Spread::Diagonal => sweep(back_and_forth(at.diagonal)),
-                Spread::Depth => sweep(at.y),
-                Spread::Rise => sweep(at.z),
-                Spread::Ripple => sweep(at.distance),
+                Spread::Wave | Spread::Diagonal | Spread::Depth | Spread::Rise | Spread::Ripple if bar || chased => {
+                    lamp.fire(1.0, WHITE_PUNCH);
+                }
                 Spread::Alternate if bar || at.right == parity => lamp.fire(1.0, WHITE_PUNCH),
                 Spread::PingPong if bar || at.back == parity => lamp.fire(1.0, WHITE_PUNCH),
                 Spread::Corners if bar || at.corner == parity => lamp.fire(1.0, WHITE_PUNCH),
                 Spread::Rotate if at.turn == turn => lamp.fire(1.0, WHITE_PUNCH),
                 Spread::Split if !at.odd => lamp.fire(1.0, WHITE_PUNCH),
-                Spread::Alternate | Spread::PingPong | Spread::Corners | Spread::Rotate | Spread::Split => {}
+                _ => {}
             }
         }
     }
@@ -378,7 +383,7 @@ impl ReactiveLook {
     /// Éteint les flashs en cours (kick anticipé qui n'est pas venu).
     pub fn cancel_flash(&mut self) {
         for lamp in &mut self.lamps {
-            (lamp.flash, lamp.pending) = (0.0, None);
+            lamp.flash = 0.0;
         }
     }
 
@@ -396,14 +401,6 @@ impl ReactiveLook {
         for lamp in &mut self.lamps {
             if !std::mem::take(&mut lamp.fresh) {
                 lamp.flash *= decay;
-            }
-            if let Some((delay, strength, punch)) = lamp.pending {
-                if delay - dt <= 0.0 {
-                    lamp.pending = None;
-                    lamp.fire(strength, punch);
-                } else {
-                    lamp.pending = Some((delay - dt, strength, punch));
-                }
             }
         }
 
@@ -811,14 +808,21 @@ mod tests {
     }
 
     #[test]
-    fn the_wave_crosses_the_room_then_comes_back() {
+    fn the_wave_goes_lamp_by_lamp_on_the_kicks_then_comes_back() {
         let mut look = room(Spread::Wave);
-        look.kick_at(Accent::Beat);
-        assert_eq!(lit(&mut look, FRAME), [true, false, false, false], "départ à gauche");
-        assert_eq!(lit(&mut look, Duration::from_millis(130)), [true; 4], "arrivée à droite");
-        look.cancel_flash();
-        look.kick_at(Accent::Beat);
-        assert_eq!(lit(&mut look, FRAME), [false, false, false, true], "retour depuis la droite");
+        // Un groupe par kick, allumé sur le kick même : gauche → droite, puis retour.
+        let mut lamps = Vec::new();
+        for _ in 0..6 {
+            look.kick_at(Accent::Beat);
+            let lit = lit(&mut look, FRAME);
+            assert_eq!(lit.iter().filter(|&&on| on).count(), 1, "{lit:?}");
+            lamps.push(lit.iter().position(|&on| on).unwrap());
+            look.cancel_flash();
+        }
+        assert_eq!(lamps, [0, 1, 2, 3, 2, 1]);
+        // Tête de mesure : toutes ensemble.
+        look.kick_at(Accent::Bar);
+        assert_eq!(lit(&mut look, FRAME), [true; 4]);
     }
 
     /// Une lampe par coin, de 5 × 4 m, DJ au milieu du devant : devant gauche au sol, devant droite
@@ -873,13 +877,21 @@ mod tests {
     }
 
     #[test]
-    fn sweeps_start_where_they_should() {
-        // Onde du DJ : les lampes du devant d'abord ; bas → haut : celle au sol d'abord.
-        for (spread, first) in [(Spread::Ripple, [true, true, false, false]), (Spread::Rise, [true, false, false, false])] {
+    fn chases_start_where_they_should_and_never_wait() {
+        // Onde du DJ : le devant puis le fond ; bas → haut : le sol, la mi-hauteur, le plafond.
+        let cases = [
+            (Spread::Ripple, vec![[true, true, false, false], [false, false, true, true]]),
+            (Spread::Rise, vec![[true, false, false, false], [false, true, true, false], [false, false, false, true]]),
+        ];
+        for (spread, expected) in cases {
             let mut look = corners(spread);
-            look.kick_at(Accent::Beat);
-            assert_eq!(lit_corners(&mut look, FRAME), first, "{spread:?}");
-            assert_eq!(lit_corners(&mut look, Duration::from_millis(130)), [true; 4], "{spread:?}");
+            for (n, lamps) in expected.iter().chain(expected.first()).enumerate() {
+                look.kick_at(Accent::Beat);
+                assert_eq!(lit_corners(&mut look, FRAME), *lamps, "{spread:?} kick {n}");
+                // Rien ne s'allume après coup : tout part sur le kick.
+                assert_eq!(lit_corners(&mut look, Duration::from_millis(130)), *lamps, "{spread:?} kick {n}");
+                look.cancel_flash();
+            }
         }
     }
 
