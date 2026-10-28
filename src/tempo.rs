@@ -9,6 +9,7 @@ use std::f64::consts::TAU;
 
 use crate::audio::analysis::Onset;
 use crate::phrase::{BEATS_PER_PHRASE, PhraseTracker, Position};
+use crate::rhythm::{PatternLearner, Rhythm};
 
 /// Plage de la détection automatique : exclut les octaves trompeuses (77,5 ou 310 pour 155 BPM).
 pub const DEFAULT_BPM_RANGE: (f64, f64) = (100.0, 190.0);
@@ -270,12 +271,6 @@ impl BeatClock {
         self.anchor
     }
 
-    /// Premier temps strictement après `t`.
-    pub fn next_beat_after(&self, t: f64) -> Option<f64> {
-        let period = self.period?;
-        Some(self.anchor + (((t - self.anchor) / period).floor() + 1.0) * period)
-    }
-
     /// Temps le plus proche de `t`.
     pub fn nearest_beat(&self, t: f64) -> Option<f64> {
         let period = self.period?;
@@ -327,6 +322,8 @@ pub struct Tracker {
     frames: VecDeque<(f64, f32)>,
     /// Têtes de mesure et de phrase.
     phrase: PhraseTracker,
+    /// Où tombent les kicks dans la mesure.
+    pattern: PatternLearner,
 }
 
 impl Tracker {
@@ -341,11 +338,19 @@ impl Tracker {
             locked_until: f64::NEG_INFINITY,
             frames: VecDeque::new(),
             phrase: PhraseTracker::default(),
+            pattern: PatternLearner::default(),
         }
     }
 
     pub fn clock(&self) -> BeatClock {
         self.clock
+    }
+
+    /// Grille et motif rythmique : où et quand les kicks sont attendus, si le tempo est connu.
+    pub fn rhythm(&self) -> Option<Rhythm> {
+        let period = self.clock.period()?;
+        let bar = self.pattern.bar_start(period).unwrap_or(self.clock.anchor());
+        Some(Rhythm { period, bar, hits: self.pattern.hits() })
     }
 
     pub fn source(&self) -> TempoSource {
@@ -385,6 +390,7 @@ impl Tracker {
     /// Kick détecté à l'instant `t` : mémorisé pour l'estimation et utilisé pour caler la phase.
     pub fn on_kick(&mut self, t: f64) {
         self.onsets.push_back(t);
+        self.pattern.on_kick(t, &self.clock);
         self.forget_before(t - WINDOW);
         let (Some(period), Some(beat)) = (self.clock.period, self.clock.nearest_beat(t)) else {
             return;
@@ -459,6 +465,7 @@ impl Tracker {
     pub fn on_onset(&mut self, t: f64, onset: Onset) {
         self.frames.push_back((t, onset.kick));
         self.phrase.on_frame(t, onset, &self.clock);
+        self.pattern.on_frame(t, &self.clock);
         self.forget_frames_before(t - FRAME_MEMORY);
     }
 

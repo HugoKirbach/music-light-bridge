@@ -311,17 +311,37 @@ le BPM, et un « peigne » range la force d'attaque sur la grille des 6 dernièr
 caler la phase, même décalée d'un demi-temps après un break. Une fois sûr, le tempo est tenu une
 minute : un break ou un roulement ne le déplace pas.
 
-Quand le tempo est sûr, la détection cherche le kick sur chaque temps :
-- elle relâche ses seuils près d'un temps ;
-- en plein groove, elle les durcit entre les temps, pour qu'une note de basse ne passe pas pour
-  un kick.
+Quand le tempo est sûr, la détection cherche le kick là où le motif l'attend (voir plus bas) :
+- elle relâche ses seuils près d'un kick attendu ;
+- en plein groove, elle les durcit ailleurs, pour qu'une note de basse ne passe pas pour un kick.
+
+### Motif rythmique
+
+La plupart des morceaux ont un kick sur chaque temps. D'autres le placent ailleurs : hard groove,
+breakbeat, demi-tempo. DJ-Bridge apprend, mesure après mesure, sur quelles doubles croches de la
+mesure (seize) tombent les kicks détectés. Le motif ne remplace le « un kick par temps » que s'il
+est net :
+- un temps reste vide depuis plusieurs mesures ;
+- les doubles croches du motif portent un kick dans la plupart des mesures ;
+- les kicks hors du motif pèsent moins que ceux du motif.
+
+Un morceau en 4/4 garde donc exactement le comportement habituel. Limite connue : quand deux
+familles de kicks d'égale force tombent à un quart de temps l'une de l'autre, la grille hésite
+entre elles et le motif ne s'installe pas.
 
 ### Flashs anticipés
 
-Une fois le groove établi (des kicks sur 4 temps de suite), chaque temps flashe **en avance de
-la latence calibrée** : la lampe s'allume au moment où le kick sonne. Un kick manqué garde son
-flash. Deux temps sans kick de suite signent un break : un flash de trop, puis le suivant est
-annulé. Les kicks hors temps (roulements, retour après un break) flashent aussitôt.
+Une fois le groove établi (4 kicks attendus confirmés de suite), chaque kick du motif flashe **en
+avance de la latence calibrée** : la lampe s'allume au moment où le kick sonne. Un kick manqué
+garde son flash. Deux kicks manqués de suite signent un break : un flash de trop, puis le suivant
+est annulé. Les kicks hors du motif (roulements, retour après un break) flashent aussitôt.
+
+### Breaks qui flottent
+
+Hors du groove, un coup détecté ne compte comme kick que s'il porte du grave : au moins le quart
+du niveau habituel du groove. Une mélodie seule, des charlestons ou un clap ne flashent donc pas
+pendant un break : la lumière respire avec la musique, sans taper. Un vrai kick (un impact, le
+retour du groove) passe toujours.
 
 ### Structure : mesures et phrases
 
@@ -343,8 +363,10 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
   - Un roulement, un impact ou des percussions sur les temps ne relancent pas le groove. Il faut
     que la grille retrouve des kicks réguliers, avec des basses revenues aux trois quarts (le
     drop), ou au-dessus de 40 % pendant 8 s (un morceau aux basses plus légères).
-- **Montée** : les médiums et aigus enflent de plus de 4 dB sans basse, ou les kicks roulent à
-  plus de 4,5 par seconde.
+- **Montée** : sans basse, les médiums et aigus ne cessent de monter (au moins 0,75 dB par seconde,
+  trois secondes de suite, sans ralentir, jusqu'à 4 dB au-dessus des secondes précédentes), ou des
+  kicks qui portent du grave roulent à plus de 4,5 par seconde. Une mélodie ou des charlestons qui
+  entrent d'un coup ne font pas une montée.
   - Quand la structure est connue, le drop est prévu sur la première tête de phrase au moins
     8 temps après le début de la montée (puis la suivante s'il ne vient pas). L'intensité suit
     l'avancement vers ce drop.
@@ -436,6 +458,20 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
     "breaks": [ [12.5, 16.3] ], "phrases": [ 17.91 ]
   } ] }
   ```
+
+- **Catalogue de cas** (pour le développement) : `cargo test catalogue -- --nocapture` joue des
+  morceaux de synthèse décrits comme un DJ les décrirait, dont on connaît la vérité à la
+  milliseconde. Chaque morceau a son motif de kick sur seize doubles croches, son charleston, sa
+  basse, sa mélodie, son filtre et ses sections. Cas couverts :
+  - techno 4/4 ;
+  - breakbeat ;
+  - demi-tempo ;
+  - break avec une mélodie seule, ou avec mélodie et charlestons ;
+  - roulement de montée puis drop ;
+  - intro filtrée ;
+  - hard groove syncopé (limite connue, test ignoré).
+
+  Chaque cas vérifie que la lumière tape sur les kicks en groove et flotte en break.
 
 ## Fichiers et état des lampes
 

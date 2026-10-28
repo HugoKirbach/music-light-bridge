@@ -2,6 +2,8 @@
 
 pub mod analyze;
 pub mod bench;
+#[cfg(test)]
+mod catalogue;
 pub mod latency;
 pub mod live;
 pub mod setup;

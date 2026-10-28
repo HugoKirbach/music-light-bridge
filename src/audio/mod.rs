@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use analysis::{Expectation, Levels, Onset};
 
+use crate::rhythm::{FOUR_ON_THE_FLOOR, Rhythm};
+
 /// Demi-largeur de la fenêtre où l'horloge attend un kick, autour de chaque temps.
 const KICK_WINDOW: f64 = 0.035;
 /// Trames de force d'attaque gardées : un peu plus de 10 s.
@@ -41,25 +43,40 @@ impl AtomicF32 {
 pub struct Grid {
     /// Durée d'un temps (s) ; 0 tant que le tempo est inconnu.
     pub period: f64,
-    /// Instant d'un temps (s depuis l'origine commune).
+    /// Début d'une mesure (s depuis l'origine commune) : un temps, et la double croche 0 du motif.
     pub anchor: f64,
     /// Le tempo et la phase sont sûrs (estimation confirmée, tempo imposé ou Link) : les kicks
     /// sont cherchés sur les temps même avant que le groove soit établi.
     pub locked: bool,
-    /// Les kicks tombent régulièrement sur les temps.
+    /// Les kicks tombent régulièrement là où le motif les attend.
     pub groove: bool,
+    /// Doubles croches de la mesure où un kick est attendu (bit n : la n-ième) ; 0 pour un kick
+    /// sur chaque temps.
+    pub hits: u16,
 }
 
 impl Grid {
-    /// Ce que la grille attend à l'instant `t` : un kick près des temps dès que le tempo est sûr
-    /// ou que le groove tient, et rien entre les temps tant que le groove tient ; sinon (tempo
-    /// inconnu) aucune attente.
+    /// Grille du rythme connu (aucune attente sans tempo).
+    pub fn of(rhythm: Option<&Rhythm>, locked: bool, groove: bool) -> Self {
+        match rhythm {
+            Some(rhythm) => Self { period: rhythm.period, anchor: rhythm.bar, locked, groove, hits: rhythm.hits },
+            None => Self::default(),
+        }
+    }
+
+    /// Ce que la grille attend à l'instant `t` : un kick près des coups du motif (les temps, le plus
+    /// souvent) dès que le tempo est sûr ou que le groove tient, et rien ailleurs tant que le groove
+    /// tient ; sinon (tempo inconnu) aucune attente.
     pub fn expectation(&self, t: f64) -> Expectation {
         if !(self.groove || self.locked) || self.period <= 0.0 {
             return Expectation::Free;
         }
-        let beats = (t - self.anchor) / self.period;
-        if (beats - beats.round()).abs() * self.period < KICK_WINDOW {
+        let hits = if self.hits == 0 { FOUR_ON_THE_FLOOR } else { self.hits };
+        let step = self.period / 4.0;
+        let steps = (t - self.anchor) / step;
+        let nearest = steps.round();
+        let on_hit = hits >> (nearest as i64).rem_euclid(16) & 1 == 1;
+        if on_hit && (steps - nearest).abs() * step < KICK_WINDOW {
             Expectation::Kick
         } else if self.groove {
             Expectation::Offbeat
@@ -97,6 +114,7 @@ pub struct Features {
     grid_anchor: AtomicU64,
     grid_locked: AtomicBool,
     grid_groove: AtomicBool,
+    grid_hits: AtomicU32,
     /// Force d'attaque, trame par trame : tampon circulaire (instant, valeur) et nombre de
     /// trames écrites. Le fil audio y écrit sans jamais attendre.
     onsets: Box<[(AtomicU64, [AtomicU32; 5])]>,
@@ -124,6 +142,7 @@ impl Features {
             grid_anchor: AtomicU64::new(0),
             grid_locked: AtomicBool::new(false),
             grid_groove: AtomicBool::new(false),
+            grid_hits: AtomicU32::new(0),
             onsets: (0..ONSET_SLOTS).map(|_| (AtomicU64::new(0), std::array::from_fn(|_| AtomicU32::new(0)))).collect(),
             onsets_written: AtomicU64::new(0),
         }
@@ -199,6 +218,7 @@ impl Features {
         self.grid_anchor.store(grid.anchor.to_bits(), Ordering::Relaxed);
         self.grid_locked.store(grid.locked, Ordering::Relaxed);
         self.grid_groove.store(grid.groove, Ordering::Relaxed);
+        self.grid_hits.store(u32::from(grid.hits), Ordering::Relaxed);
     }
 
     fn grid(&self) -> Grid {
@@ -207,6 +227,7 @@ impl Features {
             anchor: f64::from_bits(self.grid_anchor.load(Ordering::Relaxed)),
             locked: self.grid_locked.load(Ordering::Relaxed),
             groove: self.grid_groove.load(Ordering::Relaxed),
+            hits: self.grid_hits.load(Ordering::Relaxed) as u16,
         }
     }
 
@@ -281,7 +302,7 @@ mod tests {
 
     #[test]
     fn a_sure_tempo_expects_kicks_on_the_beats_before_the_groove() {
-        let grid = |locked, groove| Grid { period: 0.4, anchor: 0.0, locked, groove };
+        let grid = |locked, groove| Grid { period: 0.4, anchor: 0.0, locked, groove, hits: 0 };
         let (on_beat, between) = (4.01, 4.2);
         assert_eq!(grid(false, false).expectation(on_beat), Expectation::Free, "tempo pas encore sûr");
         assert_eq!(grid(true, false).expectation(on_beat), Expectation::Kick);

@@ -53,6 +53,9 @@ const RIPPLE_PERIOD: f32 = 4.0;
 const RIPPLE_DEPTH: f32 = 0.35;
 /// Lampes « aigus » (graves / aigus) : jusqu'à 70 % de luminosité avec médiums et aigus.
 const TREBLE_GLOW: f32 = 0.7;
+/// Hors groove, un kick porte au moins le quart des basses habituelles du groove : un charleston ou
+/// une mélodie n'en ont pour ainsi dire pas.
+const KICK_BASS: f32 = 0.25;
 
 /// Animation de la lumière.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
@@ -293,10 +296,20 @@ impl ReactiveLook {
         self.grid_groove = groove;
     }
 
-    /// Un kick vient d'être détecté (flashé ou non) : la musique n'est pas dans un temps creux.
-    pub fn kick_detected(&mut self) {
+    /// Un coup détecté compte comme kick. En groove, toujours ; ailleurs (break, montée), seulement
+    /// s'il porte du grave (`raw_bass`, enveloppe brute des basses) : au moins le quart du niveau
+    /// habituel du groove. Charleston, clap ou mélodie ne flashent donc pas : la lumière flotte.
+    /// Tant que le niveau habituel n'est pas connu, tout passe.
+    pub fn carries_bass(&self, raw_bass: f32) -> bool {
+        self.phases.phase == Phase::Groove || raw_bass >= KICK_BASS * self.phases.groove_bass
+    }
+
+    /// Un kick vient d'être détecté (flashé ou non), avec `raw_bass` de grave à son arrivée : la
+    /// musique n'est pas dans un temps creux. Seuls les kicks qui portent du grave font un roulement
+    /// de montée : des charlestons en croches n'en sont pas un.
+    pub fn kick_detected(&mut self, raw_bass: f32) {
         self.since_kick = 0.0;
-        self.phases.kick();
+        self.phases.kick(raw_bass >= KICK_BASS * self.phases.groove_bass);
     }
 
     /// Phase du morceau reconnue à l'écoute.
@@ -528,7 +541,7 @@ mod tests {
         let mut color = Rgb::OFF;
         for frame in 0..(seconds * FRAMES_PER_SECOND as f32) as usize {
             if kicks && frame % 24 == 0 {
-                look.kick_detected();
+                look.kick_detected(1.0);
             }
             color = look.render(FRAME, levels);
         }
@@ -618,7 +631,7 @@ mod tests {
         let mut color = Rgb::OFF;
         for frame in 0..frames {
             if kick_every.is_some_and(|every| frame % every == 0) {
-                look.kick_detected();
+                look.kick_detected(1.0);
                 look.kick();
             }
             color = look.render(FRAME, levels(frame as f32 / FRAMES_PER_SECOND as f32));
@@ -670,7 +683,7 @@ mod tests {
             let t = frame as f32 / 60.0;
             look.set_structure(Some((period, (phrase - t.rem_euclid(phrase)) / period)));
             if frame % kick_every == 0 {
-                look.kick_detected();
+                look.kick_detected(1.0);
                 look.kick();
             }
             look.render(FRAME, sound(bass(t), -20.0));
@@ -952,7 +965,7 @@ mod tests {
         look.set_grid_groove(Some(grid));
         for frame in 0..(seconds * FRAMES_PER_SECOND as f32) as usize {
             if every > 0 && frame % every == 0 {
-                look.kick_detected();
+                look.kick_detected(1.0);
             }
             look.render(FRAME, levels);
         }

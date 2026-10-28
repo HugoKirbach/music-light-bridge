@@ -155,11 +155,29 @@ devient un plan vu de dessus. Tes réglages actuels sont repris dans « Ma pièc
   l'entourent ;
 - seuls les mouvements possibles sont proposés, dans la fenêtre et sur le téléphone.
 
+## [24] Motifs rythmiques et breaks qui flottent
+
+L'appli apprend où tombent les kicks dans la mesure, quand ils ne sont pas sur chaque temps
+(breakbeat, demi-tempo). Hors groove, un coup sans grave ne flashe plus.
+**À essayer :**
+1. Un morceau en 4/4 classique : rien ne doit changer, c'est le garde-fou.
+2. Un breakbeat ou un morceau en demi-tempo : après quelques mesures, les flashs tombent pile sur
+   les kicks, même ceux entre les temps.
+3. Un break avec une mélodie seule, ou mélodie et charlestons : la lumière respire sans taper, et
+   la pastille reste sur BREAK, pas MONTÉE.
+4. Un vrai riser (bruit blanc qui monte, roulement de caisse claire) : la pastille passe sur
+   MONTÉE après environ 3 s.
+
+**Limite connue :** ton hard groove (kick décalé d'une double croche après le 2e temps) n'est pas
+encore anticipé. La grille hésite entre les deux familles de kicks, et les flashs restent réactifs,
+avec environ 60 ms de retard. Si tu captures un autre passage de ce style, il m'aidera.
+
 ---
 
 ## Ce qui a été vérifié de mon côté
 
-- Compilation, `clippy` sans avertissement, 103 tests unitaires.
+- Compilation, `clippy` sans avertissement, 114 tests unitaires, dont un catalogue de cas musicaux
+  de synthèse (motifs, breaks, montée, filtre).
 - Banc d'essai sur les 5 captures annotées : note d'ensemble 80, inchangée par les numéros 15 à
   21.
 - La fenêtre (capture d'écran) et la page mobile (aperçu dans un navigateur, à la taille d'un

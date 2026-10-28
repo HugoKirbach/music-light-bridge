@@ -41,41 +41,39 @@ pub(super) fn light_loop(
         // Le kick d'un flash anticipé arrive après l'âge d'un bloc audio : on l'attend jusque-là.
         planner.confirm_window = (features.input_latency().as_secs_f64() + CONFIRM_MARGIN)
             .clamp(CONFIRM_RANGE.0, CONFIRM_RANGE.1);
-        let clock = shared.tracker().clock();
-        let deadline = match planner.next_event(&clock, features.seconds(Instant::now())) {
+        let rhythm = shared.tracker().rhythm();
+        let deadline = match planner.next_event(rhythm.as_ref(), features.seconds(Instant::now())) {
             Some(event) => next_frame.min(features.instant(event)),
             None => next_frame,
         };
         timing::sleep_until_or(deadline, || features.kicks() != seen || notes.count() != seen_notes);
 
         let kicks = features.kicks();
-        let kick = (kicks != seen).then(|| features.seconds(features.last_kick()) - KICK_DETECTION_DELAY);
+        // Hors groove, un coup sans grave (charleston, clap, mélodie) n'est pas un kick : il ne flashe
+        // pas et ne compte ni pour le tempo ni pour le motif.
+        let kick = (kicks != seen && look.carries_bass(features.levels().raw_bass))
+            .then(|| features.seconds(features.last_kick()) - KICK_DETECTION_DELAY);
         seen = kicks;
         if let Some(at) = kick {
             shared.tracker().on_kick(at);
-            look.kick_detected();
+            look.kick_detected(features.levels().raw_bass);
         }
         let note_count = notes.count();
         let note = (note_count != seen_notes).then(|| notes.last());
         seen_notes = note_count;
 
         let now = Instant::now();
-        let (clock, locked, structure) = {
+        let (rhythm, locked, structure) = {
             let tracker = shared.tracker();
-            (tracker.clock(), tracker.locked(features.seconds(now)), tracker.structure(features.seconds(now)))
+            (tracker.rhythm(), tracker.locked(features.seconds(now)), tracker.structure(features.seconds(now)))
         };
-        let action = planner.poll(&clock, features.seconds(now), kick);
-        // La détection cherche les kicks sur les temps dès que le tempo est sûr, et se méfie de
-        // ce qui tombe entre eux tant que le groove tient.
-        features.set_grid(Grid {
-            period: clock.period().unwrap_or(0.0),
-            anchor: clock.anchor(),
-            locked,
-            groove: planner.in_groove(&clock, features.seconds(now)),
-        });
-        let grooving = planner.in_groove(&clock, features.seconds(now));
+        let action = planner.poll(rhythm.as_ref(), features.seconds(now), kick);
+        // La détection cherche les kicks là où le motif les attend dès que le tempo est sûr, et se
+        // méfie de ce qui tombe ailleurs tant que le groove tient.
+        let grooving = planner.in_groove(rhythm.as_ref(), features.seconds(now));
+        features.set_grid(Grid::of(rhythm.as_ref(), locked, grooving));
         shared.grooving.store(grooving, Ordering::Relaxed);
-        look.set_grid_groove(clock.period().map(|_| grooving));
+        look.set_grid_groove(rhythm.map(|_| grooving));
         look.set_structure(structure);
         look.set_drop_advance(total_advance.as_secs_f32());
         match action {
@@ -111,7 +109,7 @@ pub(super) fn light_loop(
         if shared.sync_test.load(Ordering::Relaxed) {
             // Blanc sur chaque temps, tel qu'il sonnera quand les lampes montreront l'image.
             let at = features.seconds(now) + total_advance.as_secs_f64();
-            let (period, anchor) = clock.period().map_or((SYNC_PERIOD, 0.0), |p| (p, clock.anchor()));
+            let (period, anchor) = rhythm.map_or((SYNC_PERIOD, 0.0), |r| (r.period, r.bar));
             let lit = (at - anchor).rem_euclid(period) < SYNC_FLASH;
             colors.iter_mut().for_each(|c| *c = if lit { WHITE } else { Rgb::OFF });
         }

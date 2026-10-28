@@ -2,9 +2,16 @@
 
 use super::*;
 
-/// Une montée s'annonce quand la présence (médiums et aigus) dépasse de 4 dB sa moyenne des
-/// 6 dernières secondes alors que les basses sont faibles…
+/// Une montée s'annonce quand la présence (médiums et aigus) ne cesse de monter, alors que les
+/// basses sont faibles : sa moyenne de chaque seconde gagne au moins 0,75 dB trois fois de suite, et
+/// elle dépasse de 4 dB sa moyenne des 6 dernières secondes. Une mélodie ou des charlestons qui
+/// entrent font un seul saut (deux marches au plus, s'il tombe au milieu d'une seconde), puis se
+/// posent : ce n'est pas une montée. Au-delà de 4 dB, l'écart donne son intensité à la montée.
 const BUILD_RISE_DB: f32 = 4.0;
+const CLIMB_STEP_DB: f32 = 0.75;
+const CLIMB_STEPS: usize = 3;
+/// Chaque marche fait au moins la moitié de la précédente : un son qui entre puis se pose ralentit.
+const CLIMB_KEEP: f32 = 0.5;
 const PRESENCE_FAST: f32 = 1.0;
 const PRESENCE_SLOW: f32 = 6.0;
 const BUILD_MAX_BASS: f32 = 0.5;
@@ -107,6 +114,9 @@ pub(super) struct PhaseTracker {
     pub(super) kicked: bool,
     pub(super) presence_fast: Option<f32>,
     pub(super) presence_slow: Option<f32>,
+    /// Présence moyenne des dernières secondes (dB), et la seconde en cours : somme, durée.
+    pub(super) presence_seconds: std::collections::VecDeque<f32>,
+    pub(super) presence_second: (f32, f32),
     pub(super) bass_memory: f32,
     /// Temps écoulé sans que rien ne monte, pendant une montée.
     pub(super) stall: f32,
@@ -149,9 +159,12 @@ pub struct Pulse {
 }
 
 impl PhaseTracker {
-    pub(super) fn kick(&mut self) {
+    /// Un kick ; `heavy` s'il porte du grave, seul à compter dans un roulement.
+    pub(super) fn kick(&mut self, heavy: bool) {
         self.kicked = true;
-        self.kick_times.push_back(self.time);
+        if heavy {
+            self.kick_times.push_back(self.time);
+        }
     }
 
     /// Met la phase à jour ; `true` au drop qui conclut une montée.
@@ -180,7 +193,8 @@ impl PhaseTracker {
         let kicked = std::mem::take(&mut self.kicked);
         // Une simple hausse de présence ne suffit pas quand les basses sont là : c'est un drop
         // ou l'entrée d'un élément, pas une montée.
-        let building = (rise > BUILD_RISE_DB && self.bass_memory < BUILD_MAX_BASS) || rolling;
+        let climbing = self.climbing(dt, levels.presence);
+        let building = (climbing && rise > BUILD_RISE_DB && self.bass_memory < BUILD_MAX_BASS) || rolling;
         self.stall = if building { 0.0 } else { self.stall + dt };
 
         // Drop anticipé : confirmé par un kick aux basses fortes autour de l'instant prévu.
@@ -283,6 +297,32 @@ impl PhaseTracker {
         }
         self.anticipated = Some(at);
         true
+    }
+}
+
+impl PhaseTracker {
+    /// La présence monte sans relâche : sa moyenne de chaque seconde a gagné au moins `CLIMB_STEP_DB`
+    /// à chacune des `CLIMB_STEPS` dernières secondes, sans ralentir de moitié d'une marche à l'autre.
+    fn climbing(&mut self, dt: f32, presence: Option<f32>) -> bool {
+        if let Some(db) = presence {
+            self.presence_second.0 += db * dt;
+            self.presence_second.1 += dt;
+        }
+        if self.presence_second.1 >= 1.0 {
+            let (sum, time) = std::mem::take(&mut self.presence_second);
+            self.presence_seconds.push_back(sum / time);
+            if self.presence_seconds.len() > CLIMB_STEPS + 1 {
+                self.presence_seconds.pop_front();
+            }
+        }
+        if presence.is_none() {
+            self.presence_seconds.clear();
+        }
+        let seconds = self.presence_seconds.make_contiguous();
+        let steps: Vec<f32> = seconds.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        // Une entrée qui se pose ralentit (+5, +3, +1 dB) ; une montée garde son allure.
+        let steady = steps.windows(2).all(|pair| pair[1] >= CLIMB_KEEP * pair[0]);
+        seconds.len() > CLIMB_STEPS && steps.iter().all(|&step| step >= CLIMB_STEP_DB) && steady
     }
 }
 

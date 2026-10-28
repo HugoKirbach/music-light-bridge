@@ -156,7 +156,8 @@ pub fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Re
         tracker.set_manual(bpm, 0.0);
     }
     let mut planner = FlashPlanner::new(FlashMode::Kicks, advance, ARRIVAL + CONFIRM_MARGIN);
-    let mut arrivals: VecDeque<(f64, f64)> = VecDeque::new();
+    // Kicks détectés : arrivée dans la boucle d'éclairage, instant, et déjà retenu comme kick.
+    let mut arrivals: VecDeque<(f64, f64, bool)> = VecDeque::new();
     let mut slices = Vec::new();
     let mut slice = Slice::default();
     let mut timeline = Timeline::default();
@@ -168,36 +169,44 @@ pub fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Re
     let mut next_update = TEMPO_UPDATE;
     for (i, &x) in samples.iter().enumerate() {
         let t = i as f64 * step;
-        let clock = tracker.clock();
-        let groove = planner.in_groove(&clock, t);
-        let grid =
-            Grid { period: clock.period().unwrap_or(0.0), anchor: clock.anchor(), locked: tracker.locked(t), groove };
+        let rhythm = tracker.rhythm();
+        let groove = planner.in_groove(rhythm.as_ref(), t);
+        let grid = Grid::of(rhythm.as_ref(), tracker.locked(t), groove);
         slice.samples += 1;
         slice.groove_samples += u64::from(groove);
 
         if analyzer.process(x, grid.expectation(t)) {
             let kick = t - KICK_DETECTION_DELAY;
-            tracker.on_kick(kick);
-            look.kick_detected();
-            arrivals.push_back((t + ARRIVAL, kick));
-            let clock = tracker.clock();
-            match clock.period().zip(clock.nearest_beat(kick)) {
-                Some((period, beat)) if (kick - beat).abs() < ON_BEAT * period => {
-                    slice.beats_with_kick.insert((beat / period).round() as i64);
-                }
-                _ => slice.offbeat_kicks += 1,
+            // En groove, tout coup détecté est un kick. Ailleurs, comme dans la boucle d'éclairage, on
+            // attend son arrivée pour juger s'il porte du grave.
+            let accepted = look.phase() == Phase::Groove;
+            if accepted {
+                accept_kick(kick, &mut tracker, &mut slice);
             }
+            arrivals.push_back((t + ARRIVAL, kick, accepted));
         }
 
         if let Some(strength) = analyzer.take_onset() {
             tracker.on_onset(t, strength);
             timeline.onsets.push((t, strength.kick));
         }
-        let arrived = arrivals.front().is_some_and(|&(at, _)| at <= t);
+        let arrived = arrivals.front().is_some_and(|&(at, _, _)| at <= t);
         if t >= next_poll || arrived {
-            let kick = if arrived { arrivals.pop_front().map(|(_, kick)| kick) } else { None };
-            let clock = tracker.clock();
-            match planner.poll(&clock, t, kick) {
+            // La lumière apprend le kick à son arrivée, avec le grave qu'il porte alors.
+            let raw_bass = analyzer.levels().raw_bass;
+            let kick = match if arrived { arrivals.pop_front() } else { None } {
+                Some((_, kick, true)) => Some(kick),
+                Some((_, kick, false)) if look.carries_bass(raw_bass) => {
+                    accept_kick(kick, &mut tracker, &mut slice);
+                    Some(kick)
+                }
+                _ => None,
+            };
+            if kick.is_some() {
+                look.kick_detected(raw_bass);
+            }
+            let rhythm = tracker.rhythm();
+            match planner.poll(rhythm.as_ref(), t, kick) {
                 Action::Flash { reactive } => {
                     look.kick();
                     timeline.flashes.push(t);
@@ -210,7 +219,7 @@ pub fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Re
                 }
                 Action::None => {}
             }
-            next_poll = planner.next_event(&clock, t).map_or(t + FRAME, |event| event.min(t + FRAME));
+            next_poll = planner.next_event(rhythm.as_ref(), t).map_or(t + FRAME, |event| event.min(t + FRAME));
         }
         if t >= next_frame {
             look.set_grid_groove(tracker.clock().period().map(|_| groove));
@@ -241,6 +250,18 @@ pub fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Re
         slices.push(slice);
     }
     Replay { slices, tracker, timeline }
+}
+
+/// Un kick retenu : il nourrit le tempo et compte dans la tranche.
+fn accept_kick(kick: f64, tracker: &mut Tracker, slice: &mut Slice) {
+    tracker.on_kick(kick);
+    let clock = tracker.clock();
+    match clock.period().zip(clock.nearest_beat(kick)) {
+        Some((period, beat)) if (kick - beat).abs() < ON_BEAT * period => {
+            slice.beats_with_kick.insert((beat / period).round() as i64);
+        }
+        _ => slice.offbeat_kicks += 1,
+    }
 }
 
 #[cfg(test)]
