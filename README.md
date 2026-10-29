@@ -301,7 +301,9 @@ médiums et les aigus, et un détecteur de kick cherche le bond d'énergie du gr
 Le détecteur sait lire un mix dense. Il prend en compte le punch autour de 160 Hz, net même quand
 le sidechain efface la sous-basse au même instant. Il guette aussi le clic d'attaque vers 2,5 kHz,
 qui précède le corps du kick d'une vingtaine de ms, et un kick qui remonte du creux creusé par le
-sidechain. Toutes les 10 ms, une force d'attaque par bande est publiée pour le suivi du tempo,
+sidechain. Près d'un kick attendu, le seuil relâché ne descend pas sous les deux tiers de l'avance
+habituelle des kicks du morceau sur le fond : sous un rumble (sous-basse continue de hard
+techno), sa remontée ne passe pas pour le kick suivant. Toutes les 10 ms, une force d'attaque par bande est publiée pour le suivi du tempo,
 sans jamais bloquer le fil audio.
 
 ### Tempo et grille
@@ -336,6 +338,15 @@ avance de la latence calibrée** : la lampe s'allume au moment où le kick sonne
 garde son flash. Deux kicks manqués de suite signent un break : un flash de trop, puis le suivant
 est annulé. Les kicks hors du motif (roulements, retour après un break) flashent aussitôt.
 
+En plein groove (hors montée), un coup hors du motif ne flashe pas : le donk à contretemps de
+la hard house, une note de basse ou un clap laissent la lumière tranquille.
+
+**Trous de kick** : en hard trance ou en hard techno, le kick se tait souvent deux temps ou plus
+avant la phrase suivante. Quand un trou de 2 temps à 2 mesures revient un nombre entier de
+mesures après le précédent, il est appris : au suivant, la lumière se tait dans le trou, le groove
+le traverse, et le kick qui revient est anticipé. Si un kick tombe malgré tout dans le trou prévu,
+il flashe aussitôt et le trou est oublié.
+
 ### Breaks qui flottent
 
 Hors du groove, un coup détecté ne compte comme kick que s'il porte du grave : au moins le quart
@@ -364,15 +375,20 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
     que la grille retrouve des kicks réguliers, avec des basses revenues aux trois quarts (le
     drop), ou au-dessus de 40 % pendant 8 s (un morceau aux basses plus légères).
 - **Montée** : sans basse, les médiums et aigus ne cessent de monter (au moins 0,75 dB par seconde,
-  trois secondes de suite, sans ralentir, jusqu'à 4 dB au-dessus des secondes précédentes), ou des
-  kicks qui portent du grave roulent à plus de 4,5 par seconde. Une mélodie ou des charlestons qui
-  entrent d'un coup ne font pas une montée.
+  trois secondes de suite, sans ralentir, jusqu'à 4 dB au-dessus des secondes précédentes). Ou bien
+  des kicks qui portent du grave roulent : plus de 4,5 par seconde, et une fois et demie plus vite
+  que d'habitude. Une mélodie ou des charlestons qui entrent d'un coup ne font pas une montée, et un
+  groove qui tape en croches depuis longtemps (kick et donk de hard house) ne roule pas.
+  - « Sans basse » : sous la moitié de leur plein, ou sous 40 % de celles du groove. Le gain
+    automatique remonte vite le peu de grave d'un roulement de caisse claire, d'où la comparaison
+    au groove.
   - Quand la structure est connue, le drop est prévu sur la première tête de phrase au moins
     8 temps après le début de la montée (puis la suivante s'il ne vient pas). L'intensité suit
     l'avancement vers ce drop.
   - Sans structure, l'intensité monte en 8 s.
 - **Drop** : un kick aux basses pleines conclut la montée par un éclat blanc sur toutes les
-  lampes.
+  lampes. Il peut suivre de près un roulement de caisse claire : un kick qui ramène les
+  basses au niveau du groove suffit.
   - Quand le drop est prévu, l'éclat part avec l'avance des lampes pour tomber pile.
   - Un kick aux basses nettement plus fortes que pendant la montée le confirme.
   - Sinon l'éclat s'éteint après 0,25 s, et la montée n'anticipe plus.

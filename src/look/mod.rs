@@ -744,8 +744,17 @@ mod tests {
     #[test]
     fn kick_rolls_are_a_build_up() {
         let mut look = white_look(Motion::Auto);
+        perform(&mut look, 6.0, |_| sound(0.8, -20.0), Some(24));
         perform(&mut look, 3.0, |_| sound(0.8, -20.0), Some(6));
         assert_eq!(look.phase(), Phase::BuildUp);
+    }
+
+    #[test]
+    fn steady_eighths_are_a_groove_not_a_roll() {
+        // Hard house : kick et donk en croches, cinq coups par seconde, depuis le début.
+        let mut look = white_look(Motion::Auto);
+        perform(&mut look, 20.0, |_| sound(0.8, -20.0), Some(12));
+        assert_eq!(look.phase(), Phase::Groove);
     }
 
     #[test]

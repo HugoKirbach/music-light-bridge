@@ -206,6 +206,7 @@ pub fn replay(rate: u32, samples: &[f32], advance: f64, options: &Options) -> Re
                 look.kick_detected(raw_bass);
             }
             let rhythm = tracker.rhythm();
+            planner.hold_off_pattern = look.phase() != Phase::BuildUp;
             match planner.poll(rhythm.as_ref(), t, kick) {
                 Action::Flash { reactive } => {
                     look.kick();

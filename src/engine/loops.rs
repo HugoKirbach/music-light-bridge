@@ -32,6 +32,7 @@ pub(super) fn light_loop(
     let mut lags: Vec<f32> = Vec::new();
     while !shared.stopped() {
         planner.mode = shared.mode();
+        planner.hold_off_pattern = look.phase() != Phase::BuildUp;
         // La lampe la plus lente reçoit ses flashs d'autant plus tôt ; les autres l'attendent.
         lags.clear();
         lags.extend(shared.lamp_lags.iter().map(|lag| f32::from_bits(lag.load(Ordering::Relaxed))));

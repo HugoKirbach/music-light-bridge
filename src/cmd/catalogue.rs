@@ -3,6 +3,7 @@
 //! connaît la vérité à la milliseconde. Chacun passe dans la même chaîne que le live, et la
 //! lumière est jugée : sur les kicks à l'heure en groove, presque rien en break, la montée vue.
 
+use std::f32::consts::TAU;
 use std::path::PathBuf;
 
 use super::analyze::{self, Options, Timeline};
@@ -23,28 +24,76 @@ enum Part {
     BuildUp,
 }
 
-/// Une section : `bars` mesures, et sur seize doubles croches (`x` : un coup) le kick, la basse
-/// et le charleston ; une mélodie tenue, un filtre passe-haut sur le grave.
+/// Son du kick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KickSound {
+    /// Kick propre : sinus glissant et clic.
+    Clean,
+    /// Kick saturé à longue traîne (hard techno, schranz).
+    Hard,
+}
+
+/// Son de la basse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BassSound {
+    /// Note brève à 70 Hz (basse roulante).
+    Roll,
+    /// « Donk » de hard house : note pincée vers 100 Hz, presque aussi forte que le kick.
+    Donk,
+}
+
+/// Une section : `bars` mesures, et sur seize doubles croches (`x` : un coup) le kick, la basse,
+/// le charleston, la caisse claire et l'arpège ; une mélodie qui enfle, une nappe tenue, un souffle
+/// qui monte, un filtre passe-haut sur le grave, une coupure du grave toutes les `kills` mesures,
+/// et une batterie (kick, basse, caisse claire) qui se tait sur les deux derniers temps d'une mesure sur
+/// `drops`.
 #[derive(Debug, Clone, Copy)]
 struct Section {
     part: Part,
     bars: usize,
     kicks: &'static str,
+    kick_sound: KickSound,
     bass: &'static str,
+    bass_sound: BassSound,
+    /// Sous-basse continue qui pompe sous les kicks (« rumble »).
+    rumble: bool,
     hats: &'static str,
+    snares: &'static str,
+    arp: &'static str,
     melody: bool,
+    pad: bool,
+    riser: bool,
     filtered: bool,
+    kills: usize,
+    drops: usize,
 }
 
 const NONE: &str = "................";
 
 impl Section {
     fn groove(bars: usize, kicks: &'static str) -> Self {
-        Self { part: Part::Groove, bars, kicks, bass: NONE, hats: "..x...x...x...x.", melody: false, filtered: false }
+        Self {
+            part: Part::Groove,
+            bars,
+            kicks,
+            kick_sound: KickSound::Clean,
+            bass: NONE,
+            bass_sound: BassSound::Roll,
+            rumble: false,
+            hats: "..x...x...x...x.",
+            snares: NONE,
+            arp: NONE,
+            melody: false,
+            pad: false,
+            riser: false,
+            filtered: false,
+            kills: 0,
+            drops: 0,
+        }
     }
 
     fn quiet(bars: usize) -> Self {
-        Self { part: Part::Break, bars, kicks: NONE, bass: NONE, hats: NONE, melody: true, filtered: false }
+        Self { part: Part::Break, kicks: NONE, hats: NONE, melody: true, ..Self::groove(bars, NONE) }
     }
 }
 
@@ -84,6 +133,74 @@ fn high_pass(samples: &mut [f32], cutoff: f32) {
     }
 }
 
+/// Kick saturé de hard techno : le kick propre, une longue traîne de sous-basse, et une saturation
+/// qui écrase le tout.
+fn hard_kick(t: f32) -> f32 {
+    if !(0.0..1.0).contains(&t) {
+        return 0.0;
+    }
+    // La queue suit la hauteur du corps (50 Hz après la chute) : un seul son qui s'éteint, sans battement.
+    let sweep = 0.03;
+    let tail = (-t / 0.35).exp() * (TAU * (50.0 * t + 100.0 * sweep * (1.0 - (-t / sweep).exp()))).sin();
+    0.9 * (4.0 * (kick(t) + 0.4 * tail)).tanh() + click(t)
+}
+
+/// « Donk » de hard house : note pincée qui tombe de 140 à 100 Hz.
+fn donk(t: f32) -> f32 {
+    if !(0.0..0.25).contains(&t) {
+        return 0.0;
+    }
+    let phase = TAU * (100.0 * t + 40.0 * 0.015 * (1.0 - (-t / 0.015).exp()));
+    0.7 * (-t / 0.09).exp() * phase.sin()
+}
+
+/// Caisse claire : un corps à 190 Hz et un souffle bref.
+fn snare(t: f32, hiss: f32) -> f32 {
+    if !(0.0..0.2).contains(&t) {
+        return 0.0;
+    }
+    0.25 * (-t / 0.04).exp() * (TAU * 190.0 * t).sin() + 0.35 * (-t / 0.07).exp() * hiss
+}
+
+/// Accord d'une nappe supersaw : trois notes, cinq dents de scie désaccordées chacune.
+fn supersaw(t: f32) -> f32 {
+    let saw = |f: f32| 2.0 * (f * t).fract() - 1.0;
+    [440.0f32, 554.37, 659.25]
+        .iter()
+        .flat_map(|&f| [-0.006f32, -0.003, 0.0, 0.003, 0.006].map(move |d| f * (1.0 + d)))
+        .map(saw)
+        .sum::<f32>()
+        / 15.0
+}
+
+/// Note d'arpège : pincée, brève.
+fn pluck(t: f32, frequency: f32) -> f32 {
+    if !(0.0..0.15).contains(&t) {
+        return 0.0;
+    }
+    (-t / 0.05).exp() * (TAU * frequency * t).sin()
+}
+
+/// Souffle filtré dans les aigus, `seconds` s de bruit.
+fn hiss(noise: &mut Noise, seconds: f32, cutoff: f32) -> Vec<f32> {
+    let mut hiss: Vec<f32> = (0..(seconds * RATE) as usize).map(|_| noise.next()).collect();
+    high_pass(&mut hiss, cutoff);
+    high_pass(&mut hiss, cutoff);
+    hiss
+}
+
+/// Début (s) et durée de la montée de souffle dont fait partie `section` (qui commence à `start`) :
+/// les sections à souffle qui se suivent n'en font qu'une.
+fn riser_span(case: &Case, start: f64, bar: f64, sections: &[Section], section: &Section) -> (f64, f32) {
+    let index = sections.iter().position(|s| std::ptr::eq(s, section)).unwrap_or(0);
+    let first = (0..=index).rev().take_while(|&i| sections[i].riser).last().unwrap_or(index);
+    let last = (index..sections.len()).take_while(|&i| sections[i].riser).last().unwrap_or(index);
+    let before: f64 = sections[first..index].iter().map(|s| s.bars as f64 * bar).sum();
+    let length: f64 = sections[first..=last].iter().map(|s| s.bars as f64 * bar).sum();
+    let _ = case;
+    (start - before, length as f32)
+}
+
 fn render(case: &Case) -> Track {
     let step = 60.0 / f64::from(case.bpm) / 4.0;
     let bar = 16.0 * step;
@@ -96,40 +213,95 @@ fn render(case: &Case) -> Track {
     for section in &case.sections {
         let end = start + section.bars as f64 * bar;
         parts.push((start, end, section.part));
-        // Le grave (kick et basse) à part, pour le filtrer.
+        // Le grave (kick, basse, rumble) à part, pour le filtrer ou le couper.
         let mut low = vec![0.0; samples.len()];
         for n in 0..section.bars {
             let bar_start = start + n as f64 * bar;
-            for i in steps(section.kicks) {
-                let at = bar_start + i as f64 * step;
-                add(&mut low, at, 1.0, 1.0, |t| kick(t) + click(t));
-                kicks.push(at);
+            let at = |i: usize| bar_start + i as f64 * step;
+            // Mesure dont le kick s'arrête à mi-chemin (« kick drop » de hard trance, avant la phrase).
+            let end = if section.drops > 0 && n % section.drops == section.drops - 1 { 8 } else { 16 };
+            let kick_steps: Vec<usize> = steps(section.kicks).into_iter().filter(|&i| i < end).collect();
+            for &i in &kick_steps {
+                match section.kick_sound {
+                    KickSound::Clean => add(&mut low, at(i), 1.0, 1.0, |t| kick(t) + click(t)),
+                    KickSound::Hard => add(&mut low, at(i), 1.0, 1.0, hard_kick),
+                }
+                kicks.push(at(i));
             }
-            for i in steps(section.bass) {
-                add(&mut low, bar_start + i as f64 * step, 0.1, 0.8, bass_note);
+            if section.rumble {
+                // Sous-basse continue, étouffée sous chaque kick puis qui revient (sidechain).
+                for (k, &i) in kick_steps.iter().enumerate() {
+                    let next = kick_steps.get(k + 1).copied().unwrap_or(end);
+                    let (from, length) = (at(i) as f32, ((next - i) as f64 * step) as f32);
+                    // Relâche : une sous-basse coupée net claquerait comme un kick. Avant un trou, elle
+                    // s'éteint avec la queue du kick (50 ms).
+                    let fade = if next == end && end < 16 { 0.05 } else { 0.01 };
+                    let release = |t: f32| ((length - t) / fade).min(1.0);
+                    add(&mut low, at(i), length, 0.35, |t| (1.0 - (-t / 0.08).exp()) * release(t) * (TAU * 45.0 * (from + t)).sin());
+                }
+            }
+            for i in steps(section.bass).into_iter().filter(|&i| i < end) {
+                match section.bass_sound {
+                    BassSound::Roll => add(&mut low, at(i), 0.1, 0.8, bass_note),
+                    BassSound::Donk => add(&mut low, at(i), 0.25, 1.0, donk),
+                }
             }
             for i in steps(section.hats) {
-                let hiss: Vec<f32> = (0..(0.3 * RATE) as usize).map(|_| noise.next()).collect();
-                let mut hiss = hiss;
-                high_pass(&mut hiss, 4000.0);
-                high_pass(&mut hiss, 4000.0);
-                add(&mut samples, bar_start + i as f64 * step, 0.3, 1.0, |t| {
-                    hiss.get((t * RATE) as usize).copied().unwrap_or(0.0) * hat_envelope(t)
-                });
+                let hiss = hiss(&mut noise, 0.3, 4000.0);
+                add(&mut samples, at(i), 0.3, 1.0, |t| hiss.get((t * RATE) as usize).copied().unwrap_or(0.0) * hat_envelope(t));
+            }
+            for i in steps(section.snares).into_iter().filter(|&i| i < end) {
+                let hiss = hiss(&mut noise, 0.2, 1500.0);
+                // En montée, le roulement de caisse claire enfle jusqu'au drop.
+                let gain = if section.riser {
+                    let (rise_start, rise_length) = riser_span(case, start, bar, &case.sections, section);
+                    0.3 + 0.7 * ((at(i) - rise_start) as f32 / rise_length)
+                } else {
+                    1.0
+                };
+                add(&mut samples, at(i), 0.2, gain, |t| snare(t, hiss.get((t * RATE) as usize).copied().unwrap_or(0.0)));
+            }
+            for (k, i) in steps(section.arp).into_iter().enumerate() {
+                let frequency = [659.25, 880.0, 1108.73, 880.0][k % 4];
+                add(&mut samples, at(i), 0.15, 0.15, |t| pluck(t, frequency));
             }
             if section.melody {
                 // Accord tenu, qui enfle et retombe sur la mesure, sans recommencer ses ondes (pas de clic).
                 let (length, offset) = (bar as f32, bar_start as f32);
                 add(&mut samples, bar_start, length, 0.12, |t| {
                     let swell = (std::f32::consts::PI * t / length).sin();
-                    let chord = [523.25, 659.25, 783.99].iter().map(|f| (std::f32::consts::TAU * f * (offset + t)).sin());
+                    let chord = [523.25, 659.25, 783.99].iter().map(|f| (TAU * f * (offset + t)).sin());
                     swell * chord.sum::<f32>()
                 });
             }
         }
+        let length = (end - start) as f32;
+        if section.pad {
+            // Nappe tenue tout du long, qui s'installe en une demi-seconde.
+            let offset = start as f32;
+            add(&mut samples, start, length, 0.25, |t| (t / 0.5).min(1.0) * supersaw(offset + t));
+        }
+        if section.riser {
+            // Souffle qui monte sans relâche jusqu'au drop, d'une section de montée à l'autre.
+            let (rise_start, rise_length) = riser_span(case, start, bar, &case.sections, section);
+            let hiss = hiss(&mut noise, length, 2000.0);
+            let offset = (start - rise_start) as f32;
+            add(&mut samples, start, length, 0.6, |t| {
+                ((offset + t) / rise_length).powf(1.5) * hiss.get((t * RATE) as usize).copied().unwrap_or(0.0)
+            });
+        }
         if section.filtered {
             high_pass(&mut low, 400.0);
             high_pass(&mut low, 400.0);
+        }
+        if section.kills > 0 {
+            // Coupure du grave à la table, une mesure sur `kills` : le kick ne garde que son attaque.
+            for n in (section.kills - 1..section.bars).step_by(section.kills) {
+                let from = ((start + n as f64 * bar) * f64::from(RATE)) as usize;
+                let to = (((start + (n + 1) as f64 * bar) * f64::from(RATE)) as usize).min(low.len());
+                high_pass(&mut low[from..to], 300.0);
+                high_pass(&mut low[from..to], 300.0);
+            }
         }
         for (sample, low) in samples.iter_mut().zip(low) {
             *sample += low;
@@ -266,7 +438,7 @@ fn a_break_with_melody_and_hats_floats() {
 
 #[test]
 fn a_kick_roll_builds_up_then_drops() {
-    let roll = |bars, kicks| Section { part: Part::BuildUp, bars, kicks, bass: NONE, hats: NONE, melody: true, filtered: false };
+    let roll = |bars, kicks| Section { part: Part::BuildUp, kicks, ..Section::quiet(bars) };
     let case = Case {
         bpm: 140.0,
         sections: vec![
@@ -289,4 +461,84 @@ fn a_filtered_intro_then_the_drop() {
     let verdicts = play("Intro filtrée, break, drop", &case, 2);
     assert_floating_break(&verdicts[1].1);
     assert_groove(&verdicts[2].1, 0.85);
+}
+
+/// Hard techno, 150 BPM : kick saturé à longue traîne, rumble de sous-basse qui pompe entre les
+/// kicks, charleston entre les temps.
+#[test]
+fn hard_techno_with_a_distorted_kick_and_rumble() {
+    let groove = Section { kick_sound: KickSound::Hard, rumble: true, ..Section::groove(16, "x...x...x...x...") };
+    let verdicts = play("Hard techno", &Case { bpm: 150.0, sections: vec![groove] }, 4);
+    assert_groove(&verdicts[0].1, 0.9);
+}
+
+/// Schranz, 156 BPM : kick saturé, percussions en doubles croches, et le DJ coupe le grave à la
+/// table une mesure sur quatre. Le kick n'y garde que son attaque : ce n'est pas un break.
+#[test]
+fn schranz_with_bass_kills_stays_in_the_groove() {
+    let groove = Section {
+        kick_sound: KickSound::Hard,
+        hats: "xxxxxxxxxxxxxxxx",
+        snares: "....x.......x...",
+        kills: 4,
+        ..Section::groove(16, "x...x...x...x...")
+    };
+    let verdicts = play("Schranz, coupures du grave", &Case { bpm: 156.0, sections: vec![groove] }, 4);
+    let groove = &verdicts[0].1;
+    assert!(groove.groove >= 0.9, "{groove:?}");
+    assert_groove(groove, 0.85);
+}
+
+/// Hard house, 148 BPM : kick sur chaque temps et « donk » sur chaque contretemps, presque aussi
+/// fort que le kick. La lumière tape sur les kicks, pas sur les donks.
+#[test]
+fn hard_house_offbeat_donk_is_not_a_kick() {
+    let groove = Section { bass: "..x...x...x...x.", bass_sound: BassSound::Donk, ..Section::groove(16, "x...x...x...x...") };
+    let verdicts = play("Hard house", &Case { bpm: 148.0, sections: vec![groove] }, 4);
+    assert_groove(&verdicts[0].1, 0.9);
+}
+
+/// Hard trance d'aujourd'hui (Odymek, Fenrick, L.Zwo, 2Hot2Play, Kichta), 160 BPM : kick saturé et
+/// rumble comme en hard techno, charleston en doubles croches ; un break court (nappe supersaw et
+/// arpège), une montée (roulement de caisse claire et souffle qui monte), puis le drop.
+#[test]
+fn hard_trance_break_floats_build_up_rises_then_drops() {
+    let groove = Section {
+        kick_sound: KickSound::Hard,
+        rumble: true,
+        hats: "..x...x...x...x.",
+        snares: "....x.......x...",
+        ..Section::groove(12, "x...x...x...x...")
+    };
+    let breakdown = Section { pad: true, arp: "xxxxxxxxxxxxxxxx", melody: false, ..Section::quiet(8) };
+    let build = |bars, snares| Section { part: Part::BuildUp, snares, pad: true, riser: true, melody: false, ..Section::quiet(bars) };
+    let case = Case {
+        bpm: 160.0,
+        sections: vec![groove, breakdown, build(4, "x.x.x.x.x.x.x.x."), build(4, "xxxxxxxxxxxxxxxx"), Section { bars: 8, ..groove }],
+    };
+    let verdicts = play("Hard trance", &case, 1);
+    assert_floating_break(&verdicts[1].1);
+    // Le roulement en croches reste calme ; en doubles croches, c'est la montée.
+    assert!(verdicts[3].1.build_up >= 0.9, "{:?}", verdicts[3].1);
+    assert!(verdicts[4].1.groove >= 0.7, "{:?}", verdicts[4].1);
+}
+
+/// Hard trance, 158 BPM : le kick et son rumble se taisent sur les deux derniers temps d'une mesure
+/// sur quatre, sous l'arpège qui continue. Le groove tient : rien ne flashe dans le trou, et les
+/// kicks qui reviennent sur la grille sont de nouveau anticipés.
+#[test]
+fn hard_trance_kick_drops_keep_the_groove() {
+    let groove = Section {
+        kick_sound: KickSound::Hard,
+        rumble: true,
+        hats: "..x...x...x...x.",
+        snares: "....x.......x...",
+        arp: "xxxxxxxxxxxxxxxx",
+        drops: 4,
+        ..Section::groove(20, "x...x...x...x...")
+    };
+    let verdicts = play("Hard trance, kicks coupés toutes les 4 mesures", &Case { bpm: 158.0, sections: vec![groove] }, 4);
+    let groove = &verdicts[0].1;
+    assert!(groove.groove >= 0.9, "{groove:?}");
+    assert_groove(groove, 0.85);
 }

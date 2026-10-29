@@ -3,7 +3,7 @@
 use super::*;
 
 /// Une montée s'annonce quand la présence (médiums et aigus) ne cesse de monter, alors que les
-/// basses sont faibles : sa moyenne de chaque seconde gagne au moins 0,75 dB trois fois de suite, et
+/// basses sont faibles (sous la moitié de leur plein, ou sous 40 % de celles du groove) : sa moyenne de chaque seconde gagne au moins 0,75 dB trois fois de suite, et
 /// elle dépasse de 4 dB sa moyenne des 6 dernières secondes. Une mélodie ou des charlestons qui
 /// entrent font un seul saut (deux marches au plus, s'il tombe au milieu d'une seconde), puis se
 /// posent : ce n'est pas une montée. Au-delà de 4 dB, l'écart donne son intensité à la montée.
@@ -15,9 +15,13 @@ const CLIMB_KEEP: f32 = 0.5;
 const PRESENCE_FAST: f32 = 1.0;
 const PRESENCE_SLOW: f32 = 6.0;
 const BUILD_MAX_BASS: f32 = 0.5;
-/// … ou quand les kicks roulent : plus de 4,5 par seconde.
+/// … ou quand les kicks se mettent à rouler : plus de 4,5 par seconde, et une fois et demie plus
+/// vite que d'habitude (16 s). Un groove qui tape en croches depuis longtemps (kick et donk de hard
+/// house, basse roulante prise pour des kicks) ne roule pas : c'est son allure.
 const ROLL_RATE: f32 = 4.5;
+const ROLL_SPEEDUP: f32 = 1.5;
 const KICK_RATE_WINDOW: f32 = 2.0;
+const KICK_RATE_MEMORY: f32 = 16.0;
 /// Une montée dure au moins 1,5 s avant qu'un drop puisse la conclure, et retombe si plus rien
 /// ne monte pendant 4 s.
 const BUILD_MIN: f32 = 1.5;
@@ -117,6 +121,8 @@ pub(super) struct PhaseTracker {
     /// Présence moyenne des dernières secondes (dB), et la seconde en cours : somme, durée.
     pub(super) presence_seconds: std::collections::VecDeque<f32>,
     pub(super) presence_second: (f32, f32),
+    /// Allure habituelle des kicks (par seconde, sur 16 s).
+    pub(super) usual_kick_rate: Option<f32>,
     pub(super) bass_memory: f32,
     /// Temps écoulé sans que rien ne monte, pendant une montée.
     pub(super) stall: f32,
@@ -171,12 +177,21 @@ impl PhaseTracker {
     pub(super) fn update(&mut self, dt: f32, levels: Levels, pulse: Pulse) -> bool {
         self.time += dt;
         self.phase_time += dt;
+        let faint_before = self.faint_bass();
         self.update_groove(dt, levels.raw_bass, pulse);
         let grooving = self.grooving;
         while self.kick_times.front().is_some_and(|&t| self.time - t > KICK_RATE_WINDOW) {
             self.kick_times.pop_front();
         }
-        let rolling = self.kick_times.len() as f32 / KICK_RATE_WINDOW > ROLL_RATE;
+        let kick_rate = self.kick_times.len() as f32 / KICK_RATE_WINDOW;
+        // L'allure habituelle s'apprend en groove, sur une fenêtre pleine ; elle se fige en break et en
+        // montée. Pas de roulement avant d'avoir entendu un groove.
+        let window_full = self.kick_times.front().is_some_and(|&t| self.time - t >= 0.9 * KICK_RATE_WINDOW);
+        if grooving && window_full {
+            let usual = self.usual_kick_rate.get_or_insert(kick_rate);
+            *usual = approach(*usual, kick_rate, dt, KICK_RATE_MEMORY);
+        }
+        let rolling = kick_rate > ROLL_RATE && self.usual_kick_rate.is_some_and(|usual| kick_rate > ROLL_SPEEDUP * usual);
         let rise = match levels.presence {
             Some(db) => {
                 let fast = approach(*self.presence_fast.get_or_insert(db), db, dt, PRESENCE_FAST);
@@ -194,12 +209,17 @@ impl PhaseTracker {
         // Une simple hausse de présence ne suffit pas quand les basses sont là : c'est un drop
         // ou l'entrée d'un élément, pas une montée.
         let climbing = self.climbing(dt, levels.presence);
-        let building = (climbing && rise > BUILD_RISE_DB && self.bass_memory < BUILD_MAX_BASS) || rolling;
+        let faint = self.bass_memory < BUILD_MAX_BASS || self.faint_bass();
+        let building = (climbing && rise > BUILD_RISE_DB && faint) || rolling;
         self.stall = if building { 0.0 } else { self.stall + dt };
 
         // Drop anticipé : confirmé par un kick aux basses fortes autour de l'instant prévu.
         let expected = self.anticipated.filter(|&at| self.time >= at - DROP_EARLY);
-        let confirmed = expected.is_some() && kicked && levels.bass > DROP_BASS.max(DROP_JUMP * bass_before);
+        // Le kick du drop fait bondir les basses, ou les ramène au niveau du groove après une montée qui
+        // n'en avait presque plus.
+        let jump = levels.bass > DROP_BASS.max(DROP_JUMP * bass_before);
+        let back = faint_before && levels.raw_bass >= DROP_RETURN_BASS * self.groove_bass;
+        let confirmed = expected.is_some() && kicked && (jump || back);
         if confirmed {
             self.anticipated = None;
         } else if self.anticipated.is_some_and(|at| self.time > at + DROP_CONFIRM) {
@@ -213,12 +233,11 @@ impl PhaseTracker {
                 dropped = true;
                 Phase::Groove
             }
+            // Le drop : un kick aux basses pleines, nettement au-dessus de celles de la montée. Il peut
+            // suivre un roulement de caisse claire de près ; les kicks d'un roulement de kicks, eux, ont
+            // déjà leurs basses et ne font pas un drop.
             Phase::BuildUp
-                if kicked
-                    && self.phase_time > BUILD_MIN
-                    && quiet_bass_before
-                    && levels.bass > DROP_BASS
-                    && !rolling =>
+                if kicked && self.phase_time > BUILD_MIN && (quiet_bass_before && jump || back) =>
             {
                 dropped = true;
                 Phase::Groove
@@ -232,9 +251,12 @@ impl PhaseTracker {
             _ => Phase::Calm,
         };
         if dropped {
-            // Le roulement qui menait au drop est fini : ses kicks ne relancent pas une montée.
+            // La montée qui menait au drop est finie : ni les kicks de son roulement ni la présence qui
+            // grimpait ne la relancent.
             self.anticipated = None;
             self.kick_times.retain(|&t| t >= self.time);
+            self.presence_seconds.clear();
+            self.presence_second = (0.0, 0.0);
         }
         if next != self.phase {
             if next == Phase::BuildUp {
@@ -323,6 +345,13 @@ impl PhaseTracker {
         // Une entrée qui se pose ralentit (+5, +3, +1 dB) ; une montée garde son allure.
         let steady = steps.windows(2).all(|pair| pair[1] >= CLIMB_KEEP * pair[0]);
         seconds.len() > CLIMB_STEPS && steps.iter().all(|&step| step >= CLIMB_STEP_DB) && steady
+    }
+
+    /// Les basses sont faibles comparées à celles du groove entendu avant : le gain automatique remonte
+    /// en quelques secondes le peu de grave d'une montée (corps d'un roulement de caisse claire,
+    /// nappe), qui paraît alors aussi fort que des basses pleines.
+    fn faint_bass(&self) -> bool {
+        self.groove_heard && self.bass_now < BREAK_BASS * self.groove_bass
     }
 }
 

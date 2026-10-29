@@ -172,6 +172,26 @@ L'appli apprend où tombent les kicks dans la mesure, quand ils ne sont pas sur 
 encore anticipé. La grille hésite entre les deux familles de kicks, et les flashs restent réactifs,
 avec environ 60 ms de retard. Si tu captures un autre passage de ce style, il m'aidera.
 
+## [25] Musiques dures : hard trance, hard house, schranz, hard techno
+
+Le moteur a été affiné sur des cas de synthèse fidèles à ces styles, puis sur tes trois captures
+hard trance du 28 octobre (158 à 163 BPM).
+**À essayer :**
+1. Hard techno ou schranz (kick saturé, rumble, coupures du grave à la table) : les flashs tombent
+   sur les kicks, pas un peu avant, et le groove tient pendant les coupures.
+2. Hard house : le donk à contretemps ne flashe pas, et la pastille ne passe pas sur MONTÉE.
+3. Hard trance, kick qui se tait avant chaque phrase : dès le troisième trou, la lumière se tait
+   dans le trou et reprend pile avec le kick.
+4. Hard trance, montée en roulement de caisse claire sans basse : MONTÉE quand le roulement passe
+   en doubles croches, puis GROOVE dès le premier kick du drop.
+
+**Limites connues :**
+- Juste après le drop d'une montée hard trance, quelques kicks peuvent encore flasher avec ~60 ms
+  de retard (en cours de correction).
+- Un kick noyé dans une basse continue (capture du 28 octobre à 19 h 48) : le tempo peut se caler
+  à côté. Dis-moi ce qui se passe dans la capture manuelle de 19 h 55, je l'ajouterai au banc.
+- Une caisse claire qui continue dans le trou du kick fait flasher son temps.
+
 ---
 
 ## Ce qui a été vérifié de mon côté
@@ -180,6 +200,8 @@ avec environ 60 ms de retard. Si tu captures un autre passage de ce style, il m'
   de synthèse (motifs, breaks, montée, filtre).
 - Banc d'essai sur les 5 captures annotées : note d'ensemble 80, inchangée par les numéros 15 à
   21.
+- [25] : 120 tests, dont 12 cas musicaux de synthèse ; banc d'essai inchangé sur les 7 captures
+  annotées.
 - La fenêtre (capture d'écran) et la page mobile (aperçu dans un navigateur, à la taille d'un
   téléphone).
 

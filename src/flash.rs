@@ -91,6 +91,9 @@ pub struct FlashPlanner {
     pub advance: f64,
     /// Délai après un temps anticipé au-delà duquel son kick est déclaré absent (s).
     pub confirm_window: f64,
+    /// En groove, un coup hors du motif (donk, note de basse, clap) ne flashe pas : la lumière ne tape
+    /// que sur les kicks attendus. Hors montée seulement, où les roulements doivent flasher.
+    pub hold_off_pattern: bool,
     /// Dernier temps confirmé par un kick, et nombre de temps consécutifs confirmés.
     last_confirmed: Option<f64>,
     streak: u32,
@@ -102,6 +105,58 @@ pub struct FlashPlanner {
     cancelled: Option<f64>,
     /// Dernier temps flashé, pour ne jamais flasher deux fois le même.
     last_flashed: Option<f64>,
+    /// Dernier temps passé sans flash parce que le kick s'y tait d'habitude (trou prévu).
+    skipped: Option<f64>,
+    drops: KickDrops,
+}
+
+/// Trous de kick qui reviennent à chaque phrase (« kick drop » de hard trance ou de hard techno :
+/// le kick se tait un ou deux temps avant la phrase suivante). Le trou se répète au même endroit :
+/// la lumière s'y tait au lieu de flasher dans le vide.
+#[derive(Debug, Default)]
+struct KickDrops {
+    /// Premier temps resté sans kick en plein groove, tant que le kick n'est pas revenu.
+    open: Option<f64>,
+    /// Début et durée du dernier trou.
+    last: Option<(f64, f64)>,
+    /// Écart entre les débuts des deux derniers trous, quand c'est un nombre entier de mesures.
+    cycle: Option<f64>,
+}
+
+/// Un trou de kick dure de deux temps (un seul : sans doute un kick noyé dans le mix) à deux
+/// mesures (au-delà : un break), et revient au plus toutes les seize mesures.
+const DROP_BEATS: (f64, f64) = (2.0, 8.0);
+const DROP_CYCLE_BARS: f64 = 16.0;
+
+impl KickDrops {
+    /// Le kick revient au temps `hit` : le trou en cours se referme, et s'il a commencé un nombre
+    /// entier de mesures après le précédent, il reviendra autant de mesures plus tard.
+    fn close(&mut self, rhythm: &Rhythm, hit: f64) {
+        let Some(start) = self.open.take() else { return };
+        let length = hit - start;
+        let half = rhythm.step() / 2.0;
+        if length < DROP_BEATS.0 * rhythm.period - half {
+            return;
+        }
+        if length > DROP_BEATS.1 * rhythm.period + half {
+            *self = Self::default();
+            return;
+        }
+        let bar = 4.0 * rhythm.period;
+        self.cycle = self.last.map(|(previous, _)| start - previous).filter(|&cycle| {
+            let bars = (cycle / bar).round();
+            (1.0..=DROP_CYCLE_BARS).contains(&bars) && (cycle - bars * bar).abs() < half
+        });
+        self.last = Some((start, length));
+    }
+
+    /// Le temps `hit` tombe dans le prochain trou attendu.
+    fn expected(&self, rhythm: &Rhythm, hit: f64) -> bool {
+        let (Some((start, length)), Some(cycle)) = (self.last, self.cycle) else { return false };
+        let half = rhythm.step() / 2.0;
+        let from = start + cycle;
+        hit > from - half && hit < from + length - half
+    }
 }
 
 impl FlashPlanner {
@@ -110,12 +165,15 @@ impl FlashPlanner {
             mode,
             advance,
             confirm_window,
+            hold_off_pattern: false,
             last_confirmed: None,
             streak: 0,
             missed: false,
             pending: None,
             cancelled: None,
             last_flashed: None,
+            skipped: None,
+            drops: KickDrops::default(),
         }
     }
 
@@ -145,21 +203,32 @@ impl FlashPlanner {
         if let Some(hit) = self.anticipated_hit(rhythm, now)
             && now >= hit - self.advance
         {
-            self.last_flashed = Some(hit);
-            if self.mode == FlashMode::Kicks {
+            if self.mode == FlashMode::Kicks && rhythm.is_some_and(|rhythm| self.drops.expected(rhythm, hit)) {
+                // Le kick se tait ici à chaque phrase : pas de flash, mais on le guette quand même.
+                self.skipped = Some(hit);
                 self.pending = Some(hit);
+            } else {
+                self.last_flashed = Some(hit);
+                if self.mode == FlashMode::Kicks {
+                    self.pending = Some(hit);
+                }
+                action = Action::Flash { reactive: false };
             }
-            action = Action::Flash { reactive: false };
         }
         if let Some(hit) = self.pending
             && now >= hit + self.confirm_window
         {
             self.pending = None;
-            if self.streak >= GROOVE_STREAK && !self.missed {
+            if self.skipped == Some(hit) {
+                // Le trou attendu est venu : le groove le traverse en silence.
+                self.last_confirmed = Some(hit);
+                self.drops.open.get_or_insert(hit);
+            } else if self.streak >= GROOVE_STREAK && !self.missed {
                 // Un seul kick manqué en plein groove : sans doute noyé dans le mix. Le flash
                 // reste, et le coup compte comme confirmé pour garder l'anticipation.
                 self.missed = true;
                 self.last_confirmed = Some(hit);
+                self.drops.open.get_or_insert(hit);
             } else {
                 // Second kick manqué de suite, ou pas de groove (début de break) : on éteint. Sans
                 // confirmation de ce coup, l'anticipation s'arrête d'elle-même ; un kick en retard
@@ -195,6 +264,8 @@ impl FlashPlanner {
                     self.last_flashed = Some(hit);
                     Action::Flash { reactive: true }
                 }
+                // Hors du motif en plein groove : pas un kick attendu, il ne flashe pas.
+                None if self.hold_off_pattern && self.in_groove(rhythm, t) => Action::None,
                 // Kick hors du motif (roulement de montée) ou tempo encore inconnu.
                 None => Action::Flash { reactive: true },
             },
@@ -212,6 +283,11 @@ impl FlashPlanner {
         if self.pending.is_some_and(|pending| rhythm.same_hit(pending, hit)) {
             self.pending = None;
         }
+        if self.drops.open.is_none() && self.skipped.is_some_and(|skipped| rhythm.same_hit(skipped, hit)) {
+            // Le trou attendu n'est pas venu : le kick a gardé sa place, on oublie le trou.
+            self.drops.cycle = None;
+        }
+        self.drops.close(rhythm, hit);
     }
 
     /// Kick attendu dont le flash doit partir en avance, s'il y en a un.
@@ -222,7 +298,8 @@ impl FlashPlanner {
             FlashMode::EveryBeat => rhythm?.beats(),
             FlashMode::Kicks => *rhythm?,
         };
-        let not_flashed = self.last_flashed.map_or(f64::NEG_INFINITY, |hit| hit + rhythm.step() / 2.0);
+        let passed = [self.last_flashed, self.skipped].into_iter().flatten().fold(f64::NEG_INFINITY, f64::max);
+        let not_flashed = passed + rhythm.step() / 2.0;
         let hit = rhythm.next_hit_after((now + self.advance - LATE_LIMIT * rhythm.period).max(not_flashed))?;
         match self.mode {
             FlashMode::Kicks => {
