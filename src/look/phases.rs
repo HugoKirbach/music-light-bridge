@@ -218,7 +218,7 @@ impl PhaseTracker {
         // Le kick du drop fait bondir les basses, ou les ramène au niveau du groove après une montée qui
         // n'en avait presque plus.
         let jump = levels.bass > DROP_BASS.max(DROP_JUMP * bass_before);
-        let back = faint_before && levels.raw_bass >= DROP_RETURN_BASS * self.groove_bass;
+        let back = faint_before && levels.raw_bass >= RETURN_BASS * self.groove_bass;
         let confirmed = expected.is_some() && kicked && (jump || back);
         if confirmed {
             self.anticipated = None;

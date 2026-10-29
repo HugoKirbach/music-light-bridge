@@ -180,6 +180,8 @@ pub struct ReactiveLook {
     /// déjà montré d'avance, qui ne se rejoue pas à sa confirmation.
     drop_advance: f32,
     drop_shown: bool,
+    /// Une montée vient de se conclure par son drop (voir `take_drop`).
+    dropped: bool,
     /// Régisseur de la disposition Auto.
     director: Director,
     /// Dispositions que la place des lampes rend possibles.
@@ -209,6 +211,7 @@ impl Default for ReactiveLook {
             note_color: None,
             drop_advance: 0.0,
             drop_shown: false,
+            dropped: false,
             director: Director::default(),
             possible: vec![Spread::Auto, Spread::Together],
         }
@@ -310,6 +313,11 @@ impl ReactiveLook {
     pub fn kick_detected(&mut self, raw_bass: f32) {
         self.since_kick = 0.0;
         self.phases.kick(raw_bass >= KICK_BASS * self.phases.groove_bass);
+    }
+
+    /// `true` une fois après le drop qui conclut une montée.
+    pub fn take_drop(&mut self) -> bool {
+        std::mem::take(&mut self.dropped)
     }
 
     /// Phase du morceau reconnue à l'écoute.
@@ -427,6 +435,7 @@ impl ReactiveLook {
         }
         let before = self.phases.phase;
         let dropped = self.phases.update(dt, levels, pulse);
+        self.dropped |= dropped;
         // Le régisseur ouvre une nouvelle section au drop et au retour du groove.
         if dropped || (before != Phase::Groove && self.phases.phase == Phase::Groove) {
             self.director.next_section();

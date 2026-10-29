@@ -183,11 +183,10 @@ hard trance du 28 octobre (158 à 163 BPM).
 3. Hard trance, kick qui se tait avant chaque phrase : dès le troisième trou, la lumière se tait
    dans le trou et reprend pile avec le kick.
 4. Hard trance, montée en roulement de caisse claire sans basse : MONTÉE quand le roulement passe
-   en doubles croches, puis GROOVE dès le premier kick du drop.
+   en doubles croches, puis GROOVE dès le premier kick du drop, et les kicks du drop sont
+   anticipés tout de suite.
 
 **Limites connues :**
-- Juste après le drop d'une montée hard trance, quelques kicks peuvent encore flasher avec ~60 ms
-  de retard (en cours de correction).
 - Un kick noyé dans une basse continue (capture du 28 octobre à 19 h 48) : le tempo peut se caler
   à côté. Dis-moi ce qui se passe dans la capture manuelle de 19 h 55, je l'ajouterai au banc.
 - Une caisse claire qui continue dans le trou du kick fait flasher son temps.

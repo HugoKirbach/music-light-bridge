@@ -521,6 +521,8 @@ fn hard_trance_break_floats_build_up_rises_then_drops() {
     // Le roulement en croches reste calme ; en doubles croches, c'est la montée.
     assert!(verdicts[3].1.build_up >= 0.9, "{:?}", verdicts[3].1);
     assert!(verdicts[4].1.groove >= 0.7, "{:?}", verdicts[4].1);
+    // La grille ne garde rien du roulement : les kicks du drop sont aussitôt anticipés.
+    assert_groove(&verdicts[4].1, 0.85);
 }
 
 /// Hard trance, 158 BPM : le kick et son rumble se taisent sur les deux derniers temps d'une mesure

@@ -310,7 +310,8 @@ sans jamais bloquer le fil audio.
 
 Les kicks et la force d'attaque alimentent une horloge de tempo. Les écarts entre kicks donnent
 le BPM, et un « peigne » range la force d'attaque sur la grille des 6 dernières secondes pour
-caler la phase, même décalée d'un demi-temps après un break. Une fois sûr, le tempo est tenu une
+caler la phase, même décalée d'un demi-temps après un break. Au drop d'une montée, il oublie la force
+d'attaque d'avant : un roulement de caisse claire ne retarde pas le recalage sur les kicks du drop. Une fois sûr, le tempo est tenu une
 minute : un break ou un roulement ne le déplace pas.
 
 Quand le tempo est sûr, la détection cherche le kick là où le motif l'attend (voir plus bas) :

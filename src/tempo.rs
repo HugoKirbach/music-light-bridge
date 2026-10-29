@@ -387,6 +387,12 @@ impl Tracker {
         self.mean_offset
     }
 
+    /// Drop d'une montée : la force d'attaque d'avant (roulement de caisse claire, souffle) ne compte
+    /// plus pour placer les temps, que les kicks du drop recalent aussitôt.
+    pub fn on_drop(&mut self) {
+        self.frames.clear();
+    }
+
     /// Kick détecté à l'instant `t` : mémorisé pour l'estimation et utilisé pour caler la phase.
     pub fn on_kick(&mut self, t: f64) {
         self.onsets.push_back(t);
