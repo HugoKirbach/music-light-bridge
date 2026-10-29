@@ -219,9 +219,16 @@ La section **Flashs** règle leur allure, avant comme pendant le live : **intens
 monte un flash au-dessus de la lueur), **redescente** (de 40 ms, sec, à 1,5 s, très doux) et
 **lueur de fond** (luminosité minimale gardée entre les kicks).
 
-Les couleurs et l'allure des flashs sont enregistrées à la fermeture de la fenêtre et reprises par `live`. Limite
-connue : un break qui retire toute la basse ressemble à un passe-haut et prend la couleur des
-filtres.
+Les couleurs et l'allure des flashs sont enregistrées à la fermeture de la fenêtre et reprises par `live`. Un break
+qui retire toute la basse d'un coup garde la couleur des temps creux : seul un équilibre qui
+glisse en quelques dixièmes de seconde au moins (un filtre qu'on tourne) prend la couleur des
+filtres une fois les kicks partis.
+
+Sous les couleurs, la **rotation** (`--rotation off|8|16` dans le terminal) fait tourner la
+teinte de la scène d'un huitième de tour toutes les 8 ou 16 mesures, en fondu, et à chaque drop ;
+**Fixes** (par défaut) garde les couleurs choisies. Les mesures se comptent sur les têtes de
+phrase : la rotation attend que la structure du morceau soit reconnue, et se fige pendant les
+breaks. Les couleurs des notes MIDI ne tournent pas.
 
 ## Phase 3 : mode synthé (Ableton Link + MIDI)
 
