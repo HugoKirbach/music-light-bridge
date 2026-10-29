@@ -1,7 +1,9 @@
-//! Fenêtre de DJ-Bridge. Avant le lancement, un écran de réglages (source audio, tempo, MIDI,
-//! couleurs, animation) ; pendant le live, une scène plein écran qui prend la couleur de la lampe,
-//! le tempo en très grand et les réglages qui restent modifiables dans un dock en bas.
+//! Fenêtre de DJ-Bridge. Avant le lancement, un écran de préparation (source audio, tempo,
+//! lampes ; le reste replié dans « Plus d'options ») et, à droite, les réglages de la lumière en
+//! trois pages ; pendant le live, une scène plein écran qui prend la couleur de la lampe, le
+//! tempo en très grand, et un dock replié en bas qui rouvre ces mêmes pages.
 
+mod light;
 mod setup;
 mod stage;
 mod theme;
@@ -67,12 +69,10 @@ enum TempoChoice {
     Link,
 }
 
-/// Onglets du dock de la scène.
+/// Onglets du dock de la scène : les pages de la lumière, le tempo et la source.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
-    Motion,
-    Colors,
-    Flashes,
+    Light(light::Page),
     Tempo,
     Source,
 }
@@ -89,7 +89,12 @@ struct App {
     card_backend: Backend,
     /// Couleur de la palette en cours de modification.
     editing_color: Option<usize>,
+    /// Page de la lumière affichée avant le lancement ; options repliées ou non.
+    page: light::Page,
+    more_options: bool,
+    /// Onglet du dock pendant le live, et dock ouvert ou replié.
     tab: Tab,
+    dock_open: bool,
     bridge: Arc<Mutex<Bridge>>,
     /// Mode live en cours, s'il est lancé, et son heure de départ.
     engine: Option<Engine>,
@@ -127,7 +132,10 @@ impl App {
             tempo,
             card_backend,
             editing_color: None,
-            tab: Tab::Motion,
+            page: light::Page::Motion,
+            more_options: false,
+            tab: Tab::Light(light::Page::Motion),
+            dock_open: false,
             bridge,
             settings,
             cfg,
@@ -239,6 +247,8 @@ impl App {
                 self.summary = None;
                 self.auto_captures_seen = 0;
                 self.message = None;
+                // La scène s'ouvre dégagée : le dock reste replié jusqu'au premier onglet choisi.
+                self.dock_open = false;
                 self.engine = Some(engine);
             }
             Err(e) => self.show(format!("Lancement impossible : {e:#}")),
@@ -343,38 +353,6 @@ impl App {
         if changed {
             *self.color_mut(i) = [color.r(), color.g(), color.b()];
             self.palette_changed();
-        }
-    }
-
-    /// Un des trois réglages de l'allure des flashs : 0 intensité, 1 redescente, 2 lueur de fond.
-    fn flash_slider(&mut self, ui: &mut egui::Ui, which: usize, label: egui::Color32) {
-        let d = &mut self.dynamics;
-        let changed = match which {
-            0 => {
-                let mut v = d.flash * 100.0;
-                let shown = format!("{v:.0} %");
-                let changed = theme::slider_row(ui, "Intensité", shown, egui::Slider::new(&mut v, 0.0..=100.0), label);
-                d.flash = v / 100.0;
-                changed
-            }
-            1 => {
-                let mut v = d.decay * 1000.0;
-                let shown = format!("{v:.0} ms");
-                let slider = egui::Slider::new(&mut v, 40.0..=1500.0).logarithmic(true);
-                let changed = theme::slider_row(ui, "Redescente", shown, slider, label);
-                d.decay = v / 1000.0;
-                changed
-            }
-            _ => {
-                let mut v = d.floor * 100.0;
-                let shown = format!("{v:.0} %");
-                let changed = theme::slider_row(ui, "Lueur de fond", shown, egui::Slider::new(&mut v, 0.0..=60.0), label);
-                d.floor = v / 100.0;
-                changed
-            }
-        };
-        if changed {
-            self.dynamics_changed();
         }
     }
 
