@@ -2,8 +2,12 @@
 //! pour les temps creux (plus de kick depuis un moment) et une pour les filtres (passe-haut ou
 //! passe-bas qui déséquilibre fortement grave et aigu). La musique dose la luminosité : flash
 //! sur chaque kick ou note MIDI, lueur qui suit les basses.
+//!
+//! Les luminosités se calculent sur une échelle perçue, puis passent par une courbe avant
+//! d'être envoyées ; les couleurs se fondent par la teinte (OKLCh) ; les mouvements lents
+//! (dégradé de teintes, houle et ondulation des breaks) se calent sur la grille des temps.
 
-use std::f32::consts::TAU;
+use std::f32::consts::{PI, TAU};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -67,11 +71,28 @@ const BREATH_KICK: f32 = 0.25;
 const MOTION_FADE: f32 = 0.4;
 /// Vague : le flash met 120 ms à traverser la pièce.
 const WAVE_SWEEP: f32 = 0.12;
-/// Ondulation des breaks en vague : elle traverse la pièce en 4 s et creuse la respiration de 35 %.
+/// Ondulation des breaks en vague : elle traverse la pièce en deux mesures (en 4 s sans tempo) et
+/// creuse la respiration de 35 %.
 const RIPPLE_PERIOD: f32 = 4.0;
 const RIPPLE_DEPTH: f32 = 0.35;
 /// Lampes « aigus » (graves / aigus) : jusqu'à 70 % de luminosité avec médiums et aigus.
 const TREBLE_GLOW: f32 = 0.7;
+/// Le bridge ne relaie qu'à ~25 Hz en Zigbee : le sommet d'un flash est tenu 40 ms, une
+/// période entière, pour que la lampe le reçoive toujours à pleine force.
+const FLASH_HOLD: f32 = 0.04;
+/// Lueur des basses : elle monte en 30 ms et redescend en 150 ms, sans trembler à chaque note.
+const GLOW_ATTACK: f32 = 0.03;
+const GLOW_RELEASE: f32 = 0.15;
+/// Dégradé de teintes : il traverse la pièce en 8 mesures, ou en 16 s sans tempo.
+const DRIFT_BEATS: f64 = 32.0;
+const DRIFT_PERIOD: f32 = 16.0;
+/// Houle des breaks : une vague par demi-mesure, sommet sur le temps. Ondulation : deux mesures.
+const SWELL_BEATS: f64 = 2.0;
+const RIPPLE_BEATS: f64 = 8.0;
+/// Un mouvement lent rejoint la grille en douceur (constante de temps, s).
+const LOCK_TIME: f32 = 1.0;
+/// En dessous de cette saturation (OKLab), une couleur n'a pas de teinte propre.
+const ACHROMATIC: f32 = 0.02;
 
 /// Animation de la lumière.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
@@ -205,7 +226,7 @@ impl Default for Palette {
     }
 }
 
-/// Allure des flashs, réglable.
+/// Allure de la lumière, réglable : flashs et mouvements d'ambiance.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Dynamics {
@@ -215,11 +236,56 @@ pub struct Dynamics {
     pub decay: f32,
     /// Lueur de fond minimale, que la lampe garde même sans son (0 à 1).
     pub floor: f32,
+    /// Courbe de luminosité (exposant, 1 : aucune) : plus haut, les fondus s'attardent dans le
+    /// sombre et les flashs ressortent davantage sur la lueur.
+    pub curve: f32,
+    /// Écart de teinte (degrés) entre les lampes, de part et d'autre de la couleur de la scène ;
+    /// le dégradé dérive lentement à travers la pièce.
+    pub gradient: f32,
+    /// Houle des breaks, calée sur le tempo : part de la respiration qui retombe entre les temps.
+    pub swell: f32,
 }
 
 impl Default for Dynamics {
     fn default() -> Self {
-        Self { flash: 1.0, decay: 0.12, floor: 0.04 }
+        Self { flash: 1.0, decay: 0.12, floor: 0.04, curve: 1.4, gradient: 20.0, swell: 0.35 }
+    }
+}
+
+/// Position sur la grille des temps : temps écoulés (un multiple de 16 tombe en tête de phrase
+/// quand la structure est reconnue) et durée d'un temps (s).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BeatTime {
+    pub beats: f64,
+    pub period: f32,
+}
+
+impl BeatTime {
+    /// Phase (de 0 à 1) d'un cycle de `beats` temps, et durée de ce cycle (s).
+    fn cycle(self, beats: f64) -> (f32, f32) {
+        ((self.beats / beats).rem_euclid(1.0) as f32, self.period * beats as f32)
+    }
+}
+
+/// Phase (de 0 à 1) d'un mouvement lent, qui avance seule et se cale en douceur sur la grille des
+/// temps quand le tempo est connu : pas de saut quand la grille apparaît ou se recale.
+#[derive(Debug, Clone, Copy, Default)]
+struct Oscillator {
+    phase: f32,
+}
+
+impl Oscillator {
+    /// Avance de `dt` ; `grid` : phase visée et durée d'un cycle sur la grille ; sinon, un cycle
+    /// libre de `free` secondes.
+    fn advance(&mut self, dt: f32, grid: Option<(f32, f32)>, free: f32) -> f32 {
+        let period = grid.map_or(free, |(_, period)| period).max(0.05);
+        self.phase += dt / period;
+        if let Some((target, _)) = grid {
+            let error = (target - self.phase + 0.5).rem_euclid(1.0) - 0.5;
+            self.phase += error * (1.0 - (-dt / LOCK_TIME).exp());
+        }
+        self.phase = self.phase.rem_euclid(1.0);
+        self.phase
     }
 }
 
@@ -229,8 +295,57 @@ fn color(srgb: [u8; 3]) -> Color {
     srgb.map(|c| f32::from(c) / 255.0)
 }
 
-fn mix(a: Color, b: Color, t: f32) -> Color {
-    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
+/// sRGB (de 0 à 1) vers OKLab : luminosité perçue, puis axes vert-rouge et bleu-jaune.
+fn oklab(c: Color) -> Color {
+    let [r, g, b] = c.map(|u| if u <= 0.04045 { u / 12.92 } else { ((u + 0.055) / 1.055).powf(2.4) });
+    let l = (0.412_221_47 * r + 0.536_332_5 * g + 0.051_445_99 * b).cbrt();
+    let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+    let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+    [
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    ]
+}
+
+/// OKLab vers sRGB, ramené dans [0, 1].
+fn srgb([l, a, b]: Color) -> Color {
+    let l_ = (l + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
+    let m_ = (l - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
+    let s_ = (l - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
+    let linear = [
+        4.076_741_7 * l_ - 3.307_711_6 * m_ + 0.230_969_94 * s_,
+        -1.268_438 * l_ + 2.609_757_4 * m_ - 0.341_319_38 * s_,
+        -0.004_196_086 * l_ - 0.703_418_6 * m_ + 1.707_614_7 * s_,
+    ];
+    linear.map(|u| {
+        let u = u.clamp(0.0, 1.0);
+        if u <= 0.003_130_8 { 12.92 * u } else { 1.055 * u.powf(1.0 / 2.4) - 0.055 }
+    })
+}
+
+/// Fondu de `a` vers `b` par la teinte (OKLCh) : il garde saturation et luminosité perçue au lieu
+/// de passer par un gris terne (rouge → vert passe par l'orange et le jaune, pas par le kaki).
+/// Une couleur sans teinte (noir, blanc, gris) prend celle de l'autre.
+fn blend(a: Color, b: Color, t: f32) -> Color {
+    if t <= 0.0 {
+        return a;
+    }
+    if t >= 1.0 {
+        return b;
+    }
+    let ([la, aa, ba], [lb, ab, bb]) = (oklab(a), oklab(b));
+    let (ca, cb) = (aa.hypot(ba), ab.hypot(bb));
+    let (mut ha, mut hb) = (ba.atan2(aa), bb.atan2(ab));
+    if ca < ACHROMATIC {
+        ha = hb;
+    }
+    if cb < ACHROMATIC {
+        hb = ha;
+    }
+    let h = ha + ((hb - ha + PI).rem_euclid(TAU) - PI) * t;
+    let c = ca + (cb - ca) * t;
+    srgb([la + (lb - la) * t, c * h.cos(), c * h.sin()])
 }
 
 /// Fait tourner la teinte de `c` de `turns` tours, sans changer sa saturation ni sa luminosité.
@@ -413,6 +528,8 @@ struct Lamp {
     punch: f32,
     /// Flash déclenché depuis le dernier rendu : il s'affiche sans décroissance.
     fresh: bool,
+    /// Temps (s) pendant lequel le sommet du flash est encore tenu.
+    hold: f32,
     /// Flash qui part dans quelques ms (vague) : délai restant (s), force, part de blanc.
     pending: Option<(f32, f32, f32)>,
 }
@@ -420,7 +537,7 @@ struct Lamp {
 impl Lamp {
     fn fire(&mut self, strength: f32, punch: f32) {
         if strength >= self.flash {
-            (self.flash, self.punch, self.fresh) = (strength, punch, true);
+            (self.flash, self.punch, self.fresh, self.hold) = (strength, punch, true, FLASH_HOLD);
         }
     }
 }
@@ -435,15 +552,21 @@ pub struct ReactiveLook {
     phases: PhaseTracker,
     /// Part de chaque animation (pulse, respiration, montée) dans le rendu, en fondu.
     weights: [f32; 3],
-    /// Luminosité de la respiration, et énergie des médiums et aigus (lampes « aigus »).
+    /// Lueur qui suit les basses, luminosité de la respiration, et énergie des médiums et aigus
+    /// (lampes « aigus »).
+    glow: f32,
     breath: f32,
     treble: f32,
+    /// Place sur la grille des temps, si le tempo est connu.
+    beat_time: Option<BeatTime>,
+    /// Mouvements lents : dérive du dégradé, houle et ondulation des breaks.
+    wander: Oscillator,
+    swell: Oscillator,
+    ripple: Oscillator,
     lamps: Vec<Lamp>,
     colors: Vec<Rgb>,
     /// Kicks flashés : leur parité fait alterner gauche et droite, et le sens de la vague.
     kicks: u64,
-    /// Horloge propre (s), pour l'ondulation des breaks.
-    time: f32,
     /// Secondes écoulées depuis le dernier kick détecté.
     since_kick: f32,
     /// Part des couleurs « temps creux » et « filtres » dans la scène, en fondu.
@@ -475,12 +598,16 @@ impl Default for ReactiveLook {
             rotation: Rotation::default(),
             phases: PhaseTracker::default(),
             weights: [0.0; 3],
+            glow: 0.0,
             breath: 0.0,
             treble: 0.0,
+            beat_time: None,
+            wander: Oscillator::default(),
+            swell: Oscillator::default(),
+            ripple: Oscillator::default(),
             lamps: vec![Lamp::default()],
             colors: vec![Rgb::OFF],
             kicks: 0,
-            time: 0.0,
             since_kick: 0.0,
             calm: 0.0,
             filtered: 0.0,
@@ -608,8 +735,13 @@ impl ReactiveLook {
     /// Éteint les flashs en cours (kick anticipé qui n'est pas venu).
     pub fn cancel_flash(&mut self) {
         for lamp in &mut self.lamps {
-            (lamp.flash, lamp.pending) = (0.0, None);
+            (lamp.flash, lamp.hold, lamp.pending) = (0.0, 0.0, None);
         }
+    }
+
+    /// Place actuelle sur la grille des temps (`None` sans tempo) : les mouvements lents s'y calent.
+    pub fn set_beat_time(&mut self, beat_time: Option<BeatTime>) {
+        self.beat_time = beat_time;
     }
 
     /// Couleur de la première lampe, `dt` après le rendu précédent.
@@ -620,12 +752,14 @@ impl ReactiveLook {
     /// Couleur de chaque lampe, dans l'ordre de `set_lamps`, `dt` après le rendu précédent.
     pub fn render_lamps(&mut self, dt: Duration, levels: Levels) -> &[Rgb] {
         let dt = dt.as_secs_f32();
-        self.time += dt;
         self.since_kick += dt;
-        let decay = (-dt / self.dynamics.decay.max(0.01)).exp();
+        let decay = self.dynamics.decay.max(0.01);
         for lamp in &mut self.lamps {
             if !std::mem::take(&mut lamp.fresh) {
-                lamp.flash *= decay;
+                // Le sommet est tenu, puis le flash redescend.
+                let held = lamp.hold.min(dt);
+                lamp.hold -= held;
+                lamp.flash *= (-(dt - held) / decay).exp();
             }
             if let Some((delay, strength, punch)) = lamp.pending {
                 if delay - dt <= 0.0 {
@@ -669,8 +803,8 @@ impl ReactiveLook {
         self.calm = approach(self.calm, calm, dt, SCENE_FADE);
         self.filtered = approach(self.filtered, filtered, dt, SCENE_FADE);
         let scene = rotate_hue(
-            mix(
-                mix(color(self.palette.primary), color(self.palette.calm), self.calm),
+            blend(
+                blend(color(self.palette.primary), color(self.palette.calm), self.calm),
                 color(self.palette.filtered),
                 self.filtered,
             ),
@@ -679,7 +813,19 @@ impl ReactiveLook {
         let base = self.note_color.unwrap_or(scene);
         let floor = self.dynamics.floor.clamp(0.0, 1.0);
         let intensity = self.dynamics.flash.clamp(0.0, 1.0);
-        let glow = (floor + GLOW * (1.0 - floor) * levels.bass).min(1.0);
+        let curve = self.dynamics.curve.clamp(0.5, 4.0);
+        let gradient = self.dynamics.gradient.clamp(0.0, 180.0) / 360.0;
+        let swell_depth = self.dynamics.swell.clamp(0.0, 1.0);
+        let glow_time = if levels.bass > self.glow { GLOW_ATTACK } else { GLOW_RELEASE };
+        self.glow = approach(self.glow, levels.bass, dt, glow_time);
+        let glow = (floor + GLOW * (1.0 - floor) * self.glow).min(1.0);
+        // Mouvements lents, calés sur la grille quand le tempo est connu. La houle n'existe qu'avec
+        // un tempo : sans lui, elle battrait à côté de la musique.
+        let grid = self.beat_time;
+        let wander = self.wander.advance(dt, grid.map(|g| g.cycle(DRIFT_BEATS)), DRIFT_PERIOD);
+        let swell_phase = self.swell.advance(dt, grid.map(|g| g.cycle(SWELL_BEATS)), 1.0);
+        let swell = if grid.is_some() { 1.0 - swell_depth * (0.5 - 0.5 * (TAU * swell_phase).cos()) } else { 1.0 };
+        let ripple_phase = self.ripple.advance(dt, grid.map(|g| g.cycle(RIPPLE_BEATS)), RIPPLE_PERIOD);
         let energy = 0.5 * levels.bass + 0.3 * levels.mid + 0.2 * levels.high;
         let breath_time = if energy > self.breath { BREATH_ATTACK } else { BREATH_RELEASE };
         self.breath = approach(self.breath, energy, dt, breath_time);
@@ -699,11 +845,11 @@ impl ReactiveLook {
             // Respiration : suit l'énergie, un kick n'ajoute qu'une houle. En vague, une
             // ondulation lente traverse la pièce.
             let ripple = if several && spread == Spread::Wave {
-                1.0 - RIPPLE_DEPTH * (0.5 + 0.5 * (TAU * (self.time / RIPPLE_PERIOD - lamp.place)).sin())
+                1.0 - RIPPLE_DEPTH * (0.5 + 0.5 * (TAU * (ripple_phase - lamp.place)).sin())
             } else {
                 1.0
             };
-            let breathing = 0.8 * self.breath * ripple + BREATH_KICK * flash;
+            let breathing = 0.8 * self.breath * ripple * swell + BREATH_KICK * flash;
             let breath = ((floor + (1.0 - floor) * breathing).min(1.0), 0.0);
             // Montée : la lumière s'intensifie et blanchit, les flashs gagnent en force.
             let tension = floor + (1.0 - floor) * (0.15 + 0.55 * build);
@@ -719,7 +865,14 @@ impl ReactiveLook {
                 value = (floor + (1.0 - floor) * (TREBLE_GLOW * self.treble + 0.6 * flash)).min(1.0);
                 white = 0.0;
             }
-            let [r, g, b] = base.map(|c| ((c * (1.0 - white) + white) * value).clamp(0.0, 1.0));
+            // Courbe de luminosité, entre la lueur de fond et le plein : le fond et le sommet ne
+            // bougent pas.
+            if floor < 1.0 {
+                value = floor + (1.0 - floor) * ((value - floor) / (1.0 - floor)).clamp(0.0, 1.0).powf(curve);
+            }
+            // Dégradé : chaque lampe s'écarte un peu de la teinte de la scène, et l'écart dérive.
+            let tint = rotate_hue(base, gradient * (TAU * (wander - lamp.place)).sin());
+            let [r, g, b] = tint.map(|c| ((c * (1.0 - white) + white) * value).clamp(0.0, 1.0));
             let quantize = |u: f32| (u * f32::from(u16::MAX)) as u16;
             *out = Rgb { r: quantize(r), g: quantize(g), b: quantize(b) };
         }
@@ -764,6 +917,13 @@ mod tests {
     /// Rouge pour le groove, bleu pour les temps creux, vert pour les filtres.
     const PALETTE: Palette = Palette { primary: [255, 0, 0], calm: [0, 0, 255], filtered: [0, 255, 0] };
 
+    /// Rendu sans dégradé de teintes, pour juger les couleurs de la scène.
+    fn still(palette: Palette) -> ReactiveLook {
+        let mut look = ReactiveLook::new(palette);
+        look.dynamics.gradient = 0.0;
+        look
+    }
+
     fn brightness(color: Rgb) -> u16 {
         color.r.max(color.g).max(color.b)
     }
@@ -796,7 +956,7 @@ mod tests {
 
     #[test]
     fn the_groove_shows_the_primary_color_and_a_break_the_calm_one() {
-        let mut look = ReactiveLook::new(PALETTE);
+        let mut look = still(PALETTE);
         let groove = play(&mut look, 5.0, 1.0, true);
         assert!(groove.r > 10 * groove.b.max(groove.g).max(1), "groove : {groove:?}");
         let calm = play(&mut look, 4.0, 1.0, false);
@@ -807,21 +967,22 @@ mod tests {
 
     #[test]
     fn a_filter_sweep_shows_the_filter_color() {
-        let mut look = ReactiveLook::new(PALETTE);
+        let mut look = still(PALETTE);
         play(&mut look, 40.0, 1.0, true);
-        // Passe-bas : les aigus chutent de ~35 dB, les kicks continuent.
+        // Passe-bas : les aigus chutent de ~35 dB, les kicks continuent. Le fondu passe par la
+        // teinte : il garde un soupçon de jaune tant qu'il s'achève.
         let low_pass = play(&mut look, 3.0, 5.0, true);
-        assert!(low_pass.g > 10 * low_pass.r.max(low_pass.b).max(1), "passe-bas : {low_pass:?}");
+        assert!(low_pass.g > 5 * low_pass.r.max(low_pass.b).max(1), "passe-bas : {low_pass:?}");
         let back = play(&mut look, 3.0, 1.0, true);
         assert!(back.r > 10 * back.g.max(back.b).max(1), "fin du filtre : {back:?}");
         // Passe-haut : les basses chutent.
         let high_pass = play(&mut look, 3.0, -3.0, true);
-        assert!(high_pass.g > 10 * high_pass.r.max(high_pass.b).max(1), "passe-haut : {high_pass:?}");
+        assert!(high_pass.g > 5 * high_pass.r.max(high_pass.b).max(1), "passe-haut : {high_pass:?}");
     }
 
     #[test]
     fn a_break_that_cuts_the_bass_keeps_the_calm_color() {
-        let mut look = ReactiveLook::new(PALETTE);
+        let mut look = still(PALETTE);
         play(&mut look, 40.0, 1.0, true);
         // Basses coupées d'un coup, plus de kick : l'équilibre ressemble à un passe-haut.
         let calm = play(&mut look, 4.0, -3.0, false);
@@ -835,7 +996,7 @@ mod tests {
 
     #[test]
     fn a_high_pass_sweep_that_drops_the_kicks_shows_the_filter_color() {
-        let mut look = ReactiveLook::new(PALETTE);
+        let mut look = still(PALETTE);
         play(&mut look, 40.0, 1.0, true);
         // Passe-haut tourné sur 2 s : le kick disparaît à mi-chemin.
         for frame in 0..2 * FRAMES_PER_SECOND {
@@ -846,7 +1007,7 @@ mod tests {
             look.render(FRAME, Levels { bass: 1.0, tilt: Some(tilt), ..Levels::default() });
         }
         let high_pass = play(&mut look, 2.0, -3.0, false);
-        assert!(high_pass.g > 10 * high_pass.r.max(high_pass.b).max(1), "passe-haut : {high_pass:?}");
+        assert!(high_pass.g > 5 * high_pass.r.max(high_pass.b).max(1), "passe-haut : {high_pass:?}");
     }
 
     #[test]
@@ -860,7 +1021,7 @@ mod tests {
 
     #[test]
     fn colors_turn_every_eight_bars_and_come_back_when_fixed() {
-        let mut look = ReactiveLook::new(PALETTE);
+        let mut look = still(PALETTE);
         look.rotation = Rotation::Bars8;
         look.kick_at(Accent::Phrase);
         let first = play(&mut look, 2.0, 1.0, true);
@@ -890,7 +1051,7 @@ mod tests {
 
     #[test]
     fn flash_intensity_decay_and_floor_are_adjustable() {
-        let soft = Dynamics { flash: 0.4, ..Dynamics::default() };
+        let soft = Dynamics { flash: 0.4, curve: 1.0, ..Dynamics::default() };
         let peak = after_flash(soft, 0);
         assert!(peak > u16::MAX / 3 && peak < u16::MAX / 2, "flash adouci : {peak}");
 
@@ -981,7 +1142,7 @@ mod tests {
 
     #[test]
     fn black_as_calm_color_turns_the_lamp_off_in_breaks() {
-        let mut look = ReactiveLook::new(Palette { calm: [0, 0, 0], ..PALETTE });
+        let mut look = still(Palette { calm: [0, 0, 0], ..PALETTE });
         play(&mut look, 2.0, 1.0, true);
         let calm = play(&mut look, 5.0, 1.0, false);
         assert!(brightness(calm) < u16::MAX / 100, "{calm:?}");
@@ -1009,10 +1170,10 @@ mod tests {
     /// Quatre lampes de gauche à droite, données dans le désordre ; flash de 1 s pour bien voir
     /// lesquelles sont allumées.
     fn room(spread: Spread) -> ReactiveLook {
-        let mut look = ReactiveLook::new(PALETTE);
+        let mut look = still(PALETTE);
         look.motion = Motion::Pulse;
         look.spread = spread;
-        look.dynamics = Dynamics { flash: 1.0, decay: 1.0, floor: 0.0 };
+        look.dynamics = Dynamics { flash: 1.0, decay: 1.0, floor: 0.0, curve: 1.0, gradient: 0.0, ..Dynamics::default() };
         look.set_lamps(&[0.3, -1.0, 1.0, -0.3]);
         look
     }
@@ -1059,7 +1220,7 @@ mod tests {
     #[test]
     fn a_single_lamp_flashes_on_every_kick_whatever_the_spread() {
         for spread in Spread::ALL {
-            let mut look = ReactiveLook::new(PALETTE);
+            let mut look = still(PALETTE);
             look.motion = Motion::Pulse;
             look.spread = spread;
             for _ in 0..3 {
@@ -1086,5 +1247,124 @@ mod tests {
         look.kick_at(Accent::Phrase);
         let phrase = look.render(FRAME, Levels::default());
         assert!(phrase.g > beat.g && phrase.b > beat.b, "{beat:?} {phrase:?}");
+    }
+
+    #[test]
+    fn the_top_of_a_flash_is_held_for_a_zigbee_period() {
+        let mut look = white_look(Motion::Pulse);
+        look.kick();
+        look.render(FRAME, Levels::default());
+        // Deux trames plus tard (33 ms), le sommet tient encore ; il redescend ensuite.
+        assert_eq!(brightness(look.render(FRAME, Levels::default())), u16::MAX);
+        assert_eq!(brightness(look.render(FRAME, Levels::default())), u16::MAX);
+        look.render(FRAME, Levels::default());
+        assert!(brightness(look.render(FRAME, Levels::default())) < u16::MAX);
+    }
+
+    #[test]
+    fn the_curve_darkens_the_in_between_but_keeps_floor_and_peak() {
+        let glow = |curve: f32| {
+            let mut look = white_look(Motion::Pulse);
+            look.dynamics.curve = curve;
+            let mut color = Rgb::OFF;
+            for _ in 0..60 {
+                color = look.render(FRAME, Levels { bass: 1.0, ..Levels::default() });
+            }
+            brightness(color)
+        };
+        assert!(glow(2.0) < glow(1.0) * 2 / 3, "{} {}", glow(2.0), glow(1.0));
+        assert_eq!(after_flash(Dynamics { curve: 2.0, ..Dynamics::default() }, 0), u16::MAX);
+        let floor = Dynamics { floor: 0.3, curve: 2.0, ..Dynamics::default() };
+        assert!(after_flash(floor, 120) >= (0.3 * f32::from(u16::MAX)) as u16 - 1);
+    }
+
+    #[test]
+    fn blends_go_through_the_hues_not_through_grey() {
+        // Rouge → vert : en RGB, le milieu est un kaki sombre (0,5 ; 0,5 ; 0) ; par la teinte, un
+        // jaune orangé lumineux.
+        let [r, g, b] = blend([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 0.5);
+        assert!(r > 0.6 && g > 0.5 && b < 0.2, "{r} {g} {b}");
+        // Vers le noir, la teinte reste celle de la couleur.
+        let [r, g, b] = blend([1.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.5);
+        assert!(r > 0.2 && g < r / 10.0 && b < r / 10.0, "{r} {g} {b}");
+        // Les extrémités ne bougent pas (aller-retour OKLab).
+        let [r, g, b] = blend([0.2, 0.5, 0.9], [0.0, 0.0, 0.0], 0.0);
+        assert!((r - 0.2).abs() < 1e-3 && (g - 0.5).abs() < 1e-3 && (b - 0.9).abs() < 1e-3);
+        let back = srgb(oklab([0.2, 0.5, 0.9]));
+        assert!((back[0] - 0.2).abs() < 1e-3 && (back[1] - 0.5).abs() < 1e-3 && (back[2] - 0.9).abs() < 1e-3, "{back:?}");
+    }
+
+    #[test]
+    fn the_glow_does_not_tremble_with_every_bass_note() {
+        let mut look = white_look(Motion::Pulse);
+        let mut swing = 0;
+        let mut previous = None;
+        for frame in 0..120 {
+            let bass = if frame % 2 == 0 { 1.0 } else { 0.0 };
+            let level = brightness(look.render(FRAME, Levels { bass, ..Levels::default() }));
+            if frame > 60 {
+                swing = swing.max(previous.map_or(0, |p: u16| p.abs_diff(level)));
+            }
+            previous = Some(level);
+        }
+        assert!(swing < u16::MAX / 20, "{swing}");
+    }
+
+    #[test]
+    fn lamps_spread_around_the_scene_hue_and_the_gradient_drifts() {
+        let mut look = ReactiveLook::new(PALETTE);
+        (look.motion, look.spread) = (Motion::Pulse, Spread::Together);
+        look.set_lamps(&[-1.0, -0.3, 0.3, 1.0]);
+        let quiet = Levels { bass: 1.0, ..Levels::default() };
+        let mut first = Vec::new();
+        for _ in 0..12 {
+            first = look.render_lamps(FRAME, quiet).to_vec();
+        }
+        // Rouge de part et d'autre : vers l'orange (vert) ou vers le rose (bleu).
+        assert!(first.iter().any(|c| c.g > c.r / 10) && first.iter().any(|c| c.b > c.r / 10), "{first:?}");
+        for _ in 0..4 * FRAMES_PER_SECOND {
+            look.render_lamps(FRAME, quiet);
+        }
+        assert_ne!(look.render_lamps(FRAME, quiet).to_vec(), first, "le dégradé dérive");
+        // Sans dégradé, toutes les lampes ont la couleur de la scène.
+        look.dynamics.gradient = 0.0;
+        let still = look.render_lamps(FRAME, quiet).to_vec();
+        assert!(still.iter().all(|c| *c == still[0]), "{still:?}");
+    }
+
+    #[test]
+    fn the_break_swell_crests_on_the_beat() {
+        let mut look = white_look(Motion::Breath);
+        let levels = sound(0.5, -20.0);
+        let period = 0.5;
+        let mut beats = 0.3;
+        let at = |look: &mut ReactiveLook, beats: &mut f64| {
+            *beats += FRAME.as_secs_f64() / period;
+            look.set_beat_time(Some(BeatTime { beats: *beats, period: period as f32 }));
+            brightness(look.render(FRAME, levels))
+        };
+        // Quelques secondes pour que la houle se cale sur la grille.
+        for _ in 0..6 * FRAMES_PER_SECOND {
+            at(&mut look, &mut beats);
+        }
+        let (mut crest, mut trough) = (0, u16::MAX);
+        for _ in 0..2 * FRAMES_PER_SECOND {
+            let level = at(&mut look, &mut beats);
+            let phase = beats.rem_euclid(2.0);
+            if !(0.1..1.9).contains(&phase) {
+                crest = crest.max(level);
+            } else if (0.9..1.1).contains(&phase) {
+                trough = trough.min(level);
+            }
+        }
+        assert!(crest > trough + u16::MAX / 20, "sommet {crest}, creux {trough}");
+        // Sans houle, plus d'écart.
+        look.dynamics.swell = 0.0;
+        let (mut high, mut low) = (0, u16::MAX);
+        for _ in 0..2 * FRAMES_PER_SECOND {
+            let level = at(&mut look, &mut beats);
+            (high, low) = (high.max(level), low.min(level));
+        }
+        assert!(high - low < u16::MAX / 100, "{high} {low}");
     }
 }
