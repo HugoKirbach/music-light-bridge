@@ -26,7 +26,7 @@ use crate::hue::api;
 use crate::hue::snapshot::Restored;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
 use crate::link::LinkSession;
-use crate::look::{Accent, Dynamics, Motion, Palette, Phase, ReactiveLook, Rotation, Spread};
+use crate::look::{Accent, BeatTime, Dynamics, Motion, Palette, Phase, ReactiveLook, Rotation, Spread};
 use crate::midi::{MidiListener, Notes, note_hue};
 use crate::tempo::{MANUAL_BPM_LIMITS, TempoSource, Tracker};
 use crate::timing;
@@ -632,9 +632,18 @@ fn light_loop(
         seen_notes = note_count;
 
         let now = Instant::now();
-        let (clock, locked) = {
+        let (clock, locked, beat_time) = {
             let tracker = shared.tracker();
-            (tracker.clock(), tracker.locked(features.seconds(now)))
+            let clock = tracker.clock();
+            // Place sur la grille, recalée sur la phrase quand la structure est reconnue : les
+            // mouvements lents de la lumière s'y calent, même pendant un break.
+            let beat_time = clock.period().map(|period| {
+                let beats = (features.seconds(now) - clock.anchor()) / period;
+                let last = clock.anchor() + beats.floor() * period;
+                let shift = tracker.position(last).map_or(0.0, |p| f64::from(p.phrase) - beats.floor().rem_euclid(16.0));
+                BeatTime { beats: beats + shift, period: period as f32 }
+            });
+            (clock, tracker.locked(features.seconds(now)), beat_time)
         };
         let action = planner.poll(&clock, features.seconds(now), kick);
         // La détection cherche les kicks sur les temps dès que le tempo est sûr, et se méfie de
@@ -670,6 +679,7 @@ fn light_loop(
         look.motion = Motion::from_index(shared.motion.load(Ordering::Relaxed));
         look.spread = Spread::from_index(shared.spread.load(Ordering::Relaxed));
         look.rotation = Rotation::from_index(shared.rotation.load(Ordering::Relaxed));
+        look.set_beat_time(beat_time);
         let colors = look.render_lamps(now - last, features.levels());
         for ((_, c), (color, published)) in frame.iter_mut().zip(colors.iter().zip(&shared.lamp_colors)) {
             *c = *color;
