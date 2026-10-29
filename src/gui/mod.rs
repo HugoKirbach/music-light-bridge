@@ -18,7 +18,7 @@ use crate::config::{Config, LiveSettings};
 use crate::engine::{self, Engine, THRESHOLD_RANGE};
 use crate::flash::FlashMode;
 use crate::hue::api;
-use crate::look::{Dynamics, Motion, Palette, Spread};
+use crate::look::{Dynamics, Motion, Palette, Rotation, Spread};
 use crate::midi;
 use crate::tempo::{DEFAULT_BPM_RANGE, TempoSource};
 
@@ -224,6 +224,7 @@ impl App {
             flash: self.settings.flash,
             motion: self.settings.motion,
             spread: self.settings.spread,
+            rotation: self.settings.rotation,
             link: self.settings.link,
             midi: self.settings.midi.clone().map(Some),
             palette: self.palette,
@@ -268,6 +269,13 @@ impl App {
         self.settings.spread = spread;
         if let Some(engine) = &self.engine {
             engine.set_spread(spread);
+        }
+    }
+
+    fn set_rotation(&mut self, rotation: Rotation) {
+        self.settings.rotation = rotation;
+        if let Some(engine) = &self.engine {
+            engine.set_rotation(rotation);
         }
     }
 
@@ -433,6 +441,15 @@ fn spread_text(spread: Spread) -> (&'static str, &'static str) {
         Spread::Wave => ("Vague", "Traverse la pièce"),
         Spread::Alternate => ("Alternance", "Gauche, puis droite"),
         Spread::Split => ("Graves / aigus", "Kicks et ambiance"),
+    }
+}
+
+/// Titre court d'une rotation des couleurs.
+fn rotation_text(rotation: Rotation) -> &'static str {
+    match rotation {
+        Rotation::Off => "Fixes",
+        Rotation::Bars8 => "8 mesures",
+        Rotation::Bars16 => "16 mesures",
     }
 }
 

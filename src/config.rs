@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio::Backend;
 use crate::audio::analysis::DEFAULT_THRESHOLD;
 use crate::flash::FlashMode;
-use crate::look::{Dynamics, Motion, Palette, Spread};
+use crate::look::{Dynamics, Motion, Palette, Rotation, Spread};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -51,6 +51,7 @@ pub struct LiveSettings {
     pub flash: FlashMode,
     pub motion: Motion,
     pub spread: Spread,
+    pub rotation: Rotation,
     pub threshold: f32,
 }
 
@@ -65,6 +66,7 @@ impl Default for LiveSettings {
             flash: FlashMode::Kicks,
             motion: Motion::Auto,
             spread: Spread::Auto,
+            rotation: Rotation::Off,
             threshold: DEFAULT_THRESHOLD,
         }
     }

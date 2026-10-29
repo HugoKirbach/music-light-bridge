@@ -4,9 +4,9 @@
 use eframe::egui::{self, Align, Color32, CornerRadius, Frame, Layout, Margin, Sense, Stroke, Ui, pos2, vec2};
 
 use super::theme::{self, BOLD, Icon, LIVE, MONO_BOLD, SEMIBOLD, STAGE_BG};
-use super::{App, MODES, Tab, flash_text, format_bpm, motion_text, spread_text};
+use super::{App, MODES, Tab, flash_text, format_bpm, motion_text, rotation_text, spread_text};
 use crate::engine::Status;
-use crate::look::{Motion, Spread};
+use crate::look::{Motion, Rotation, Spread};
 use crate::tempo::TempoSource;
 
 const DOCK_WIDTH: f32 = 1040.0;
@@ -223,6 +223,17 @@ impl App {
             self.swatches(ui, vec2(130.0, 72.0), Color32::WHITE);
             ui.add_space(14.0);
             ui.vertical(|ui| self.color_picker(ui, 150.0, DIM));
+            ui.add_space(14.0);
+            ui.vertical(|ui| {
+                for rotation in Rotation::ALL {
+                    let selected = self.settings.rotation == rotation;
+                    let subtitle = if rotation == Rotation::Off { "Couleurs choisies" } else { "Et à chaque drop" };
+                    let card = theme::card(ui, vec2(150.0, 46.0), &theme::STAGE_CARD, selected, None, rotation_text(rotation), subtitle);
+                    if card.on_hover_text(rotation.description()).clicked() {
+                        self.set_rotation(rotation);
+                    }
+                }
+            });
         });
     }
 

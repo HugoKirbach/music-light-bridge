@@ -26,7 +26,7 @@ use crate::hue::api;
 use crate::hue::snapshot::Restored;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
 use crate::link::LinkSession;
-use crate::look::{Accent, Dynamics, Motion, Palette, Phase, ReactiveLook, Spread};
+use crate::look::{Accent, Dynamics, Motion, Palette, Phase, ReactiveLook, Rotation, Spread};
 use crate::midi::{MidiListener, Notes, note_hue};
 use crate::tempo::{MANUAL_BPM_LIMITS, TempoSource, Tracker};
 use crate::timing;
@@ -69,6 +69,7 @@ pub struct Options {
     pub motion: Motion,
     /// Répartition des flashs entre les lampes.
     pub spread: Spread,
+    pub rotation: Rotation,
 }
 
 /// Ce qui est connu au démarrage.
@@ -148,6 +149,7 @@ struct Shared {
     motion: AtomicU8,
     spread: AtomicU8,
     active_spread: AtomicU8,
+    rotation: AtomicU8,
     /// Dernière couleur de chaque lampe, `0x00RRGGBB`.
     lamp_colors: Vec<AtomicU32>,
     /// Publiés par la boucle d'éclairage.
@@ -279,6 +281,7 @@ impl Engine {
             motion: AtomicU8::new(options.motion.index()),
             spread: AtomicU8::new(options.spread.index()),
             active_spread: AtomicU8::new(options.spread.index()),
+            rotation: AtomicU8::new(options.rotation.index()),
             lamp_colors: channels.iter().map(|_| AtomicU32::new(0)).collect(),
             phase: AtomicU8::new(Phase::default().index()),
             active_motion: AtomicU8::new(options.motion.index()),
@@ -403,6 +406,10 @@ impl Engine {
 
     pub fn set_spread(&self, spread: Spread) {
         self.shared.spread.store(spread.index(), Ordering::Relaxed);
+    }
+
+    pub fn set_rotation(&self, rotation: Rotation) {
+        self.shared.rotation.store(rotation.index(), Ordering::Relaxed);
     }
 
     pub fn set_mode(&self, mode: FlashMode) {
@@ -662,6 +669,7 @@ fn light_loop(
         look.dynamics = shared.dynamics();
         look.motion = Motion::from_index(shared.motion.load(Ordering::Relaxed));
         look.spread = Spread::from_index(shared.spread.load(Ordering::Relaxed));
+        look.rotation = Rotation::from_index(shared.rotation.load(Ordering::Relaxed));
         let colors = look.render_lamps(now - last, features.levels());
         for ((_, c), (color, published)) in frame.iter_mut().zip(colors.iter().zip(&shared.lamp_colors)) {
             *c = *color;

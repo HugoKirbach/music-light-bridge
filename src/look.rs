@@ -29,6 +29,15 @@ const TILT_MEMORY: f32 = 30.0;
 /// (≈ 14 dB) et où il est pleinement établi (≈ 26 dB).
 const FILTER_START: f32 = 1.6;
 const FILTER_FULL: f32 = 3.0;
+/// Un filtre se tourne : l'équilibre met au moins 0,4 s à passer d'un écart de ~4 dB au seuil
+/// du filtre. Des basses coupées d'un coup (break) y arrivent en un instant : sans kick, c'est un
+/// temps creux et non un passe-haut.
+const DRIFT_START: f32 = 0.5;
+const SWEEP_MIN: f32 = 0.4;
+/// Rotation des couleurs : la teinte de la scène avance d'un huitième de tour, et un drop ne la
+/// fait pas avancer une seconde fois juste après une tête de phrase.
+const HUE_STEP: f32 = 0.125;
+const TURN_GAP: f32 = 1.0;
 
 /// Une montée s'annonce quand la présence (médiums et aigus) dépasse de 4 dB sa moyenne des
 /// 6 dernières secondes alors que les basses sont faibles…
@@ -134,6 +143,50 @@ impl Phase {
     }
 }
 
+/// Rotation des couleurs au fil de la structure du morceau.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Rotation {
+    /// Les couleurs choisies, sans rotation
+    #[default]
+    Off,
+    /// La teinte avance toutes les 8 mesures et à chaque drop
+    #[value(name = "8")]
+    Bars8,
+    /// La teinte avance toutes les 16 mesures et à chaque drop
+    #[value(name = "16")]
+    Bars16,
+}
+
+impl Rotation {
+    pub const ALL: [Self; 3] = [Self::Off, Self::Bars8, Self::Bars16];
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Off => "Fixes : les couleurs choisies, sans rotation",
+            Self::Bars8 => "8 mesures : la teinte avance toutes les 8 mesures et à chaque drop",
+            Self::Bars16 => "16 mesures : la teinte avance toutes les 16 mesures et à chaque drop",
+        }
+    }
+
+    /// Phrases de quatre mesures entre deux rotations.
+    fn phrases(self) -> Option<u32> {
+        match self {
+            Self::Off => None,
+            Self::Bars8 => Some(2),
+            Self::Bars16 => Some(4),
+        }
+    }
+
+    pub fn index(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_index(index: u8) -> Self {
+        Self::ALL.get(usize::from(index)).copied().unwrap_or(Self::Off)
+    }
+}
+
 /// Les trois couleurs choisies, en sRGB 8 bits. Leur luminosité plafonne celle de la scène :
 /// du noir en temps creux éteint la lampe pendant les breaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +231,34 @@ fn color(srgb: [u8; 3]) -> Color {
 
 fn mix(a: Color, b: Color, t: f32) -> Color {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
+}
+
+/// Fait tourner la teinte de `c` de `turns` tours, sans changer sa saturation ni sa luminosité.
+fn rotate_hue(c: Color, turns: f32) -> Color {
+    let [r, g, b] = c;
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let chroma = max - min;
+    if chroma <= 0.0 {
+        return c;
+    }
+    let sector = if max == r {
+        ((g - b) / chroma).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / chroma + 2.0
+    } else {
+        (r - g) / chroma + 4.0
+    };
+    let h = (sector / 6.0 + turns).rem_euclid(1.0) * 6.0;
+    let x = chroma * (1.0 - (h % 2.0 - 1.0).abs());
+    let [r, g, b] = match h as u32 {
+        0 => [chroma, x, 0.0],
+        1 => [x, chroma, 0.0],
+        2 => [0.0, chroma, x],
+        3 => [0.0, x, chroma],
+        4 => [x, 0.0, chroma],
+        _ => [chroma, 0.0, x],
+    };
+    [r + min, g + min, b + min]
 }
 
 /// Rapproche `current` de `target` avec une constante de temps `time`.
@@ -350,6 +431,7 @@ pub struct ReactiveLook {
     pub dynamics: Dynamics,
     pub motion: Motion,
     pub spread: Spread,
+    pub rotation: Rotation,
     phases: PhaseTracker,
     /// Part de chaque animation (pulse, respiration, montée) dans le rendu, en fondu.
     weights: [f32; 3],
@@ -369,6 +451,16 @@ pub struct ReactiveLook {
     filtered: f32,
     /// Équilibre grave/aigu habituel du morceau.
     tilt_reference: Option<f32>,
+    /// Depuis combien de temps (s) l'équilibre s'écarte de l'habituel ; depuis quand des basses
+    /// coupées d'un coup le font passer le seuil des filtres.
+    drift: Option<f32>,
+    cut: Option<f32>,
+    /// Rotation des couleurs : phrases depuis la dernière, secondes écoulées, et teinte (en tours)
+    /// visée et atteinte en fondu.
+    phrases: u32,
+    since_turn: f32,
+    hue_target: f32,
+    hue: f32,
     /// Couleur de la dernière note MIDI ; elle remplace celle de la scène.
     note_color: Option<Color>,
 }
@@ -380,6 +472,7 @@ impl Default for ReactiveLook {
             dynamics: Dynamics::default(),
             motion: Motion::default(),
             spread: Spread::default(),
+            rotation: Rotation::default(),
             phases: PhaseTracker::default(),
             weights: [0.0; 3],
             breath: 0.0,
@@ -392,6 +485,12 @@ impl Default for ReactiveLook {
             calm: 0.0,
             filtered: 0.0,
             tilt_reference: None,
+            drift: None,
+            cut: None,
+            phrases: 0,
+            since_turn: 0.0,
+            hue_target: 0.0,
+            hue: 0.0,
             note_color: None,
         }
     }
@@ -432,6 +531,14 @@ impl ReactiveLook {
         let single = self.lamps.len() == 1;
         let parity = self.kicks % 2 == 1;
         self.kicks += 1;
+        if accent == Accent::Phrase
+            && let Some(every) = self.rotation.phrases()
+        {
+            self.phrases += 1;
+            if self.phrases >= every {
+                self.turn();
+            }
+        }
         for lamp in &mut self.lamps {
             match spread {
                 _ if accent == Accent::Phrase => lamp.fire(1.0, PHRASE_PUNCH),
@@ -449,6 +556,12 @@ impl ReactiveLook {
                 Spread::Split => {}
             }
         }
+    }
+
+    /// La teinte de la scène avance d'un cran.
+    fn turn(&mut self) {
+        (self.phrases, self.since_turn) = (0, 0.0);
+        self.hue_target += HUE_STEP;
     }
 
     /// Un kick vient d'être détecté (flashé ou non) : la musique n'est pas dans un temps creux.
@@ -531,6 +644,14 @@ impl ReactiveLook {
                 lamp.fire(1.0, 1.0);
             }
         }
+        self.since_turn += dt;
+        if self.rotation == Rotation::Off {
+            // Retour en fondu aux couleurs choisies (un nombre entier de tours).
+            (self.hue_target, self.phrases) = (self.hue_target.round(), 0);
+        } else if dropped && self.since_turn > TURN_GAP {
+            self.turn();
+        }
+        self.hue = approach(self.hue, self.hue_target, dt, SCENE_FADE);
         let target = match self.active_motion() {
             Motion::Breath => 1,
             Motion::BuildUp => 2,
@@ -547,10 +668,13 @@ impl ReactiveLook {
         let filtered = self.filter_amount(levels.tilt, dt);
         self.calm = approach(self.calm, calm, dt, SCENE_FADE);
         self.filtered = approach(self.filtered, filtered, dt, SCENE_FADE);
-        let scene = mix(
-            mix(color(self.palette.primary), color(self.palette.calm), self.calm),
-            color(self.palette.filtered),
-            self.filtered,
+        let scene = rotate_hue(
+            mix(
+                mix(color(self.palette.primary), color(self.palette.calm), self.calm),
+                color(self.palette.filtered),
+                self.filtered,
+            ),
+            self.hue,
         );
         let base = self.note_color.unwrap_or(scene);
         let floor = self.dynamics.floor.clamp(0.0, 1.0);
@@ -603,14 +727,30 @@ impl ReactiveLook {
     }
 
     /// Part visée de la couleur « filtres » : écart entre l'équilibre grave/aigu actuel et
-    /// l'habituel du morceau. Pendant un filtre, la référence ne bouge pas.
+    /// l'habituel du morceau. Des basses coupées d'un coup ne comptent pas tant qu'aucun kick ne
+    /// revient : c'est un break. Pendant un filtre ou un break, la référence ne bouge pas.
     fn filter_amount(&mut self, tilt: Option<f32>, dt: f32) -> f32 {
         let Some(tilt) = tilt else { return 0.0 };
         let reference = *self.tilt_reference.get_or_insert(tilt);
-        if self.filtered < 0.5 {
+        let deviation = tilt - reference;
+        if deviation.abs() <= DRIFT_START {
+            (self.drift, self.cut) = (None, None);
+        } else {
+            let drift = self.drift.map_or(0.0, |t| t + dt);
+            self.drift = Some(drift);
+            self.cut = match self.cut {
+                Some(t) => Some(t + dt),
+                None if deviation < -FILTER_START && drift < SWEEP_MIN => Some(0.0),
+                None => None,
+            };
+        }
+        if self.filtered < 0.5 && self.cut.is_none() {
             self.tilt_reference = Some(approach(reference, tilt, dt, TILT_MEMORY));
         }
-        (((tilt - reference).abs() - FILTER_START) / (FILTER_FULL - FILTER_START)).clamp(0.0, 1.0)
+        if self.cut.is_some_and(|t| self.since_kick >= t) {
+            return 0.0;
+        }
+        ((deviation.abs() - FILTER_START) / (FILTER_FULL - FILTER_START)).clamp(0.0, 1.0)
     }
 }
 
@@ -677,6 +817,61 @@ mod tests {
         // Passe-haut : les basses chutent.
         let high_pass = play(&mut look, 3.0, -3.0, true);
         assert!(high_pass.g > 10 * high_pass.r.max(high_pass.b).max(1), "passe-haut : {high_pass:?}");
+    }
+
+    #[test]
+    fn a_break_that_cuts_the_bass_keeps_the_calm_color() {
+        let mut look = ReactiveLook::new(PALETTE);
+        play(&mut look, 40.0, 1.0, true);
+        // Basses coupées d'un coup, plus de kick : l'équilibre ressemble à un passe-haut.
+        let calm = play(&mut look, 4.0, -3.0, false);
+        assert!(calm.b > 10 * calm.r.max(calm.g).max(1), "break : {calm:?}");
+        let long = play(&mut look, 30.0, -3.0, false);
+        assert!(long.b > 10 * long.r.max(long.g).max(1), "long break : {long:?}");
+        // Au retour du groove, l'équilibre habituel n'a pas glissé vers celui du break.
+        let back = play(&mut look, 3.0, 1.0, true);
+        assert!(back.r > 10 * back.g.max(back.b).max(1), "retour du groove : {back:?}");
+    }
+
+    #[test]
+    fn a_high_pass_sweep_that_drops_the_kicks_shows_the_filter_color() {
+        let mut look = ReactiveLook::new(PALETTE);
+        play(&mut look, 40.0, 1.0, true);
+        // Passe-haut tourné sur 2 s : le kick disparaît à mi-chemin.
+        for frame in 0..2 * FRAMES_PER_SECOND {
+            if frame < FRAMES_PER_SECOND && frame % 24 == 0 {
+                look.kick_detected();
+            }
+            let tilt = 1.0 - 4.0 * frame as f32 / (2 * FRAMES_PER_SECOND) as f32;
+            look.render(FRAME, Levels { bass: 1.0, tilt: Some(tilt), ..Levels::default() });
+        }
+        let high_pass = play(&mut look, 2.0, -3.0, false);
+        assert!(high_pass.g > 10 * high_pass.r.max(high_pass.b).max(1), "passe-haut : {high_pass:?}");
+    }
+
+    #[test]
+    fn rotate_hue_keeps_saturation_and_brightness() {
+        let green = rotate_hue([1.0, 0.0, 0.0], 1.0 / 3.0);
+        assert!((green[1] - 1.0).abs() < 1e-5 && green[0].abs() < 1e-5 && green[2].abs() < 1e-5, "{green:?}");
+        let pale = rotate_hue([1.0, 0.5, 0.5], 0.5);
+        assert!((pale[0] - 0.5).abs() < 1e-5 && (pale[1] - 1.0).abs() < 1e-5 && (pale[2] - 1.0).abs() < 1e-5);
+        assert_eq!(rotate_hue([0.3, 0.3, 0.3], 0.25), [0.3, 0.3, 0.3]);
+    }
+
+    #[test]
+    fn colors_turn_every_eight_bars_and_come_back_when_fixed() {
+        let mut look = ReactiveLook::new(PALETTE);
+        look.rotation = Rotation::Bars8;
+        look.kick_at(Accent::Phrase);
+        let first = play(&mut look, 2.0, 1.0, true);
+        assert!(first.r > 10 * first.g.max(first.b).max(1), "après 4 mesures : {first:?}");
+        // Deuxième tête de phrase : un huitième de tour, du rouge vers l'orange.
+        look.kick_at(Accent::Phrase);
+        let turned = play(&mut look, 2.0, 1.0, true);
+        assert!(turned.g > turned.r / 2 && turned.g < turned.r && turned.b < turned.r / 20, "après 8 mesures : {turned:?}");
+        look.rotation = Rotation::Off;
+        let fixed = play(&mut look, 3.0, 1.0, true);
+        assert!(fixed.r > 10 * fixed.g.max(fixed.b).max(1), "couleurs fixes : {fixed:?}");
     }
 
     /// Luminosité un temps après un flash, avec l'allure donnée (lampe blanche, quelle que soit

@@ -6,9 +6,9 @@ use std::sync::PoisonError;
 use eframe::egui::{self, Align, Frame, Layout, Margin, Sense, Stroke, Ui, pos2, vec2};
 
 use super::theme::{self, ACCENT, BG, BOLD, BORDER, CARD, DANGER, Icon, LABEL, LIVE, MUTED, PANEL, RAISED, SEMIBOLD, TEXT};
-use super::{App, Bridge, MODES, TempoChoice, flash_text, motion_text, spread_text};
+use super::{App, Bridge, MODES, TempoChoice, flash_text, motion_text, rotation_text, spread_text};
 use crate::audio::Backend;
-use crate::look::{Motion, Spread};
+use crate::look::{Motion, Rotation, Spread};
 use crate::tempo::DEFAULT_BPM_RANGE;
 
 const ASIDE_WIDTH: f32 = 360.0;
@@ -440,6 +440,17 @@ impl App {
         theme::section(ui, "COULEURS");
         self.swatches(ui, vec2((width - 16.0) / 3.0, 72.0), ACCENT);
         self.color_picker(ui, width - 24.0, LABEL);
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            for rotation in Rotation::ALL {
+                let selected = self.settings.rotation == rotation;
+                let size = vec2((width - 16.0) / 3.0, 40.0);
+                let card = theme::card(ui, size, &theme::SETUP_CARD, selected, None, rotation_text(rotation), "");
+                if card.on_hover_text(rotation.description()).clicked() {
+                    self.set_rotation(rotation);
+                }
+            }
+        });
 
         ui.add_space(12.0);
         theme::section(ui, "FLASHS");
