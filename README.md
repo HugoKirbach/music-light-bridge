@@ -158,31 +158,42 @@ son décalage au temps le plus proche. Exemple d'annotation :
 
 `.\target\release\dj-bridge.exe gui` ouvre une fenêtre sans toucher aux lampes : l'écran
 **Préparer la session**. L'en-tête dit si le bridge répond et quelle zone sera pilotée. Au
-centre : la source audio (**Carte son**, avec l'appareil et le pilote, ou **Sortie du PC**), le
-tempo (**Détection auto**, **BPM imposé** ou **Ableton Link**), le MIDI, puis le bouton **Lancer
-le live**. La section **Lampes** liste les lampes de la zone de divertissement : celles qu'on
-décoche sont laissées hors du flux et gardent leur état pendant le live (le choix vaut aussi pour
-`live` dans le terminal). Seules les lampes ajoutées à la zone dans l'app Hue (Paramètres > Zones
-de divertissement) apparaissent ; si la zone change dans l'app Hue, le bouton **Mettre à jour**
-de la section la relit sans fermer la fenêtre. À droite : un aperçu de la couleur principale,
-l'animation, les couleurs, l'allure des
-flashs, leur déclenchement (kicks anticipés, réactif, chaque temps) et le seuil des kicks. Les
-réglages sont enregistrés et repris à l'ouverture suivante ; après l'arrêt, le bilan de la
-session s'affiche sous le bouton.
+centre, l'essentiel : la source audio (**Carte son** ou **Sortie du PC**, et l'appareil capté),
+les **Lampes**, le tempo (**Détection auto**, **BPM imposé** ou **Ableton Link**), puis le
+bouton **Lancer le live**. Sous ce bouton, **Plus d'options** reste replié et résume ce qu'il
+contient : pilote de la carte son, MIDI, déclenchement des flashs (kicks anticipés, réactif,
+chaque temps) et seuil des kicks. La section **Lampes** liste les lampes de la zone de
+divertissement : celles qu'on décoche sont laissées hors du flux et gardent leur état pendant le
+live (le choix vaut aussi pour `live` dans le terminal). Seules les lampes ajoutées à la zone
+dans l'app Hue (Paramètres > Zones de divertissement) apparaissent ; si la zone change dans l'app
+Hue, le bouton **Mettre à jour** de la section la relit sans fermer la fenêtre. À droite, sous un
+aperçu de la couleur principale, la lumière se règle sur trois pages, une à la fois :
+**Mouvement** (animation, disposition des lampes, houle des breaks), **Couleurs** (les trois
+couleurs, la rotation, le dégradé entre les lampes) et **Flashs** (intensité, redescente, lueur de
+fond, contraste). Les réglages sont enregistrés et repris à l'ouverture suivante ; après l'arrêt,
+le bilan de la session s'affiche sous le bouton.
 
 Pendant le live, la fenêtre devient une scène : le fond prend la couleur envoyée à la lampe, la
 phase reconnue s'affiche en haut, le tempo en très grand au centre (mis à jour chaque seconde,
 avec sa source) et quatre points marquent les temps de la mesure (le premier temps n'étant pas
 repéré, la mesure peut commencer sur n'importe lequel). En haut à droite, l'entrée captée et le
-bouton rond qui arrête le live (lampes rétablies). Le dock du bas garde tout réglable en onglets :
-**Animation**, **Couleurs**, **Flashs** (allure et déclenchement), **Tempo** (imposer un BPM ou
-revenir à la détection) et **Source** (entrée, niveaux, seuil, capture des 40 dernières secondes).
+bouton rond qui arrête le live (lampes rétablies). En bas, le dock reste replié sur ses onglets
+pour laisser la scène dégagée : un clic sur un onglet l'ouvre, un second clic (ou **Replier**) le
+referme. **Mouvement**, **Couleurs** et **Flashs** sont les trois pages de l'écran de préparation ;
+**Tempo** impose un BPM ou revient à la détection, **Source** montre l'entrée et ses niveaux, le
+seuil et le déclenchement des flashs, et capture les 40 dernières secondes.
 
 Les trois couleurs : **Groove** (couleur principale), **Creux** (plus de kick depuis 1,5 s :
 break, passage calme) et **Filtres** (passe-haut ou passe-bas : l'équilibre grave/aigu s'écarte
 d'au moins ~14 dB de l'habitude du morceau, mémorisée sur 30 s). Un clic sur une pastille ouvre
-son nuancier. La lampe passe de l'une à l'autre en fondu ; la luminosité de chaque couleur
-plafonne celle de la scène (du noir en temps creux éteint la lampe pendant les breaks).
+son nuancier. La lampe passe de l'une à l'autre en fondu par la teinte (espace OKLCh) : de rouge
+à vert, elle traverse l'orange et le jaune au lieu d'un kaki terne. La luminosité de chaque
+couleur plafonne celle de la scène (du noir en temps creux éteint la lampe pendant les breaks).
+
+Le **dégradé entre les lampes** (±20° par défaut, page Couleurs) écarte un peu la teinte de chaque
+lampe de celle de la scène, d'un côté puis de l'autre de la pièce ; le dégradé dérive lentement et
+traverse la pièce en 8 mesures (16 s sans tempo). Avec une seule lampe, sa teinte ondule autour de
+la couleur choisie. À 0, toutes les lampes ont la couleur de la scène.
 
 La section **Animation** choisit le mouvement de la lumière (`--motion` dans le terminal) :
 
@@ -195,6 +206,12 @@ La section **Animation** choisit le mouvement de la lumière (`--motion` dans le
   → montée, puis **drop** (premier gros kick après la montée) → éclat blanc et retour au pulse.
   Le passage d'une animation à l'autre se fait en fondu ; la phase reconnue s'affiche au-dessus
   du BPM, et la carte Auto du dock indique l'animation jouée en ce moment.
+
+En respiration, la **houle des breaks** (35 % par défaut, page Mouvement) suit la grille des
+temps, qui continue de battre pendant les breaks : la lumière se creuse entre les temps et
+remonte sur chaque demi-mesure. L'ondulation qui traverse la pièce en vague dure deux mesures.
+Ces mouvements se recalent en douceur quand la grille bouge (structure reconnue, retour des
+kicks) ; sans tempo connu, la houle s'efface et l'ondulation garde une période de 4 s.
 
 La section **Disposition** répartit les flashs entre les lampes de la zone (`--spread` dans le
 terminal), selon leur place dans la pièce :
@@ -215,9 +232,17 @@ position, elles se suivent dans l'ordre de la zone. Avec une seule lampe, toutes
 reviennent à « Ensemble ». Pendant le live, la scène montre la couleur de chaque lampe en haut à
 droite.
 
-La section **Flashs** règle leur allure, avant comme pendant le live : **intensité** (jusqu'où
-monte un flash au-dessus de la lueur), **redescente** (de 40 ms, sec, à 1,5 s, très doux) et
-**lueur de fond** (luminosité minimale gardée entre les kicks).
+La page **Flashs** règle leur allure, avant comme pendant le live : **intensité** (jusqu'où
+monte un flash au-dessus de la lueur), **redescente** (de 40 ms, sec, à 1,5 s, très doux),
+**lueur de fond** (luminosité minimale gardée entre les kicks) et **contraste** (courbe de
+luminosité, 1,4 par défaut : plus haut, les fondus s'attardent dans le sombre et les flashs
+ressortent davantage ; à 1, aucune courbe). Le fond et le sommet d'un flash ne bougent pas avec
+le contraste.
+
+Le bridge ne relaie le flux qu'à ~25 Hz en Zigbee : le sommet de chaque flash est tenu 40 ms,
+une période entière, pour que la lampe le reçoive toujours à pleine force au lieu de le saisir
+parfois déjà en train de redescendre. La lueur qui suit les basses est lissée (montée en 30 ms,
+descente en 150 ms) pour ne pas trembler à chaque note de basse.
 
 Les couleurs et l'allure des flashs sont enregistrées à la fermeture de la fenêtre et reprises par `live`. Un break
 qui retire toute la basse d'un coup garde la couleur des temps creux : seul un équilibre qui
