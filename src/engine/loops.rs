@@ -64,9 +64,18 @@ pub(super) fn light_loop(
         seen_notes = note_count;
 
         let now = Instant::now();
-        let (rhythm, locked, structure) = {
+        let (rhythm, locked, structure, beat_time) = {
             let tracker = shared.tracker();
-            (tracker.rhythm(), tracker.locked(features.seconds(now)), tracker.structure(features.seconds(now)))
+            let clock = tracker.clock();
+            // Place sur la grille, recalée sur la phrase quand la structure est reconnue : les
+            // mouvements lents de la lumière s'y calent, même pendant un break.
+            let beat_time = clock.period().map(|period| {
+                let beats = (features.seconds(now) - clock.anchor()) / period;
+                let last = clock.anchor() + beats.floor() * period;
+                let shift = tracker.position(last).map_or(0.0, |p| f64::from(p.phrase) - beats.floor().rem_euclid(16.0));
+                BeatTime { beats: beats + shift, period: period as f32 }
+            });
+            (tracker.rhythm(), tracker.locked(features.seconds(now)), tracker.structure(features.seconds(now)), beat_time)
         };
         let action = planner.poll(rhythm.as_ref(), features.seconds(now), kick);
         // La détection cherche les kicks là où le motif les attend dès que le tempo est sûr, et se
@@ -106,6 +115,8 @@ pub(super) fn light_loop(
         look.motion = Motion::from_index(shared.motion.load(Ordering::Relaxed));
         look.spread = Spread::from_index(shared.spread.load(Ordering::Relaxed));
         look.set_director(shared.director.load(Ordering::Relaxed));
+        look.rotation = Rotation::from_index(shared.rotation.load(Ordering::Relaxed));
+        look.set_beat_time(beat_time);
         let mut colors = look.render_lamps(now - last, features.levels()).to_vec();
         if look.take_drop() {
             shared.tracker().on_drop();

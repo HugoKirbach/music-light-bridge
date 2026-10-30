@@ -136,32 +136,37 @@ Les identifiants du bridge et tous les réglages sont enregistrés dans
 `dj-bridge gui` ouvre l'écran **Préparer la session**. L'en-tête indique si le bridge répond, la
 zone pilotée et le nombre de lampes.
 
-**Colonne principale :**
+**Au centre, l'essentiel :**
 
 1. **Source audio.**
-   - **Carte son** : choix de l'appareil et du pilote (ASIO s'il est libre, sinon WASAPI).
+   - **Carte son** : platines ou synthé branchés sur la carte son.
    - **Sortie du PC** : capte ce que joue Windows (WASAPI loopback).
-2. **Lampes** : la pièce, ses configurations et le plan (voir [Pièces et
-   configurations](#pièces-et-configurations)).
+2. **Lampes.**
    - Cochez les lampes de la zone à piloter. Les autres gardent leur état pendant le live.
    - **Mettre à jour** relit la zone si elle a changé dans l'app Hue.
+   - **Pièce et plan des lampes**, replié, décrit la pièce, ses configurations et le plan (voir
+     [Pièces et configurations](#pièces-et-configurations)).
 3. **Tempo.**
    - **Détection auto** (plage 100–190 BPM).
    - **BPM imposé** : le tempo reste fixe, seule la phase se cale sur les kicks.
    - **Ableton Link** : tempo et phase viennent de la session.
-4. **MIDI** : les notes du synthé flashent à leur couleur, et une note peut rappeler une scène.
-5. **Télécommande** : cochez **Piloter le live depuis un téléphone** pour ouvrir la télécommande
-   mobile au lancement.
 
-**Colonne de droite :** aperçu de la couleur principale, puis les sections suivantes.
-- **Animation** : Auto, Pulse, Respiration, Montée.
-- **Disposition** : la façon de répartir les flashs entre les lampes, parmi celles que la
-  configuration rend possibles, et la case **Régisseur auto**.
-- **Couleurs** : Groove, Creux, Filtres.
-- **Flashs** : intensité, redescente, lueur de fond.
-- **Déclenchement** : Kicks anticipés, Réactif, Chaque temps.
+Puis le bouton **Lancer le live**. Dessous, **Plus d'options** reste replié et résume ce qu'il
+contient :
+- **Pilote de la carte son** : Auto (ASIO s'il est libre, sinon WASAPI), ASIO ou WASAPI.
+- **MIDI** : les notes du synthé flashent à leur couleur, et une note peut rappeler une scène.
+- **Télécommande** : cochez **Piloter le live depuis un téléphone** pour ouvrir la télécommande
+  mobile au lancement.
+- **Déclenchement des flashs** : Kicks anticipés, Réactif, Chaque temps.
 - **Seuil des kicks.**
-- **Scènes.**
+
+**À droite**, sous un aperçu de la couleur principale, la lumière se règle sur quatre pages, une
+à la fois :
+- **Mouvement** : animation (Auto, Pulse, Respiration, Montée), disposition des lampes (parmi
+  celles que la configuration rend possibles), case **Régisseur auto**, houle des breaks.
+- **Couleurs** : Groove, Creux, Filtres, rotation des couleurs, dégradé entre les lampes.
+- **Flashs** : intensité, redescente, lueur de fond, contraste.
+- **Scènes** : rappeler, enregistrer, supprimer.
 
 Les réglages sont repris à l'ouverture suivante.
 
@@ -170,26 +175,28 @@ Les réglages sont repris à l'ouverture suivante.
 - Le tempo s'affiche en très grand, avec quatre points pour les temps de la mesure.
 - Au-dessus du tempo, la phase reconnue : « GROOVE · MESURE 3/4 », ou « MONTÉE · 62 % · DROP
   DANS 12 T ».
-- En haut à droite, la couleur de chaque lampe.
+- En haut à droite, la couleur de chaque lampe, l'entrée captée et le bouton rond d'arrêt.
 
-Le dock du bas garde tout réglable en onglets :
+Le dock du bas garde tout réglable en onglets. Il reste replié sur ses onglets pour laisser la
+scène dégagée : un clic sur un onglet l'ouvre, un second (ou **Replier**) le referme.
 
 | Onglet | Contenu |
 |---|---|
-| Animation | Animation, disposition (la carte Auto montre celle jouée en ce moment), régisseur |
-| Couleurs | Les trois couleurs et leur nuancier |
-| Flashs | Allure des flashs et déclenchement |
+| Mouvement | Animation, disposition (la carte Auto montre celle jouée en ce moment), régisseur, houle |
+| Couleurs | Les trois couleurs et leur nuancier, rotation, dégradé |
+| Flashs | Allure des flashs |
 | Scènes | Rappeler, enregistrer (avec une note MIDI facultative), supprimer (clic droit) |
 | Tempo | Imposer un BPM ou revenir à la détection |
 | Lampes | **Test de synchro** et retard propre de chaque lampe |
-| Source | Entrée, niveaux, seuil, capture des 40 dernières secondes, adresse de la télécommande |
+| Source | Entrée, niveaux, seuil, déclenchement, capture des 40 dernières secondes, adresse de la télécommande |
 
 Le bouton rond en haut à droite arrête le live et rétablit les lampes. Le bilan de la session
 s'affiche ensuite sous le bouton de lancement.
 
 ### Pièces et configurations
 
-La section **Lampes** décrit où sont les lampes. DJ-Bridge en tire les mouvements possibles.
+**Pièce et plan des lampes**, sous la section **Lampes**, décrit où sont les lampes. DJ-Bridge en
+tire les mouvements possibles.
 
 - **Pièce** : un rectangle vu de dessus, avec sa largeur et sa profondeur en mètres. Le devant
   (en bas du plan) est le côté du DJ. **Nouvelle** ajoute une pièce, **Renommer** et
@@ -260,6 +267,7 @@ et scènes réglés dans la fenêtre.
 | `--motion auto\|pulse\|breath\|build-up` | Animation |
 | `--spread auto\|together\|wave\|alternate\|split\|depth\|diagonal\|rise\|rotate\|ripple\|ping-pong\|corners` | Disposition ; la pièce et la configuration sont celles choisies dans la fenêtre |
 | `--no-director` | Sans régisseur : en disposition auto, le groove alterne toujours |
+| `--rotation off\|8\|16` | Rotation des couleurs toutes les 8 ou 16 mesures (défaut : fixes) |
 | `--link` | Rejoindre la session Ableton Link |
 | `--midi ["nom partiel"]` | Écouter une entrée MIDI |
 | `--remote` | Ouvrir la télécommande mobile |
@@ -436,7 +444,32 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
   - **Filtres** : passe-haut ou passe-bas, quand l'équilibre grave/aigu s'écarte d'environ
     14 dB de celui du morceau.
 
-  On passe de l'une à l'autre en fondu. Du noir en Creux éteint les lampes pendant les breaks.
+  On passe de l'une à l'autre en fondu par la teinte (espace OKLCh) : de rouge à vert, la lampe
+  traverse l'orange et le jaune au lieu d'un kaki terne. Du noir en Creux éteint les lampes
+  pendant les breaks. Un break qui retire toute la basse d'un coup garde la couleur Creux : seul
+  un équilibre qui glisse en quelques dixièmes de seconde (un filtre qu'on tourne) prend la
+  couleur Filtres.
+- **Rotation** (page Couleurs) : la teinte avance d'un huitième de tour toutes les 8 ou 16
+  mesures, en fondu, et à chaque drop ; **Fixes** (par défaut) garde les couleurs choisies. Les
+  mesures se comptent sur les têtes de phrase : la rotation attend que la structure soit
+  reconnue, et se fige pendant les breaks. Elle s'ajoute au décalage du régisseur ; les couleurs
+  des notes MIDI ne tournent pas.
+- **Dégradé entre les lampes** (±20° par défaut, page Couleurs) : la teinte de chaque lampe
+  s'écarte un peu de celle de la scène, d'un côté puis de l'autre de la pièce, et le dégradé
+  traverse lentement la pièce en 8 mesures (16 s sans tempo). Avec une seule lampe, sa teinte
+  ondule autour de la couleur choisie. À 0, toutes les lampes ont la couleur de la scène.
+- **Houle des breaks** (35 % par défaut, page Mouvement) : en respiration, la lumière se creuse
+  entre les temps et remonte sur chaque demi-mesure, calée sur la grille qui continue de battre.
+  L'ondulation du break dure deux mesures. Ces mouvements se recalent en douceur quand la grille
+  bouge ; sans tempo, la houle s'efface et l'ondulation garde une période de 4 s.
+- **Allure des flashs** (page Flashs) : **intensité** (jusqu'où monte un flash au-dessus de la
+  lueur), **redescente** (de 40 ms, sec, à 1,5 s, très doux), **lueur de fond** (luminosité
+  gardée entre les kicks) et **contraste** (courbe de luminosité, 1,4 par défaut : plus haut, les
+  fondus s'attardent dans le sombre et les flashs ressortent davantage ; à 1, aucune courbe).
+- **Flashs tenus** : le bridge ne relaie le flux qu'à ~25 Hz en Zigbee. Le sommet de chaque
+  flash est tenu 40 ms, une période entière, pour que la lampe le reçoive toujours à pleine
+  force. La lueur qui suit les basses est lissée (montée en 30 ms, descente en 150 ms) pour ne
+  pas trembler à chaque note de basse.
 - **MIDI** : chaque note flashe à sa couleur, sur le cercle des quintes (do rouge, sol orange,
   ré jaune…), et plus fort quand la vélocité est élevée.
 

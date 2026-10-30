@@ -131,12 +131,14 @@ pub(super) struct Lamp {
     pub(super) punch: f32,
     /// Flash déclenché depuis le dernier rendu : il s'affiche sans décroissance.
     pub(super) fresh: bool,
+    /// Temps (s) pendant lequel le sommet du flash est encore tenu.
+    pub(super) hold: f32,
 }
 
 impl Lamp {
     pub(super) fn fire(&mut self, strength: f32, punch: f32) {
         if strength >= self.flash {
-            (self.flash, self.punch, self.fresh) = (strength, punch, true);
+            (self.flash, self.punch, self.fresh, self.hold) = (strength, punch, true, FLASH_HOLD);
         }
     }
 }

@@ -1,20 +1,21 @@
 //! Scène du live : le fond prend la couleur de la lampe, le tempo s'affiche en très grand avec les
-//! temps de la mesure, et un dock en bas garde les réglages modifiables pendant le morceau.
+//! temps de la mesure, et un dock en bas garde les réglages modifiables pendant le morceau. Replié,
+//! le dock ne montre que ses onglets ; un clic sur l'un d'eux l'ouvre, un second le referme.
 
 use eframe::egui::{self, Align, Color32, CornerRadius, Frame, Layout, Margin, Sense, Stroke, Ui, pos2, vec2};
 
+use super::light::{Page, STAGE_SKIN};
 use super::theme::{self, BOLD, Icon, LIVE, MONO_BOLD, SEMIBOLD, STAGE_BG};
-use super::{App, MODES, Tab, flash_text, format_bpm, motion_text, spread_text};
+use super::{App, MODES, Tab, flash_text, format_bpm};
 use crate::engine::{MAX_LAMP_DELAY_MS, Status};
-use crate::look::{Motion, Spread};
 use crate::tempo::TempoSource;
 
 const DOCK_WIDTH: f32 = 1040.0;
 const TABS: [(Tab, &str); 7] = [
-    (Tab::Motion, "Animation"),
-    (Tab::Colors, "Couleurs"),
-    (Tab::Flashes, "Flashs"),
-    (Tab::Presets, "Scènes"),
+    (Tab::Light(Page::Motion), "Mouvement"),
+    (Tab::Light(Page::Colors), "Couleurs"),
+    (Tab::Light(Page::Flashes), "Flashs"),
+    (Tab::Light(Page::Presets), "Scènes"),
     (Tab::Tempo, "Tempo"),
     (Tab::Lamps, "Lampes"),
     (Tab::Source, "Source"),
@@ -157,7 +158,13 @@ impl App {
     /// Dock des réglages modifiables pendant le live, en onglets.
     fn dock(&mut self, ui: &mut Ui, status: &Status) {
         let available = ui.available_width();
-        let width = available.min(DOCK_WIDTH);
+        // Replié, le dock se resserre autour de ses onglets.
+        let width = if self.dock_open {
+            available.min(DOCK_WIDTH)
+        } else {
+            let tabs: f32 = TABS.iter().map(|(_, label)| tab_width(ui, label) + 4.0).sum();
+            (tabs + 12.0).min(available)
+        };
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(((available - width) / 2.0).floor());
@@ -169,97 +176,41 @@ impl App {
                     ui.set_width(width);
                     theme::stage_style(ui);
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    Frame::new().inner_margin(Margin { left: 8, right: 8, top: 8, bottom: 0 }).show(ui, |ui| {
+                    let bottom = if self.dock_open { 0 } else { 8 };
+                    Frame::new().inner_margin(Margin { left: 8, right: 8, top: 8, bottom }).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             for (tab, label) in TABS {
-                                if tab_button(ui, label, self.tab == tab) {
-                                    self.tab = tab;
+                                let selected = self.dock_open && self.tab == tab;
+                                if tab_button(ui, label, selected, self.dock_open) {
+                                    (self.tab, self.dock_open) = (tab, !selected);
                                 }
+                            }
+                            if self.dock_open {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    let hide = ui.add(egui::Label::new(theme::text("Replier", theme::regular(13.0), DIM)).sense(Sense::click()));
+                                    if hide.on_hover_text("Replier le dock : la scène reste dégagée").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                        self.dock_open = false;
+                                    }
+                                });
                             }
                         });
                     });
+                    if !self.dock_open {
+                        return;
+                    }
                     let radius = CornerRadius { nw: 0, ne: 0, sw: 18, se: 18 };
                     Frame::new().fill(theme::white(0.04)).corner_radius(radius).inner_margin(Margin::same(18)).show(ui, |ui| {
                         ui.set_width(width - 36.0);
                         ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
                         match self.tab {
-                            Tab::Motion => self.motion_tab(ui, width - 36.0, status),
-                            Tab::Colors => self.colors_tab(ui),
-                            Tab::Flashes => self.flashes_tab(ui, width - 36.0),
-                            Tab::Presets => self.presets_panel(ui, width - 36.0, 5, &theme::STAGE_CARD, DIM),
+                            Tab::Light(page) => self.light_page(ui, page, width - 36.0, &STAGE_SKIN, Some(status)),
                             Tab::Tempo => self.tempo_tab(ui, status),
-                            Tab::Lamps => self.lamps_tab(ui),
-                            Tab::Source => self.source_tab(ui, status),
+                            Tab::Lamps => self.lamps_tab(ui, width - 36.0),
+                            Tab::Source => self.source_tab(ui, status, width - 36.0),
                         }
                     });
                 }));
-        });
-    }
-
-    fn motion_tab(&mut self, ui: &mut Ui, width: f32, status: &Status) {
-        ui.horizontal(|ui| {
-            let size = vec2((width - 30.0) / 4.0, 76.0);
-            for motion in Motion::ALL {
-                let (title, mut subtitle) = (motion_text(motion).0, motion_text(motion).1.to_owned());
-                if motion == Motion::Auto && self.settings.motion == Motion::Auto {
-                    subtitle = format!("En ce moment : {}", motion_text(status.active_motion).0.to_lowercase());
-                }
-                let selected = self.settings.motion == motion;
-                let card = theme::card(ui, size, &theme::STAGE_CARD, selected, None, title, &subtitle);
-                if card.on_hover_text(motion.description()).clicked() {
-                    self.set_motion(motion);
-                }
-            }
-        });
-        // Les dispositions que la pièce permet (et celle choisie), six par rangée.
-        let mut possible = self.engine.as_ref().map_or_else(|| Spread::ALL.to_vec(), |engine| engine.info.movements.clone());
-        if !possible.contains(&self.settings.spread) {
-            possible.push(self.settings.spread);
-        }
-        ui.horizontal_wrapped(|ui| {
-            let size = vec2((width - 50.0) / 6.0, 58.0);
-            for spread in possible {
-                let (title, mut subtitle) = (spread_text(spread).0, spread_text(spread).1.to_owned());
-                if spread == Spread::Auto && self.settings.spread == Spread::Auto {
-                    subtitle = format!("En ce moment : {}", spread_text(status.active_spread).0.to_lowercase());
-                }
-                let selected = self.settings.spread == spread;
-                let card = theme::card(ui, size, &theme::STAGE_CARD, selected, None, title, &subtitle);
-                if card.on_hover_text(spread.description()).clicked() {
-                    self.set_spread(spread);
-                }
-            }
-        });
-        self.director_chip(ui);
-    }
-
-    fn colors_tab(&mut self, ui: &mut Ui) {
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            self.swatches(ui, vec2(130.0, 72.0), Color32::WHITE);
-            ui.add_space(14.0);
-            ui.vertical(|ui| self.color_picker(ui, 150.0, DIM));
-        });
-    }
-
-    fn flashes_tab(&mut self, ui: &mut Ui, width: f32) {
-        ui.columns(3, |columns| {
-            for (which, column) in columns.iter_mut().enumerate() {
-                self.flash_slider(column, which, DIM);
-            }
-        });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let size = vec2((width - 20.0) / 3.0, 58.0);
-            for mode in MODES {
-                let (title, subtitle) = flash_text(mode);
-                let selected = self.settings.flash == mode;
-                let card = theme::card(ui, size, &theme::STAGE_CARD, selected, None, title, subtitle);
-                if card.on_hover_text(mode.description()).clicked() {
-                    self.set_flash(mode);
-                }
-            }
         });
     }
 
@@ -309,7 +260,7 @@ impl App {
 
     /// Synchro des lampes : le test fait flasher toutes les lampes en blanc sur chaque temps, et
     /// chaque lampe en retard sur les autres reçoit le sien.
-    fn lamps_tab(&mut self, ui: &mut Ui) {
+    fn lamps_tab(&mut self, ui: &mut Ui, width: f32) {
         let Some(engine) = self.engine.take() else { return };
         ui.horizontal(|ui| {
             let testing = engine.sync_test();
@@ -326,7 +277,7 @@ impl App {
             ));
         });
         let lamps = engine.lamps();
-        let shown = lamps.len().clamp(1, 4);
+        let shown = lamps.len().clamp(1, if width < 700.0 { 2 } else { 3 });
         ui.columns(shown, |columns| {
             for (i, (id, name, lag)) in lamps.iter().enumerate() {
                 let ui = &mut columns[i % shown];
@@ -346,7 +297,7 @@ impl App {
         self.engine = Some(engine);
     }
 
-    fn source_tab(&mut self, ui: &mut Ui, status: &Status) {
+    fn source_tab(&mut self, ui: &mut Ui, status: &Status, width: f32) {
         let Some(engine) = self.engine.take() else { return };
         let mut capture = None;
         ui.columns(2, |columns| {
@@ -380,6 +331,18 @@ impl App {
             columns[1].add_space(6.0);
             self.threshold_slider(&mut columns[1], DIM);
         });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let size = vec2((width - 20.0) / 3.0, 58.0);
+            for mode in MODES {
+                let (title, subtitle) = flash_text(mode);
+                let selected = self.settings.flash == mode;
+                let card = theme::card(ui, size, &theme::STAGE_CARD, selected, None, title, subtitle);
+                if card.on_hover_text(mode.description()).clicked() {
+                    self.set_flash(mode);
+                }
+            }
+        });
         match capture {
             Some(Ok(path)) => self.show(format!("Capture : {}", path.display())),
             Some(Err(e)) => self.show(format!("Capture impossible : {e:#}")),
@@ -389,12 +352,12 @@ impl App {
     }
 }
 
-/// Onglet du dock ; rend vrai au clic.
-fn tab_button(ui: &mut Ui, label: &str, selected: bool) -> bool {
+/// Onglet du dock ; rend vrai au clic. Dock replié, les onglets sont des boutons arrondis.
+fn tab_button(ui: &mut Ui, label: &str, selected: bool, open: bool) -> bool {
     let font = if selected { theme::font(14.0, SEMIBOLD) } else { theme::regular(14.0) };
     let color = if selected { Color32::WHITE } else { DIM };
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font, color);
-    let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 36.0, 44.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(tab_width(ui, label), 44.0), Sense::click());
     let fill = if selected {
         theme::white(0.08)
     } else if response.hovered() {
@@ -402,9 +365,15 @@ fn tab_button(ui: &mut Ui, label: &str, selected: bool) -> bool {
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, CornerRadius { nw: 10, ne: 10, sw: 0, se: 0 }, fill);
+    let radius = if open { CornerRadius { nw: 10, ne: 10, sw: 0, se: 0 } } else { CornerRadius::same(10) };
+    ui.painter().rect_filled(rect, radius, fill);
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Largeur d'un onglet du dock, la même sélectionné ou non.
+fn tab_width(ui: &Ui, label: &str) -> f32 {
+    ui.painter().layout_no_wrap(label.to_owned(), theme::font(14.0, SEMIBOLD), Color32::WHITE).size().x + 36.0
 }
 
 fn stage_button(ui: &mut Ui, label: &str) -> bool {

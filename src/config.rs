@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio::Backend;
 use crate::audio::analysis::DEFAULT_THRESHOLD;
 use crate::flash::FlashMode;
-use crate::look::{Dynamics, Motion, Palette, Spread};
+use crate::look::{Dynamics, Motion, Palette, Rotation, Spread};
 use crate::room::{Layout, Placement, Room};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -94,6 +94,7 @@ pub struct LiveSettings {
     pub director: bool,
     /// Ouvre la télécommande mobile pendant le live.
     pub remote: bool,
+    pub rotation: Rotation,
     pub threshold: f32,
 }
 
@@ -110,6 +111,7 @@ impl Default for LiveSettings {
             spread: Spread::Auto,
             director: true,
             remote: false,
+            rotation: Rotation::Off,
             threshold: DEFAULT_THRESHOLD,
         }
     }

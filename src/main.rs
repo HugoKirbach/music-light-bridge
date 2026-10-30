@@ -150,6 +150,10 @@ struct LiveArgs {
     /// Ouvre la télécommande mobile : une page pour téléphone sur le réseau local (adresse affichée)
     #[arg(long)]
     remote: bool,
+    /// Rotation des couleurs : off (fixes), 8 ou 16 (la teinte avance toutes les 8 ou 16 mesures
+    /// et à chaque drop)
+    #[arg(long, value_enum, default_value_t = look::Rotation::Off)]
+    rotation: look::Rotation,
     /// Rejoint la session Ableton Link : tempo et phase viennent de la session
     #[arg(long)]
     link: bool,
@@ -176,6 +180,7 @@ impl LiveArgs {
             spread: self.spread,
             director: !self.no_director,
             remote,
+            rotation: self.rotation,
         }
     }
 }

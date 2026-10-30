@@ -1,7 +1,9 @@
-//! Fenêtre de DJ-Bridge. Avant le lancement, un écran de réglages (source audio, tempo, MIDI,
-//! couleurs, animation) ; pendant le live, une scène plein écran qui prend la couleur de la lampe,
-//! le tempo en très grand et les réglages qui restent modifiables dans un dock en bas.
+//! Fenêtre de DJ-Bridge. Avant le lancement, un écran de préparation (source audio, tempo,
+//! lampes ; le reste replié dans « Plus d'options ») et, à droite, les réglages de la lumière en
+//! trois pages ; pendant le live, une scène plein écran qui prend la couleur de la lampe, le
+//! tempo en très grand, et un dock replié en bas qui rouvre ces mêmes pages.
 
+mod light;
 mod plan;
 mod presets;
 mod setup;
@@ -20,7 +22,7 @@ use crate::config::{Config, LiveSettings};
 use crate::engine::{self, Engine, THRESHOLD_RANGE};
 use crate::flash::FlashMode;
 use crate::hue::api;
-use crate::look::{Dynamics, Motion, Palette, Spread};
+use crate::look::{Dynamics, Motion, Palette, Rotation, Spread};
 use crate::midi;
 use crate::tempo::{DEFAULT_BPM_RANGE, TempoSource};
 
@@ -69,13 +71,11 @@ enum TempoChoice {
     Link,
 }
 
-/// Onglets du dock de la scène.
+/// Onglets du dock de la scène : les pages de la lumière (dont les scènes), le tempo, la synchro
+/// des lampes et la source.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
-    Motion,
-    Colors,
-    Flashes,
-    Presets,
+    Light(light::Page),
     Tempo,
     Lamps,
     Source,
@@ -93,7 +93,12 @@ struct App {
     card_backend: Backend,
     /// Couleur de la palette en cours de modification.
     editing_color: Option<usize>,
+    /// Page de la lumière affichée avant le lancement ; options repliées ou non.
+    page: light::Page,
+    more_options: bool,
+    /// Onglet du dock pendant le live, et dock ouvert ou replié.
     tab: Tab,
+    dock_open: bool,
     bridge: Arc<Mutex<Bridge>>,
     /// Mode live en cours, s'il est lancé, et son heure de départ.
     engine: Option<Engine>,
@@ -117,7 +122,9 @@ struct App {
     preset_name: String,
     preset_note: String,
     outside_changes_seen: u32,
-    /// Lampe choisie sur le plan (pour sa hauteur), et pièce ou disposition qu'on renomme.
+    /// Plan de la pièce déplié ; lampe choisie sur le plan (pour sa hauteur), et pièce ou
+    /// disposition qu'on renomme.
+    show_room: bool,
     selected_lamp: Option<String>,
     renaming: Option<(plan::Renaming, String)>,
 }
@@ -140,7 +147,10 @@ impl App {
             tempo,
             card_backend,
             editing_color: None,
-            tab: Tab::Motion,
+            page: light::Page::Motion,
+            more_options: false,
+            tab: Tab::Light(light::Page::Motion),
+            dock_open: false,
             bridge,
             settings,
             cfg,
@@ -159,6 +169,7 @@ impl App {
             preset_name: String::new(),
             preset_note: String::new(),
             outside_changes_seen: 0,
+            show_room: false,
             selected_lamp: None,
             renaming: None,
         };
@@ -252,6 +263,7 @@ impl App {
             spread: self.settings.spread,
             director: self.settings.director,
             remote,
+            rotation: self.settings.rotation,
             link: self.settings.link,
             midi: self.settings.midi.clone().map(Some),
             palette: self.palette,
@@ -270,6 +282,8 @@ impl App {
                 if let Some(url) = &engine.info.remote_url {
                     self.show(format!("Télécommande : ouvre {url} sur ton téléphone (onglet Source)."));
                 }
+                // La scène s'ouvre dégagée : le dock reste replié jusqu'au premier onglet choisi.
+                self.dock_open = false;
                 self.engine = Some(engine);
             }
             Err(e) => self.show(format!("Lancement impossible : {e:#}")),
@@ -315,6 +329,13 @@ impl App {
         let hint = "En disposition Auto, la mise en scène du groove et la teinte varient d'une section à l'autre selon l'énergie du set";
         if theme::chip(ui, "Régisseur auto", self.settings.director).on_hover_text(hint).clicked() {
             self.set_director(!self.settings.director);
+        }
+    }
+
+    fn set_rotation(&mut self, rotation: Rotation) {
+        self.settings.rotation = rotation;
+        if let Some(engine) = &self.engine {
+            engine.set_rotation(rotation);
         }
     }
 
@@ -385,38 +406,6 @@ impl App {
         }
     }
 
-    /// Un des trois réglages de l'allure des flashs : 0 intensité, 1 redescente, 2 lueur de fond.
-    fn flash_slider(&mut self, ui: &mut egui::Ui, which: usize, label: egui::Color32) {
-        let d = &mut self.dynamics;
-        let changed = match which {
-            0 => {
-                let mut v = d.flash * 100.0;
-                let shown = format!("{v:.0} %");
-                let changed = theme::slider_row(ui, "Intensité", shown, egui::Slider::new(&mut v, 0.0..=100.0), label);
-                d.flash = v / 100.0;
-                changed
-            }
-            1 => {
-                let mut v = d.decay * 1000.0;
-                let shown = format!("{v:.0} ms");
-                let slider = egui::Slider::new(&mut v, 40.0..=1500.0).logarithmic(true);
-                let changed = theme::slider_row(ui, "Redescente", shown, slider, label);
-                d.decay = v / 1000.0;
-                changed
-            }
-            _ => {
-                let mut v = d.floor * 100.0;
-                let shown = format!("{v:.0} %");
-                let changed = theme::slider_row(ui, "Lueur de fond", shown, egui::Slider::new(&mut v, 0.0..=60.0), label);
-                d.floor = v / 100.0;
-                changed
-            }
-        };
-        if changed {
-            self.dynamics_changed();
-        }
-    }
-
     fn threshold_slider(&mut self, ui: &mut egui::Ui, label: egui::Color32) {
         let mut threshold = self.settings.threshold;
         let shown = format!("{threshold:.2}");
@@ -479,6 +468,15 @@ fn motion_text(motion: Motion) -> (&'static str, &'static str) {
 /// Titre court et explication d'une disposition des lampes.
 fn spread_text(spread: Spread) -> (&'static str, &'static str) {
     (spread.label(), spread.hint())
+}
+
+/// Titre court d'une rotation des couleurs.
+fn rotation_text(rotation: Rotation) -> &'static str {
+    match rotation {
+        Rotation::Off => "Fixes",
+        Rotation::Bars8 => "8 mesures",
+        Rotation::Bars16 => "16 mesures",
+    }
 }
 
 fn flash_text(mode: FlashMode) -> (&'static str, &'static str) {

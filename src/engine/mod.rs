@@ -26,7 +26,7 @@ use crate::hue::api;
 use crate::hue::snapshot::Restored;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
 use crate::link::LinkSession;
-use crate::look::{Accent, Space, Dynamics, Motion, Palette, Phase, ReactiveLook, Spread};
+use crate::look::{Accent, BeatTime, Dynamics, Motion, Palette, Phase, ReactiveLook, Rotation, Space, Spread};
 use crate::midi::{MidiListener, Notes, note_hue};
 use crate::tempo::{MANUAL_BPM_LIMITS, TempoSource, Tracker};
 use crate::timing;
@@ -90,6 +90,7 @@ pub struct Options {
     pub director: bool,
     /// Télécommande mobile sur le réseau local, avec ce jeton dans son adresse.
     pub remote: Option<String>,
+    pub rotation: Rotation,
 }
 
 /// Ce qui est connu au démarrage.
@@ -194,6 +195,7 @@ struct Shared {
     spread: AtomicU8,
     director: AtomicBool,
     active_spread: AtomicU8,
+    rotation: AtomicU8,
     /// Dernière couleur de chaque lampe, `0x00RRGGBB`.
     lamp_colors: Vec<AtomicU32>,
     /// Retard propre de chaque canal (ms, bits de `f32`), et test de synchro des lampes.
@@ -395,6 +397,7 @@ impl Engine {
             spread: AtomicU8::new(options.spread.index()),
             director: AtomicBool::new(options.director),
             active_spread: AtomicU8::new(options.spread.index()),
+            rotation: AtomicU8::new(options.rotation.index()),
             lamp_colors: channels.iter().map(|_| AtomicU32::new(0)).collect(),
             lamp_lags: channel_lags.iter().map(|lag| AtomicU32::new(lag.to_bits())).collect(),
             sync_test: AtomicBool::new(false),
@@ -617,6 +620,10 @@ impl Engine {
 
     pub fn sync_test(&self) -> bool {
         self.shared.sync_test.load(Ordering::Relaxed)
+    }
+
+    pub fn set_rotation(&self, rotation: Rotation) {
+        self.shared.rotation.store(rotation.index(), Ordering::Relaxed);
     }
 
     pub fn set_mode(&self, mode: FlashMode) {
