@@ -20,17 +20,26 @@ use tokio::runtime::Runtime;
 use crate::audio::analysis::{KICK_DETECTION_DELAY, Levels};
 use crate::audio::capture::Capture;
 use crate::audio::{AudioInput, Backend, CAPTURE_SECONDS, Features, Grid};
-use crate::config::Config;
+use crate::config::{Config, Preset};
 use crate::flash::{Action, CONFIRM_MARGIN, FlashMode, FlashPlanner};
 use crate::hue::api;
 use crate::hue::snapshot::Restored;
 use crate::hue::stream::{FRAME_PERIOD, HueStream, Rgb};
 use crate::link::LinkSession;
-use crate::look::{Accent, BeatTime, Dynamics, Motion, Palette, Phase, ReactiveLook, Rotation, Spread};
+use crate::look::{Accent, BeatTime, Dynamics, Motion, Palette, Phase, ReactiveLook, Rotation, Space, Spread};
 use crate::midi::{MidiListener, Notes, note_hue};
 use crate::tempo::{MANUAL_BPM_LIMITS, TempoSource, Tracker};
 use crate::timing;
 use crate::wav;
+
+mod captures;
+mod delays;
+mod loops;
+mod remote;
+
+use captures::{auto_capture_loop, write_capture};
+use loops::{light_loop, link_loop, tempo_loop, unpack};
+pub use remote::new_token;
 
 const TEMPO_UPDATE: Duration = Duration::from_secs(1);
 /// Fréquence de lecture de la session Ableton Link (tempo et phase).
@@ -39,7 +48,15 @@ const LINK_POLL: Duration = Duration::from_millis(20);
 const CONFIRM_RANGE: (f64, f64) = (0.03, 0.1);
 /// Durée d'allumage des témoins de kick et de note.
 const LIT: Duration = Duration::from_millis(100);
+const NO_BUILD: u8 = u8::MAX;
+/// Entrée audio ou bridge perdus : nouvelle tentative toutes les 2 s (le bridge, de 0,5 à 5 s).
+const AUDIO_RETRY: Duration = Duration::from_secs(2);
+/// Plus aucun bloc audio depuis 1 s : l'entrée est perdue.
+const AUDIO_STALL: Duration = Duration::from_secs(1);
+const BRIDGE_RETRY: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(5));
 pub const THRESHOLD_RANGE: (f32, f32) = (1.1, 4.0);
+/// Retard propre maximal d'une lampe (ms) : au-delà, c'est un réglage d'avance générale.
+pub const MAX_LAMP_DELAY_MS: f32 = 150.0;
 const LINK_TEMPO: &str = "tempo piloté par Ableton Link : change-le depuis la session";
 /// Captures automatiques : le groove doit avoir tenu 8 s, la capture part 8 s après sa perte si
 /// les basses sont restées à plus de 60 % de leur niveau pendant le groove (moyenne sur 4 s), au
@@ -69,6 +86,10 @@ pub struct Options {
     pub motion: Motion,
     /// Répartition des flashs entre les lampes.
     pub spread: Spread,
+    /// Régisseur de la disposition Auto.
+    pub director: bool,
+    /// Télécommande mobile sur le réseau local, avec ce jeton dans son adresse.
+    pub remote: Option<String>,
     pub rotation: Rotation,
 }
 
@@ -88,6 +109,12 @@ pub struct Info {
     pub advance: Duration,
     /// L'état des lampes à rétablir vient d'une session interrompue.
     pub resumed_snapshot: bool,
+    /// Adresse de la télécommande mobile, si elle est ouverte.
+    pub remote_url: Option<String>,
+    /// Pièce et disposition des lampes, et les dispositions qu'elle rend possibles.
+    pub room: String,
+    pub layout: String,
+    pub movements: Vec<Spread>,
 }
 
 /// Instantané de l'état, pour l'affichage.
@@ -105,6 +132,18 @@ pub struct Status {
     pub reaction_ms: f64,
     pub glitches: u32,
     pub input_lost: bool,
+    /// Le bridge ne répond plus : le flux tente de se rouvrir.
+    pub bridge_lost: bool,
+    /// Dernière scène rappelée.
+    pub preset: Option<String>,
+    /// Réglages changés hors de la fenêtre (scène rappelée par note MIDI, télécommande) : la
+    /// fenêtre reprend alors ceux-ci quand le compte change.
+    pub outside_changes: u32,
+    pub motion: Motion,
+    pub spread: Spread,
+    pub director: bool,
+    pub palette: Palette,
+    pub dynamics: Dynamics,
     /// Autres participants de la session Link, si elle est rejointe.
     pub link_peers: Option<u64>,
     /// Couleur envoyée à la lampe, en sRGB 8 bits.
@@ -112,6 +151,10 @@ pub struct Status {
     /// Phase reconnue et animation effectivement jouée.
     pub phase: Phase,
     pub active_motion: Motion,
+    /// Avancement de la montée en cours, en %.
+    pub build: Option<u8>,
+    /// Temps restants avant le drop prévu de la montée (tête de phrase).
+    pub drop_beats: Option<u8>,
     /// Disposition effectivement jouée, et couleur envoyée à chaque lampe (canaux de la zone).
     pub active_spread: Spread,
     pub lamp_colors: Vec<[u8; 3]>,
@@ -139,6 +182,8 @@ pub struct Summary {
     input_latency_ms: f64,
     glitches: u32,
     input_lost: bool,
+    audio_restarts: u32,
+    bridge_restarts: u32,
     /// Retour des lampes à leur état d'avant le flux, ou la raison de son échec.
     restore: std::result::Result<Restored, String>,
 }
@@ -148,12 +193,19 @@ struct Shared {
     mode: AtomicU8,
     motion: AtomicU8,
     spread: AtomicU8,
+    director: AtomicBool,
     active_spread: AtomicU8,
     rotation: AtomicU8,
     /// Dernière couleur de chaque lampe, `0x00RRGGBB`.
     lamp_colors: Vec<AtomicU32>,
+    /// Retard propre de chaque canal (ms, bits de `f32`), et test de synchro des lampes.
+    lamp_lags: Vec<AtomicU32>,
+    sync_test: AtomicBool,
     /// Publiés par la boucle d'éclairage.
     phase: AtomicU8,
+    /// Avancement de la montée en cours (%) et temps avant son drop prévu, `NO_BUILD` sinon.
+    build: AtomicU8,
+    drop_beats: AtomicU8,
     active_motion: AtomicU8,
     tracker: Mutex<Tracker>,
     palette: Mutex<Palette>,
@@ -165,6 +217,19 @@ struct Shared {
     /// Le groove tient (publié par la boucle d'éclairage), et captures automatiques enregistrées.
     grooving: AtomicBool,
     auto_captures: AtomicU32,
+    /// Reprises : entrée audio rouverte, flux du bridge rouvert ; le bridge est injoignable.
+    audio_restarts: AtomicU32,
+    bridge_restarts: AtomicU32,
+    bridge_lost: AtomicBool,
+    /// Scènes rappelables par note MIDI, dernière rappelée, et réglages changés hors de la
+    /// fenêtre (note MIDI, télécommande).
+    presets: Mutex<Vec<Preset>>,
+    preset: Mutex<Option<String>>,
+    outside_changes: AtomicU32,
+    /// Dispositions que la pièce permet.
+    movements: Vec<Spread>,
+    /// Drop demandé par la télécommande : éclat blanc partout.
+    drop_now: AtomicBool,
     note_flashes: AtomicU32,
     /// Instant (s, horloge commune) de la dernière note, en bits de `f64`.
     last_note: AtomicU64,
@@ -197,6 +262,23 @@ impl Shared {
         self.stop.load(Ordering::Relaxed)
     }
 
+    /// Rappelle une scène : couleurs, flashs, animation, disposition et régisseur.
+    fn apply(&self, preset: &Preset) {
+        *lock(&self.palette) = preset.palette;
+        *lock(&self.dynamics) = preset.dynamics;
+        self.motion.store(preset.motion.index(), Ordering::Relaxed);
+        self.spread.store(preset.spread.index(), Ordering::Relaxed);
+        self.mode.store(preset.flash.index(), Ordering::Relaxed);
+        self.director.store(preset.director, Ordering::Relaxed);
+        *lock(&self.preset) = Some(preset.name.clone());
+        self.outside_changes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Scène rappelée par la note MIDI `note`, s'il y en a une.
+    fn preset_for(&self, note: u8) -> Option<Preset> {
+        lock(&self.presets).iter().find(|preset| preset.note == Some(note)).cloned()
+    }
+
     fn record_reaction(&self, reaction: Duration) {
         let us = reaction.as_micros() as u64;
         self.kick_flashes.fetch_add(1, Ordering::Relaxed);
@@ -225,6 +307,13 @@ pub struct Engine {
     helpers: Vec<JoinHandle<()>>,
     audio: Option<AudioInput>,
     midi: Option<MidiListener>,
+    /// Lampes pilotées : identifiant, nom, rangs de leurs canaux.
+    lamp_map: Vec<(String, String, Vec<usize>)>,
+    /// Entrée audio à rouvrir si elle se perd, et dernière tentative.
+    input: (Option<String>, Backend),
+    audio_retry: Instant,
+    /// Serveur de la télécommande mobile.
+    remote: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Engine {
@@ -243,18 +332,44 @@ impl Engine {
         let area = rt.block_on(api::select_area(bridge, cfg.area_id.as_deref()))?;
         // Sans la liste des lampes (bridge ancien), toute la zone est pilotée.
         let lamps = rt.block_on(api::area_lamps(bridge, &area)).unwrap_or_default();
-        let channels = api::piloted_channels(&area, &lamps, &cfg.excluded_lights);
+        let channels = api::piloted_channels(&area, &lamps, cfg.excluded());
         if channels.is_empty() {
             bail!("aucune lampe à piloter : coche au moins une lampe de la zone");
         }
-        // Canaux pilotés et leur place dans la pièce, de gauche à droite.
-        let lamps_in_room: Vec<(u8, f32)> = channels
+        // Place de chaque canal dans la pièce : celle de sa lampe dans la disposition active, sinon
+        // sa place de gauche à droite dans la zone Hue.
+        let space = Space::of_room(
+            cfg.room(),
+            cfg.active_layout,
+            channels.iter().map(|&id| {
+                let lamp = lamps.iter().find(|lamp| lamp.channels.contains(&id));
+                let hue = match lamp {
+                    Some(lamp) if lamp.channels.len() == 1 => lamp.x,
+                    _ => area.channels.iter().find(|c| c.channel_id == id).map_or(0.0, |c| c.position.x),
+                };
+                (lamp.map_or("", |lamp| lamp.id.as_str()), hue)
+            }),
+        );
+        let movements = space.possible();
+        // Lampes pilotées et leurs canaux (rangs dans `channels`), et retard de chaque canal.
+        let lamp_map: Vec<(String, String, Vec<usize>)> = lamps
             .iter()
-            .map(|&id| (id, area.channels.iter().find(|c| c.channel_id == id).map_or(0.0, |c| c.position.x)))
+            .filter(|lamp| !cfg.excluded().contains(&lamp.id))
+            .map(|lamp| {
+                let ranks = channels.iter().enumerate().filter(|(_, id)| lamp.channels.contains(id)).map(|(i, _)| i).collect();
+                (lamp.id.clone(), lamp.name.clone(), ranks)
+            })
             .collect();
+        let mut channel_lags = vec![0.0f32; channels.len()];
+        for (id, _, ranks) in &lamp_map {
+            let lag = cfg.lamp_delays_ms.get(id).copied().unwrap_or(0.0);
+            for &rank in ranks {
+                channel_lags[rank] = lag.clamp(0.0, MAX_LAMP_DELAY_MS);
+            }
+        }
         let piloted: Vec<String> = lamps
             .iter()
-            .filter(|lamp| !cfg.excluded_lights.contains(&lamp.id))
+            .filter(|lamp| !cfg.excluded().contains(&lamp.id))
             .map(|lamp| lamp.name.clone())
             .collect();
 
@@ -280,10 +395,15 @@ impl Engine {
             mode: AtomicU8::new(options.flash.index()),
             motion: AtomicU8::new(options.motion.index()),
             spread: AtomicU8::new(options.spread.index()),
+            director: AtomicBool::new(options.director),
             active_spread: AtomicU8::new(options.spread.index()),
             rotation: AtomicU8::new(options.rotation.index()),
             lamp_colors: channels.iter().map(|_| AtomicU32::new(0)).collect(),
+            lamp_lags: channel_lags.iter().map(|lag| AtomicU32::new(lag.to_bits())).collect(),
+            sync_test: AtomicBool::new(false),
             phase: AtomicU8::new(Phase::default().index()),
+            build: AtomicU8::new(NO_BUILD),
+            drop_beats: AtomicU8::new(NO_BUILD),
             active_motion: AtomicU8::new(options.motion.index()),
             tracker: Mutex::new(tracker),
             palette: Mutex::new(options.palette),
@@ -293,6 +413,14 @@ impl Engine {
             flashes: AtomicU32::new(0),
             grooving: AtomicBool::new(false),
             auto_captures: AtomicU32::new(0),
+            audio_restarts: AtomicU32::new(0),
+            bridge_restarts: AtomicU32::new(0),
+            bridge_lost: AtomicBool::new(false),
+            presets: Mutex::new(cfg.presets.clone()),
+            preset: Mutex::new(None),
+            outside_changes: AtomicU32::new(0),
+            movements: movements.clone(),
+            drop_now: AtomicBool::new(false),
             note_flashes: AtomicU32::new(0),
             last_note: AtomicU64::new(f64::NEG_INFINITY.to_bits()),
             color: AtomicU32::new(0),
@@ -305,12 +433,21 @@ impl Engine {
             let (rt, features, notes, shared) = (rt.clone(), features.clone(), notes.clone(), shared.clone());
             let mut stream = stream;
             thread::Builder::new().name("lumière".into()).spawn(move || {
-                let result = light_loop(&rt, &mut stream, &lamps_in_room, &features, &notes, &shared, advance);
+                let result = light_loop(&rt, &mut stream, (&channels, &space), &features, &notes, &shared, advance);
                 shared.stop.store(true, Ordering::Relaxed);
                 (stream, result)
             })?
         };
         let mut helpers = Vec::new();
+        let (remote, remote_url) = match &options.remote {
+            Some(token) => {
+                let (listener, port) = remote::bind(&rt)?;
+                let url = format!("http://{}:{port}/{token}/", remote::lan_address(&bridge.ip));
+                let state = Arc::new((shared.clone(), features.clone()));
+                (Some(rt.spawn(remote::serve(listener, state, token.clone()))), Some(url))
+            }
+            None => (None, None),
+        };
         {
             let (features, shared) = (features.clone(), shared.clone());
             helpers.push(thread::Builder::new().name("tempo".into()).spawn(move || tempo_loop(&shared, &features))?);
@@ -340,6 +477,10 @@ impl Engine {
             link: options.link,
             advance,
             resumed_snapshot,
+            remote_url,
+            room: cfg.room().name.clone(),
+            layout: cfg.layout().name.clone(),
+            movements,
         };
         Ok(Self {
             info,
@@ -351,6 +492,10 @@ impl Engine {
             helpers,
             audio: Some(audio),
             midi,
+            lamp_map,
+            input: (options.input.clone(), options.audio),
+            remote,
+            audio_retry: Instant::now(),
         })
     }
 
@@ -387,10 +532,20 @@ impl Engine {
             offset_ms: offset * 1e3,
             reaction_ms: self.shared.average_reaction_ms(),
             glitches: features.glitches(),
-            input_lost: features.input_lost(),
+            input_lost: self.audio_lost(),
+            bridge_lost: self.shared.bridge_lost.load(Ordering::Relaxed),
+            preset: lock(&self.shared.preset).clone(),
+            outside_changes: self.shared.outside_changes.load(Ordering::Relaxed),
+            motion: Motion::from_index(self.shared.motion.load(Ordering::Relaxed)),
+            spread: Spread::from_index(self.shared.spread.load(Ordering::Relaxed)),
+            director: self.shared.director.load(Ordering::Relaxed),
+            palette: self.shared.palette(),
+            dynamics: self.shared.dynamics(),
             link_peers: self.shared.link.then(|| self.shared.link_peers.load(Ordering::Relaxed)),
             color: unpack(color),
             phase: Phase::from_index(self.shared.phase.load(Ordering::Relaxed)),
+            build: Some(self.shared.build.load(Ordering::Relaxed)).filter(|&p| p != NO_BUILD),
+            drop_beats: Some(self.shared.drop_beats.load(Ordering::Relaxed)).filter(|&b| b != NO_BUILD),
             active_motion: Motion::from_index(self.shared.active_motion.load(Ordering::Relaxed)),
             active_spread: Spread::from_index(self.shared.active_spread.load(Ordering::Relaxed)),
             lamp_colors: self.shared.lamp_colors.iter().map(|c| unpack(c.load(Ordering::Relaxed))).collect(),
@@ -406,6 +561,65 @@ impl Engine {
 
     pub fn set_spread(&self, spread: Spread) {
         self.shared.spread.store(spread.index(), Ordering::Relaxed);
+    }
+
+    pub fn set_director(&self, on: bool) {
+        self.shared.director.store(on, Ordering::Relaxed);
+    }
+
+    /// L'entrée est perdue : le pilote l'a signalé, ou plus aucun bloc n'arrive (l'ASIO se tait
+    /// sans prévenir). La sortie du PC, elle, n'envoie rien quand rien ne joue.
+    fn audio_lost(&self) -> bool {
+        let silent = self.input.1 != Backend::Output && self.features.block_age().is_some_and(|age| age > AUDIO_STALL);
+        self.features.input_lost() || silent
+    }
+
+    /// Entrée audio perdue (câble, pilote) : tente de la rouvrir toutes les 2 s. À appeler
+    /// régulièrement depuis le fil qui possède le moteur ; rend le résultat d'une tentative.
+    pub fn recover_audio(&mut self) -> Option<Result<()>> {
+        if !self.audio_lost() || self.audio_retry.elapsed() < AUDIO_RETRY {
+            return None;
+        }
+        self.audio_retry = Instant::now();
+        // L'ancien flux doit lâcher le pilote (l'ASIO n'en accepte qu'un) avant d'en rouvrir un.
+        self.audio = None;
+        let (input, backend) = &self.input;
+        let reopened = AudioInput::start_into(input.as_deref(), *backend, self.features.clone(), self.capture.clone());
+        Some(reopened.map(|audio| {
+            self.features.clear_input_lost();
+            self.shared.audio_restarts.fetch_add(1, Ordering::Relaxed);
+            self.audio = Some(audio);
+        }))
+    }
+
+    /// Lampes pilotées : identifiant, nom et retard propre (ms).
+    pub fn lamps(&self) -> Vec<(String, String, f32)> {
+        self.lamp_map
+            .iter()
+            .map(|(id, name, ranks)| {
+                let lag = ranks.first().map_or(0.0, |&rank| f32::from_bits(self.shared.lamp_lags[rank].load(Ordering::Relaxed)));
+                (id.clone(), name.clone(), lag)
+            })
+            .collect()
+    }
+
+    /// Retard propre d'une lampe : ses flashs partent d'autant plus tôt que les autres.
+    pub fn set_lamp_delay(&self, id: &str, ms: f32) {
+        let ms = ms.clamp(0.0, MAX_LAMP_DELAY_MS);
+        for (_, _, ranks) in self.lamp_map.iter().filter(|(lamp, _, _)| lamp == id) {
+            for &rank in ranks {
+                self.shared.lamp_lags[rank].store(ms.to_bits(), Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Test de synchro : toutes les lampes flashent en blanc sur chaque temps.
+    pub fn set_sync_test(&self, on: bool) {
+        self.shared.sync_test.store(on, Ordering::Relaxed);
+    }
+
+    pub fn sync_test(&self) -> bool {
+        self.shared.sync_test.load(Ordering::Relaxed)
     }
 
     pub fn set_rotation(&self, rotation: Rotation) {
@@ -426,6 +640,23 @@ impl Engine {
 
     pub fn set_dynamics(&self, dynamics: Dynamics) {
         *self.shared.dynamics.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = dynamics;
+    }
+
+    /// Rappelle une scène.
+    pub fn apply_preset(&self, preset: &Preset) {
+        self.shared.apply(preset);
+    }
+
+    /// Rappelle la scène n° `index` (à partir de 0) ; rend son nom.
+    pub fn recall_preset(&self, index: usize) -> Option<String> {
+        let preset = lock(&self.shared.presets).get(index).cloned()?;
+        self.shared.apply(&preset);
+        Some(preset.name)
+    }
+
+    /// Scènes rappelables par note MIDI.
+    pub fn set_presets(&self, presets: Vec<Preset>) {
+        *lock(&self.shared.presets) = presets;
     }
 
     /// Impose un tempo (le phase reste calée sur les kicks).
@@ -483,6 +714,9 @@ impl Engine {
 
     fn shutdown(&mut self) -> Result<Summary> {
         self.shared.stop.store(true, Ordering::Relaxed);
+        if let Some(remote) = self.remote.take() {
+            remote.abort();
+        }
         let light = self.light.take().context("moteur déjà arrêté")?;
         let (stream, result) = light.join().map_err(|_| anyhow!("la boucle d'éclairage a planté"))?;
         for helper in self.helpers.drain(..) {
@@ -510,6 +744,8 @@ impl Engine {
             input_latency_ms: self.features.input_latency().as_secs_f64() * 1e3,
             glitches: self.features.glitches(),
             input_lost: self.features.input_lost(),
+            audio_restarts: shared.audio_restarts.load(Ordering::Relaxed),
+            bridge_restarts: shared.bridge_restarts.load(Ordering::Relaxed),
             restore,
         })
     }
@@ -536,8 +772,13 @@ impl fmt::Display for Info {
         if !self.lamps.is_empty() {
             write!(f, "\nLampes pilotées : {}.", self.lamps.join(", "))?;
         }
+        let movements: Vec<&str> = self.movements.iter().filter(|&&m| m != Spread::Auto).map(|m| m.label()).collect();
+        write!(f, "\nPièce « {} », configuration « {} » : {}.", self.room, self.layout, movements.join(", "))?;
         if let Some(port) = &self.midi_port {
             write!(f, "\nMIDI : « {port} » ; chaque note flashe à sa couleur.")?;
+        }
+        if let Some(url) = &self.remote_url {
+            write!(f, "\nTélécommande mobile : {url} (téléphone sur le même Wi-Fi que le PC).")?;
         }
         if self.link {
             write!(f, "\nAbleton Link : tempo et phase suivent la session (autorise l'accès réseau si Windows le demande).")?;
@@ -582,6 +823,12 @@ impl fmt::Display for Summary {
         if self.input_lost {
             write!(f, "\nL'entrée audio a été perdue en cours de route (câble ou pilote).")?;
         }
+        if self.audio_restarts > 0 {
+            write!(f, "\nEntrée audio rouverte {} fois.", self.audio_restarts)?;
+        }
+        if self.bridge_restarts > 0 {
+            write!(f, "\nFlux du bridge rouvert {} fois.", self.bridge_restarts)?;
+        }
         match &self.restore {
             Ok(restored) => write!(f, "\n{restored}"),
             Err(reason) => write!(f, "\n⚠ {reason}"),
@@ -589,287 +836,8 @@ impl fmt::Display for Summary {
     }
 }
 
-/// Flashe selon le planificateur (vrais kicks, anticipés quand ils sont attendus) et sur chaque
-/// note MIDI, et entretient le flux à 60 Hz entre deux flashs.
-fn light_loop(
-    rt: &Runtime,
-    stream: &mut HueStream,
-    lamps: &[(u8, f32)],
-    features: &Features,
-    notes: &Notes,
-    shared: &Shared,
-    advance: Duration,
-) -> Result<()> {
-    let mut planner = FlashPlanner::new(shared.mode(), advance.as_secs_f64(), CONFIRM_RANGE.1);
-    let mut look = ReactiveLook::new(shared.palette());
-    look.set_lamps(&lamps.iter().map(|&(_, x)| x).collect::<Vec<f32>>());
-    let mut frame: Vec<(u8, Rgb)> = lamps.iter().map(|&(id, _)| (id, Rgb::OFF)).collect();
-    let mut seen = features.kicks();
-    let mut seen_notes = notes.count();
-    let mut last = Instant::now();
-    let mut next_frame = last;
-    while !shared.stopped() {
-        planner.mode = shared.mode();
-        // Le kick d'un flash anticipé arrive après l'âge d'un bloc audio : on l'attend jusque-là.
-        planner.confirm_window = (features.input_latency().as_secs_f64() + CONFIRM_MARGIN)
-            .clamp(CONFIRM_RANGE.0, CONFIRM_RANGE.1);
-        let clock = shared.tracker().clock();
-        let deadline = match planner.next_event(&clock, features.seconds(Instant::now())) {
-            Some(event) => next_frame.min(features.instant(event)),
-            None => next_frame,
-        };
-        timing::sleep_until_or(deadline, || features.kicks() != seen || notes.count() != seen_notes);
 
-        let kicks = features.kicks();
-        let kick = (kicks != seen).then(|| features.seconds(features.last_kick()) - KICK_DETECTION_DELAY);
-        seen = kicks;
-        if let Some(at) = kick {
-            shared.tracker().on_kick(at);
-            look.kick_detected();
-        }
-        let note_count = notes.count();
-        let note = (note_count != seen_notes).then(|| notes.last());
-        seen_notes = note_count;
-
-        let now = Instant::now();
-        let (clock, locked, beat_time) = {
-            let tracker = shared.tracker();
-            let clock = tracker.clock();
-            // Place sur la grille, recalée sur la phrase quand la structure est reconnue : les
-            // mouvements lents de la lumière s'y calent, même pendant un break.
-            let beat_time = clock.period().map(|period| {
-                let beats = (features.seconds(now) - clock.anchor()) / period;
-                let last = clock.anchor() + beats.floor() * period;
-                let shift = tracker.position(last).map_or(0.0, |p| f64::from(p.phrase) - beats.floor().rem_euclid(16.0));
-                BeatTime { beats: beats + shift, period: period as f32 }
-            });
-            (clock, tracker.locked(features.seconds(now)), beat_time)
-        };
-        let action = planner.poll(&clock, features.seconds(now), kick);
-        // La détection cherche les kicks sur les temps dès que le tempo est sûr, et se méfie de
-        // ce qui tombe entre eux tant que le groove tient.
-        features.set_grid(Grid {
-            period: clock.period().unwrap_or(0.0),
-            anchor: clock.anchor(),
-            locked,
-            groove: planner.in_groove(&clock, features.seconds(now)),
-        });
-        shared.grooving.store(planner.in_groove(&clock, features.seconds(now)), Ordering::Relaxed);
-        match action {
-            Action::Flash { reactive } => {
-                // Place du temps flashé dans la structure : tête de phrase ou de mesure.
-                let at = if reactive { kick.unwrap_or(features.seconds(now)) } else { features.seconds(now) + advance.as_secs_f64() };
-                match shared.tracker().position(at) {
-                    Some(p) if p.phrase == 0 => look.kick_at(Accent::Phrase),
-                    Some(p) if p.beat == 0 => look.kick_at(Accent::Bar),
-                    Some(_) => look.kick_at(Accent::Beat),
-                    None => look.kick(),
-                }
-            }
-            Action::Cancel => look.cancel_flash(),
-            Action::None => {}
-        }
-        if let Some((pitch, velocity)) = note {
-            look.note(note_hue(pitch), velocity);
-            shared.note_flashes.fetch_add(1, Ordering::Relaxed);
-            shared.last_note.store(features.seconds(now).to_bits(), Ordering::Relaxed);
-        }
-        look.palette = shared.palette();
-        look.dynamics = shared.dynamics();
-        look.motion = Motion::from_index(shared.motion.load(Ordering::Relaxed));
-        look.spread = Spread::from_index(shared.spread.load(Ordering::Relaxed));
-        look.rotation = Rotation::from_index(shared.rotation.load(Ordering::Relaxed));
-        look.set_beat_time(beat_time);
-        let colors = look.render_lamps(now - last, features.levels());
-        for ((_, c), (color, published)) in frame.iter_mut().zip(colors.iter().zip(&shared.lamp_colors)) {
-            *c = *color;
-            published.store(pack(*color), Ordering::Relaxed);
-        }
-        // Couleur résumée (aperçu, fond de la scène) : la plus lumineuse des lampes.
-        let brightest = colors.iter().copied().max_by_key(|c| c.r.max(c.g).max(c.b)).unwrap_or(Rgb::OFF);
-        shared.color.store(pack(brightest), Ordering::Relaxed);
-        shared.phase.store(look.phase().index(), Ordering::Relaxed);
-        shared.active_motion.store(look.active_motion().index(), Ordering::Relaxed);
-        shared.active_spread.store(look.active_spread().index(), Ordering::Relaxed);
-        last = now;
-        rt.block_on(stream.send(&frame))?;
-        if let Action::Flash { reactive } = action {
-            shared.flashes.fetch_add(1, Ordering::Relaxed);
-            if reactive {
-                shared.record_reaction(Instant::now().saturating_duration_since(features.last_kick()));
-            }
-        }
-        next_frame = now + FRAME_PERIOD;
-    }
-    Ok(())
-}
-
-/// Transmet la force d'attaque au suivi du tempo et réestime le tempo une fois par seconde, hors
-/// de la boucle d'éclairage.
-fn tempo_loop(shared: &Shared, features: &Features) {
-    let mut next = Instant::now() + TEMPO_UPDATE;
-    let mut seen = 0;
-    while !shared.stopped() {
-        thread::sleep(Duration::from_millis(50));
-        {
-            let mut tracker = shared.tracker();
-            features.read_onsets(&mut seen, |t, strength| tracker.on_onset(t, strength));
-        }
-        let now = Instant::now();
-        if now >= next {
-            shared.tracker().update(features.seconds(now));
-            next = now + TEMPO_UPDATE;
-        }
-    }
-}
-
-/// Suit la session Ableton Link et impose son tempo et sa phase à l'horloge.
-fn link_loop(shared: &Shared, features: &Features, bpm: Option<f64>) {
-    let mut session = LinkSession::join(bpm);
-    while !shared.stopped() {
-        let beat = session.read(features.seconds(Instant::now()));
-        shared.tracker().set_link(beat.bpm, beat.beat_time);
-        shared.link_peers.store(beat.peers, Ordering::Relaxed);
-        thread::sleep(LINK_POLL);
-    }
-}
-
-/// Couleur `0x00RRGGBB` en sRGB 8 bits.
-fn unpack(color: u32) -> [u8; 3] {
-    [(color >> 16) as u8, (color >> 8) as u8, color as u8]
-}
-
-fn pack(color: Rgb) -> u32 {
-    u32::from(color.r >> 8) << 16 | u32::from(color.g >> 8) << 8 | u32::from(color.b >> 8)
-}
-
-/// Écrit les dernières secondes de l'entrée audio dans le dossier des captures, avec une fiche
-/// JSON du même nom (contexte de la capture, pour l'annoter au banc d'essai).
-fn write_capture(capture: &Mutex<Capture>, sheet: &serde_json::Value) -> Result<PathBuf> {
-    let (rate, samples) = {
-        let capture = capture.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        (capture.rate(), capture.snapshot())
-    };
-    let dir = Config::captures_dir()?;
-    fs::create_dir_all(&dir)?;
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let path = (0..)
-        .map(|n| dir.join(if n == 0 { format!("capture-{stamp}.wav") } else { format!("capture-{stamp}-{n}.wav") }))
-        .find(|path| !path.exists())
-        .context("nom de capture introuvable")?;
-    wav::write_mono_f32(&path, rate, &samples)?;
-    fs::write(path.with_extension("json"), serde_json::to_string_pretty(sheet)?)?;
-    Ok(path)
-}
-
-/// Décide des captures automatiques : quand le groove décroche alors que les basses restent aussi
-/// fortes qu'avant, ce n'est pas un break, la détection a perdu les kicks. Les instants sont en
-/// secondes.
-#[derive(Debug, Default)]
-struct AutoTrigger {
-    grooving_since: Option<f64>,
-    /// Basses brutes pendant le groove (moyenne glissante).
-    groove_bass: f32,
-    /// Perte du groove : instant, puis cumul et nombre des niveaux de basse depuis.
-    lost: Option<(f64, f32, u32)>,
-    last_saved: Option<f64>,
-    saved: u32,
-}
-
-impl AutoTrigger {
-    /// Une mesure ; rend le temps écoulé depuis la perte du groove quand il faut capturer.
-    fn step(&mut self, now: f64, dt: f32, grooving: bool, bass: f32) -> Option<f64> {
-        if grooving {
-            self.grooving_since.get_or_insert(now);
-            self.groove_bass += (bass - self.groove_bass) * (dt / AUTO_BASS_MEMORY).min(1.0);
-            self.lost = None;
-            return None;
-        }
-        if let Some(since) = self.grooving_since.take()
-            && now - since >= AUTO_MIN_GROOVE.as_secs_f64()
-        {
-            self.lost = Some((now, 0.0, 0));
-        }
-        let (at, sum, count) = self.lost.as_mut()?;
-        *sum += bass;
-        *count += 1;
-        let after = now - *at;
-        if after < AUTO_AFTER.as_secs_f64() {
-            return None;
-        }
-        let loud = *sum / *count as f32 >= AUTO_LOUD * self.groove_bass;
-        let spaced = self.last_saved.is_none_or(|saved| now - saved >= AUTO_SPACING.as_secs_f64());
-        self.lost = None;
-        (loud && spaced && self.saved < AUTO_MAX).then(|| {
-            self.last_saved = Some(now);
-            self.saved += 1;
-            after
-        })
-    }
-}
-
-/// Enregistre de lui-même les dernières secondes quand le groove décroche dans un passage fort
-/// (voir `AutoTrigger`). La capture, prise 8 s après, couvre l'avant et l'après.
-fn auto_capture_loop(shared: &Shared, features: &Features, capture: &Mutex<Capture>) {
-    let mut trigger = AutoTrigger::default();
-    let start = Instant::now();
-    let dt = AUTO_POLL.as_secs_f32();
-    while !shared.stopped() {
-        thread::sleep(AUTO_POLL);
-        let now = start.elapsed().as_secs_f64();
-        let grooving = shared.grooving.load(Ordering::Relaxed);
-        let Some(after) = trigger.step(now, dt, grooving, features.levels().raw_bass) else { continue };
-        let sheet = json!({
-            "auto": true,
-            "raison": "groove perdu alors que les basses restent fortes",
-            "groove_perdu_a": f64::from(CAPTURE_SECONDS) - after,
-            "bpm": shared.tracker().clock().bpm(),
-        });
-        if write_capture(capture, &sheet).is_ok() {
-            shared.auto_captures.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Fait tourner le déclencheur toutes les 250 ms : (durée, groove, basses) par étape.
-    fn run(steps: &[(f64, bool, f32)]) -> Vec<f64> {
-        let mut trigger = AutoTrigger::default();
-        let (mut now, mut fired) = (0.0, Vec::new());
-        for &(duration, grooving, bass) in steps {
-            let end = now + duration;
-            while now < end {
-                now += 0.25;
-                if trigger.step(now, 0.25, grooving, bass).is_some() {
-                    fired.push(now);
-                }
-            }
-        }
-        fired
-    }
-
-    #[test]
-    fn a_lost_groove_in_a_loud_passage_is_captured_after_eight_seconds() {
-        let fired = run(&[(20.0, true, 1.0), (12.0, false, 0.9)]);
-        assert_eq!(fired.len(), 1, "{fired:?}");
-        assert!((fired[0] - 28.0).abs() < 0.3, "{fired:?}");
-    }
-
-    #[test]
-    fn a_break_a_short_groove_or_a_quick_recovery_is_not_captured() {
-        assert!(run(&[(20.0, true, 1.0), (12.0, false, 0.1)]).is_empty(), "break : les basses tombent");
-        assert!(run(&[(5.0, true, 1.0), (12.0, false, 0.9)]).is_empty(), "groove trop court");
-        assert!(run(&[(20.0, true, 1.0), (4.0, false, 0.9), (10.0, true, 1.0)]).is_empty(), "groove revenu");
-    }
-
-    #[test]
-    fn captures_are_spaced_by_two_minutes() {
-        let lose = [(20.0, true, 1.0), (12.0, false, 0.9)];
-        let fired = run(&[lose, lose, lose, lose, lose].concat());
-        assert_eq!(fired.len(), 2, "{fired:?}");
-        assert!(fired[1] - fired[0] >= 120.0);
-    }
+/// Verrou qui survit à un fil qui a paniqué en le tenant.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

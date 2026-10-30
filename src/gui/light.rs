@@ -1,10 +1,12 @@
-//! Réglages de la lumière, rangés en trois pages (mouvement, couleurs, flashs) : les mêmes avant
-//! le lancement, dans la colonne de droite, et pendant le live, dans le dock de la scène.
+//! Réglages de la lumière, rangés en quatre pages (mouvement, couleurs, flashs, scènes) : les
+//! mêmes avant le lancement, dans la colonne de droite, et pendant le live, dans le dock de la scène.
+
+use std::sync::PoisonError;
 
 use eframe::egui::{self, Color32, Ui, vec2};
 
 use super::theme::{self, ACCENT, CardColors, MUTED};
-use super::{App, motion_text, rotation_text, spread_text};
+use super::{App, Bridge, motion_text, rotation_text, spread_text};
 use crate::engine::Status;
 use crate::look::{Motion, Rotation, Spread};
 
@@ -14,9 +16,11 @@ pub(super) enum Page {
     Motion,
     Colors,
     Flashes,
+    Presets,
 }
 
-pub(super) const PAGES: [(Page, &str); 3] = [(Page::Motion, "Mouvement"), (Page::Colors, "Couleurs"), (Page::Flashes, "Flashs")];
+pub(super) const PAGES: [(Page, &str); 4] =
+    [(Page::Motion, "Mouvement"), (Page::Colors, "Couleurs"), (Page::Flashes, "Flashs"), (Page::Presets, "Scènes")];
 
 /// Habillage des réglages selon l'écran.
 pub(super) struct Skin {
@@ -52,6 +56,7 @@ impl App {
             Page::Motion => self.motion_page(ui, width, skin, status),
             Page::Colors => self.colors_page(ui, width, skin),
             Page::Flashes => self.flashes_page(ui, width, skin),
+            Page::Presets => self.presets_panel(ui, width, if skin.subtitles { 5 } else { 2 }, skin.card, skin.label),
         }
     }
 
@@ -72,7 +77,7 @@ impl App {
         });
         ui.add_space(6.0);
         theme::section(ui, "DISPOSITION DES LAMPES");
-        grid(ui, width, &Spread::ALL, 140.0, |ui, size, spread| {
+        grid(ui, width, &self.spreads(), 140.0, |ui, size, spread| {
             let (title, subtitle) = spread_text(spread);
             let mut subtitle = if skin.subtitles { subtitle.to_owned() } else { String::new() };
             if let Some(status) = status.filter(|_| spread == Spread::Auto && self.settings.spread == Spread::Auto) {
@@ -84,8 +89,24 @@ impl App {
                 self.set_spread(spread);
             }
         });
+        self.director_chip(ui);
         ui.add_space(6.0);
         knobs(ui, width, &[Knob::Swell], |ui, knob| self.knob(ui, knob, skin.label));
+    }
+
+    /// Dispositions que la pièce permet (et celle choisie, même si elle ne l'est plus).
+    fn spreads(&self) -> Vec<Spread> {
+        let mut possible = match &self.engine {
+            Some(engine) => engine.info.movements.clone(),
+            None => match &*self.bridge.lock().unwrap_or_else(PoisonError::into_inner) {
+                Bridge::Ready { lamps, .. } => self.possible_spreads(lamps),
+                _ => Spread::ALL.to_vec(),
+            },
+        };
+        if !possible.contains(&self.settings.spread) {
+            possible.push(self.settings.spread);
+        }
+        possible
     }
 
     fn colors_page(&mut self, ui: &mut Ui, width: f32, skin: &Skin) {

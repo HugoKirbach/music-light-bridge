@@ -4,15 +4,17 @@
 //!
 //! Les instants sont exprimés en secondes, comme ceux de l'horloge de tempo.
 
-use crate::tempo::BeatClock;
+use crate::rhythm::Rhythm;
 
 /// Temps consécutifs confirmés par un kick à partir desquels on anticipe le suivant.
 const STREAK_TO_ANTICIPATE: u32 = 2;
 /// Temps consécutifs confirmés à partir desquels le groove est établi : la détection attend
 /// alors les kicks sur les temps et se méfie de ce qui tombe à côté.
 const GROOVE_STREAK: u32 = 4;
-/// Le groove tombe si aucun temps n'a été confirmé depuis 1,5 période (un kick manqué).
+/// Le groove tombe si aucun kick attendu n'a été confirmé depuis 1,5 temps (un kick manqué), ou
+/// depuis le plus long écart du motif et un demi-temps (demi-tempo : un kick tous les deux temps).
 const GROOVE_TIMEOUT: f64 = 1.5;
+const GROOVE_GRACE: f64 = 0.5;
 /// Un kick à moins de 15 % de période d'un temps confirme ce temps.
 const ON_BEAT: f64 = 0.15;
 /// Un flash anticipé encore dû avec ce retard (réveil tardif) part quand même.
@@ -86,9 +88,12 @@ pub enum Action {
 pub struct FlashPlanner {
     pub mode: FlashMode,
     /// Avance des flashs anticipés : la latence de la chaîne Hue (s).
-    advance: f64,
+    pub advance: f64,
     /// Délai après un temps anticipé au-delà duquel son kick est déclaré absent (s).
     pub confirm_window: f64,
+    /// En groove, un coup hors du motif (donk, note de basse, clap) ne flashe pas : la lumière ne tape
+    /// que sur les kicks attendus. Hors montée seulement, où les roulements doivent flasher.
+    pub hold_off_pattern: bool,
     /// Dernier temps confirmé par un kick, et nombre de temps consécutifs confirmés.
     last_confirmed: Option<f64>,
     streak: u32,
@@ -100,10 +105,58 @@ pub struct FlashPlanner {
     cancelled: Option<f64>,
     /// Dernier temps flashé, pour ne jamais flasher deux fois le même.
     last_flashed: Option<f64>,
+    /// Dernier temps passé sans flash parce que le kick s'y tait d'habitude (trou prévu).
+    skipped: Option<f64>,
+    drops: KickDrops,
 }
 
-fn same_beat(a: f64, b: f64, period: f64) -> bool {
-    (a - b).abs() < period / 2.0
+/// Trous de kick qui reviennent à chaque phrase (« kick drop » de hard trance ou de hard techno :
+/// le kick se tait un ou deux temps avant la phrase suivante). Le trou se répète au même endroit :
+/// la lumière s'y tait au lieu de flasher dans le vide.
+#[derive(Debug, Default)]
+struct KickDrops {
+    /// Premier temps resté sans kick en plein groove, tant que le kick n'est pas revenu.
+    open: Option<f64>,
+    /// Début et durée du dernier trou.
+    last: Option<(f64, f64)>,
+    /// Écart entre les débuts des deux derniers trous, quand c'est un nombre entier de mesures.
+    cycle: Option<f64>,
+}
+
+/// Un trou de kick dure de deux temps (un seul : sans doute un kick noyé dans le mix) à deux
+/// mesures (au-delà : un break), et revient au plus toutes les seize mesures.
+const DROP_BEATS: (f64, f64) = (2.0, 8.0);
+const DROP_CYCLE_BARS: f64 = 16.0;
+
+impl KickDrops {
+    /// Le kick revient au temps `hit` : le trou en cours se referme, et s'il a commencé un nombre
+    /// entier de mesures après le précédent, il reviendra autant de mesures plus tard.
+    fn close(&mut self, rhythm: &Rhythm, hit: f64) {
+        let Some(start) = self.open.take() else { return };
+        let length = hit - start;
+        let half = rhythm.step() / 2.0;
+        if length < DROP_BEATS.0 * rhythm.period - half {
+            return;
+        }
+        if length > DROP_BEATS.1 * rhythm.period + half {
+            *self = Self::default();
+            return;
+        }
+        let bar = 4.0 * rhythm.period;
+        self.cycle = self.last.map(|(previous, _)| start - previous).filter(|&cycle| {
+            let bars = (cycle / bar).round();
+            (1.0..=DROP_CYCLE_BARS).contains(&bars) && (cycle - bars * bar).abs() < half
+        });
+        self.last = Some((start, length));
+    }
+
+    /// Le temps `hit` tombe dans le prochain trou attendu.
+    fn expected(&self, rhythm: &Rhythm, hit: f64) -> bool {
+        let (Some((start, length)), Some(cycle)) = (self.last, self.cycle) else { return false };
+        let half = rhythm.step() / 2.0;
+        let from = start + cycle;
+        hit > from - half && hit < from + length - half
+    }
 }
 
 impl FlashPlanner {
@@ -112,27 +165,32 @@ impl FlashPlanner {
             mode,
             advance,
             confirm_window,
+            hold_off_pattern: false,
             last_confirmed: None,
             streak: 0,
             missed: false,
             pending: None,
             cancelled: None,
             last_flashed: None,
+            skipped: None,
+            drops: KickDrops::default(),
         }
     }
 
-    /// Les kicks tombent régulièrement sur les temps, et le dernier vient d'être confirmé.
-    pub fn in_groove(&self, clock: &BeatClock, now: f64) -> bool {
-        let (Some(period), Some(last)) = (clock.period(), self.last_confirmed) else {
+    /// Les kicks tombent régulièrement là où le motif les attend, et le dernier vient d'être
+    /// confirmé.
+    pub fn in_groove(&self, rhythm: Option<&Rhythm>, now: f64) -> bool {
+        let (Some(rhythm), Some(last)) = (rhythm, self.last_confirmed) else {
             return false;
         };
-        self.streak >= GROOVE_STREAK && now - last < GROOVE_TIMEOUT * period
+        let timeout = (GROOVE_TIMEOUT * rhythm.period).max(rhythm.longest_gap() + GROOVE_GRACE * rhythm.period);
+        self.streak >= GROOVE_STREAK && now - last < timeout
     }
 
     /// Prochain instant où la boucle d'éclairage doit se réveiller (flash anticipé ou annulation).
-    pub fn next_event(&self, clock: &BeatClock, now: f64) -> Option<f64> {
-        let flash = self.anticipated_beat(clock, now).map(|beat| beat - self.advance);
-        let expiry = self.pending.map(|beat| beat + self.confirm_window);
+    pub fn next_event(&self, rhythm: Option<&Rhythm>, now: f64) -> Option<f64> {
+        let flash = self.anticipated_hit(rhythm, now).map(|hit| hit - self.advance);
+        let expiry = self.pending.map(|hit| hit + self.confirm_window);
         match (flash, expiry) {
             (Some(flash), Some(expiry)) => Some(flash.min(expiry)),
             (flash, expiry) => flash.or(expiry),
@@ -140,31 +198,42 @@ impl FlashPlanner {
     }
 
     /// Action d'éclairage à l'instant `now` ; `kick` est l'instant du kick tout juste détecté.
-    pub fn poll(&mut self, clock: &BeatClock, now: f64, kick: Option<f64>) -> Action {
-        let mut action = kick.map_or(Action::None, |t| self.on_kick(clock, t));
-        if let Some(beat) = self.anticipated_beat(clock, now)
-            && now >= beat - self.advance
+    pub fn poll(&mut self, rhythm: Option<&Rhythm>, now: f64, kick: Option<f64>) -> Action {
+        let mut action = kick.map_or(Action::None, |t| self.on_kick(rhythm, t));
+        if let Some(hit) = self.anticipated_hit(rhythm, now)
+            && now >= hit - self.advance
         {
-            self.last_flashed = Some(beat);
-            if self.mode == FlashMode::Kicks {
-                self.pending = Some(beat);
+            if self.mode == FlashMode::Kicks && rhythm.is_some_and(|rhythm| self.drops.expected(rhythm, hit)) {
+                // Le kick se tait ici à chaque phrase : pas de flash, mais on le guette quand même.
+                self.skipped = Some(hit);
+                self.pending = Some(hit);
+            } else {
+                self.last_flashed = Some(hit);
+                if self.mode == FlashMode::Kicks {
+                    self.pending = Some(hit);
+                }
+                action = Action::Flash { reactive: false };
             }
-            action = Action::Flash { reactive: false };
         }
-        if let Some(beat) = self.pending
-            && now >= beat + self.confirm_window
+        if let Some(hit) = self.pending
+            && now >= hit + self.confirm_window
         {
             self.pending = None;
-            if self.streak >= GROOVE_STREAK && !self.missed {
+            if self.skipped == Some(hit) {
+                // Le trou attendu est venu : le groove le traverse en silence.
+                self.last_confirmed = Some(hit);
+                self.drops.open.get_or_insert(hit);
+            } else if self.streak >= GROOVE_STREAK && !self.missed {
                 // Un seul kick manqué en plein groove : sans doute noyé dans le mix. Le flash
-                // reste, et le temps compte comme confirmé pour garder l'anticipation.
+                // reste, et le coup compte comme confirmé pour garder l'anticipation.
                 self.missed = true;
-                self.last_confirmed = Some(beat);
+                self.last_confirmed = Some(hit);
+                self.drops.open.get_or_insert(hit);
             } else {
                 // Second kick manqué de suite, ou pas de groove (début de break) : on éteint. Sans
-                // confirmation de ce temps, l'anticipation s'arrête d'elle-même ; un kick en retard
+                // confirmation de ce coup, l'anticipation s'arrête d'elle-même ; un kick en retard
                 // reflashera.
-                self.cancelled = Some(beat);
+                self.cancelled = Some(hit);
                 if action == Action::None {
                     action = Action::Cancel;
                 }
@@ -173,63 +242,72 @@ impl FlashPlanner {
         action
     }
 
-    fn on_kick(&mut self, clock: &BeatClock, t: f64) -> Action {
-        let on_beat = clock
-            .period()
-            .zip(clock.nearest_beat(t))
-            .filter(|&(period, beat)| (t - beat).abs() < ON_BEAT * period);
-        if let Some((period, beat)) = on_beat {
-            self.confirm(beat, period);
+    fn on_kick(&mut self, rhythm: Option<&Rhythm>, t: f64) -> Action {
+        let on_hit = rhythm
+            .and_then(|rhythm| rhythm.nearest_hit(t).map(|hit| (rhythm, hit)))
+            .filter(|&(rhythm, hit)| (t - hit).abs() < ON_BEAT * rhythm.period);
+        if let Some((rhythm, hit)) = on_hit {
+            self.confirm(rhythm, hit);
         }
         match self.mode {
             FlashMode::EveryBeat => Action::None,
             FlashMode::Reactive => Action::Flash { reactive: true },
-            FlashMode::Kicks => match on_beat {
+            FlashMode::Kicks => match on_hit {
                 // Kick arrivé après l'annulation de son flash anticipé : on le rallume.
-                Some((period, beat)) if self.cancelled.is_some_and(|c| same_beat(c, beat, period)) => {
+                Some((rhythm, hit)) if self.cancelled.is_some_and(|c| rhythm.same_hit(c, hit)) => {
                     self.cancelled = None;
                     Action::Flash { reactive: true }
                 }
                 // Kick anticipé : son flash est déjà parti.
-                Some((period, beat)) if self.last_flashed.is_some_and(|f| same_beat(f, beat, period)) => {
-                    Action::None
-                }
-                Some((_, beat)) => {
-                    self.last_flashed = Some(beat);
+                Some((rhythm, hit)) if self.last_flashed.is_some_and(|f| rhythm.same_hit(f, hit)) => Action::None,
+                Some((_, hit)) => {
+                    self.last_flashed = Some(hit);
                     Action::Flash { reactive: true }
                 }
-                // Kick hors temps (roulement de montée) ou tempo encore inconnu.
+                // Hors du motif en plein groove : pas un kick attendu, il ne flashe pas.
+                None if self.hold_off_pattern && self.in_groove(rhythm, t) => Action::None,
+                // Kick hors du motif (roulement de montée) ou tempo encore inconnu.
                 None => Action::Flash { reactive: true },
             },
         }
     }
 
-    fn confirm(&mut self, beat: f64, period: f64) {
+    fn confirm(&mut self, rhythm: &Rhythm, hit: f64) {
         self.streak = match self.last_confirmed {
-            Some(previous) if same_beat(previous + period, beat, period) => self.streak + 1,
-            Some(previous) if same_beat(previous, beat, period) => self.streak,
+            Some(previous) if rhythm.following(previous).is_some_and(|next| rhythm.same_hit(next, hit)) => self.streak + 1,
+            Some(previous) if rhythm.same_hit(previous, hit) => self.streak,
             _ => 1,
         };
-        self.last_confirmed = Some(beat);
+        self.last_confirmed = Some(hit);
         self.missed = false;
-        if self.pending.is_some_and(|pending| same_beat(pending, beat, period)) {
+        if self.pending.is_some_and(|pending| rhythm.same_hit(pending, hit)) {
             self.pending = None;
         }
+        if self.drops.open.is_none() && self.skipped.is_some_and(|skipped| rhythm.same_hit(skipped, hit)) {
+            // Le trou attendu n'est pas venu : le kick a gardé sa place, on oublie le trou.
+            self.drops.cycle = None;
+        }
+        self.drops.close(rhythm, hit);
     }
 
-    /// Temps dont le flash doit partir en avance, s'il y en a un.
-    fn anticipated_beat(&self, clock: &BeatClock, now: f64) -> Option<f64> {
-        let period = clock.period()?;
-        let not_flashed = self.last_flashed.map_or(f64::NEG_INFINITY, |beat| beat + period / 2.0);
-        let beat = clock.next_beat_after((now + self.advance - LATE_LIMIT * period).max(not_flashed))?;
+    /// Kick attendu dont le flash doit partir en avance, s'il y en a un.
+    fn anticipated_hit(&self, rhythm: Option<&Rhythm>, now: f64) -> Option<f64> {
+        let rhythm = match self.mode {
+            FlashMode::Reactive => return None,
+            // Chaque temps, quel que soit le motif.
+            FlashMode::EveryBeat => rhythm?.beats(),
+            FlashMode::Kicks => *rhythm?,
+        };
+        let passed = [self.last_flashed, self.skipped].into_iter().flatten().fold(f64::NEG_INFINITY, f64::max);
+        let not_flashed = passed + rhythm.step() / 2.0;
+        let hit = rhythm.next_hit_after((now + self.advance - LATE_LIMIT * rhythm.period).max(not_flashed))?;
         match self.mode {
-            FlashMode::Reactive => None,
-            FlashMode::EveryBeat => Some(beat),
             FlashMode::Kicks => {
                 let previous = self.last_confirmed?;
-                (self.streak >= STREAK_TO_ANTICIPATE && same_beat(previous + period, beat, period))
-                    .then_some(beat)
+                let expected = rhythm.following(previous)?;
+                (self.streak >= STREAK_TO_ANTICIPATE && rhythm.same_hit(expected, hit)).then_some(hit)
             }
+            _ => Some(hit),
         }
     }
 }
@@ -237,6 +315,7 @@ impl FlashPlanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tempo::BeatClock;
 
     const BPM: f64 = 155.0;
     const ADVANCE: f64 = 0.045;
@@ -261,7 +340,16 @@ mod tests {
     /// Comme `simulate`, chaque kick arrivant avec son propre délai ; renvoie aussi le
     /// planificateur pour inspecter son état final.
     fn simulate_arrivals(mode: FlashMode, kicks: &[(f64, f64)], until: f64) -> (Vec<(f64, Action)>, FlashPlanner) {
-        let clock = BeatClock::new(BPM, 0.0);
+        simulate_rhythm(Rhythm::on_beats(&BeatClock::new(BPM, 0.0)), mode, kicks, until)
+    }
+
+    /// Comme `simulate_arrivals`, avec le motif `rhythm`.
+    fn simulate_rhythm(
+        rhythm: Option<Rhythm>,
+        mode: FlashMode,
+        kicks: &[(f64, f64)],
+        until: f64,
+    ) -> (Vec<(f64, Action)>, FlashPlanner) {
         let mut planner = FlashPlanner::new(mode, ADVANCE, CONFIRM);
         let mut arrivals: Vec<(f64, f64)> = kicks.iter().map(|&(kick, delay)| (kick + delay, kick)).collect();
         arrivals.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -270,7 +358,7 @@ mod tests {
         let mut now: f64 = 0.0;
         while now < until {
             let mut next = now + 1.0 / 60.0;
-            if let Some(event) = planner.next_event(&clock, now) {
+            if let Some(event) = planner.next_event(rhythm.as_ref(), now) {
                 next = next.min(event.max(now));
             }
             if let Some(&(arrival, _)) = arrivals.peek() {
@@ -278,7 +366,7 @@ mod tests {
             }
             now = next;
             let kick = arrivals.next_if(|&(arrival, _)| arrival <= now).map(|(_, kick)| kick);
-            let action = planner.poll(&clock, now, kick);
+            let action = planner.poll(rhythm.as_ref(), now, kick);
             if action != Action::None {
                 actions.push((now, action));
             }
@@ -365,19 +453,19 @@ mod tests {
 
     #[test]
     fn groove_needs_four_beats_and_ends_after_two_missed_kicks() {
-        let clock = BeatClock::new(BPM, 0.0);
+        let rhythm = Rhythm::on_beats(&BeatClock::new(BPM, 0.0));
         let three: Vec<(f64, f64)> = (1..=3).map(|n| (beats(n as f64), ARRIVAL)).collect();
         let (_, planner) = simulate_arrivals(FlashMode::Kicks, &three, beats(3.2));
-        assert!(!planner.in_groove(&clock, beats(3.2)));
+        assert!(!planner.in_groove(rhythm.as_ref(), beats(3.2)));
 
         let six: Vec<(f64, f64)> = (1..=6).map(|n| (beats(n as f64), ARRIVAL)).collect();
         let (_, planner) = simulate_arrivals(FlashMode::Kicks, &six, beats(6.2));
-        assert!(planner.in_groove(&clock, beats(6.2)));
-        assert!(planner.in_groove(&clock, beats(7.0)), "le kick du temps suivant est attendu");
+        assert!(planner.in_groove(rhythm.as_ref(), beats(6.2)));
+        assert!(planner.in_groove(rhythm.as_ref(), beats(7.0)), "le kick du temps suivant est attendu");
         let (_, planner) = simulate_arrivals(FlashMode::Kicks, &six, beats(7.6));
-        assert!(planner.in_groove(&clock, beats(7.6)), "un seul kick manqué : le groove tient");
+        assert!(planner.in_groove(rhythm.as_ref(), beats(7.6)), "un seul kick manqué : le groove tient");
         let (_, planner) = simulate_arrivals(FlashMode::Kicks, &six, beats(8.6));
-        assert!(!planner.in_groove(&clock, beats(8.6)), "deux kicks manqués de suite");
+        assert!(!planner.in_groove(rhythm.as_ref(), beats(8.6)), "deux kicks manqués de suite");
     }
 
     #[test]
@@ -386,6 +474,28 @@ mod tests {
         let actions = simulate(FlashMode::Reactive, &kicks, beats(15.0));
         assert_eq!(actions.len(), kicks.len());
         assert!(actions.iter().all(|&(_, action)| action == REACTIVE));
+    }
+
+    /// Hard groove : kicks sur les doubles croches 0, 5, 8 et 13, jamais sur le 2e ni le 4e temps.
+    #[test]
+    fn a_syncopated_pattern_is_anticipated_and_grooves() {
+        let hits = crate::rhythm::pattern("x....x..x....x..");
+        let rhythm = Rhythm { period: 60.0 / BPM, bar: beats(1.0), hits };
+        let kicks: Vec<(f64, f64)> = (0..64)
+            .filter(|n| hits >> (n % 16) & 1 == 1)
+            .map(|n| (beats(1.0 + n as f64 / 4.0), ARRIVAL))
+            .collect();
+        let until = kicks.last().unwrap().0 + 0.05;
+        let (actions, planner) = simulate_rhythm(Some(rhythm), FlashMode::Kicks, &kicks, until);
+        assert_eq!(actions.len(), kicks.len(), "un flash par kick : {actions:?}");
+        for (&(at, action), &(kick, _)) in actions[2..].iter().zip(&kicks[2..]) {
+            assert_eq!(action, ANTICIPATED);
+            assert!((at - (kick - ADVANCE)).abs() < 1e-9, "flash à {at}, kick à {kick}");
+        }
+        assert!(planner.in_groove(Some(&rhythm), until), "groove sans kick sur chaque temps");
+        // Le même jeu lu comme un kick par temps n'aurait jamais groové.
+        let (_, beats_only) = simulate_arrivals(FlashMode::Kicks, &kicks, until);
+        assert!(!beats_only.in_groove(Rhythm::on_beats(&BeatClock::new(BPM, 0.0)).as_ref(), until));
     }
 
     #[test]

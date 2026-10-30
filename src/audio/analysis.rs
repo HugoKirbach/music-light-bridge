@@ -42,6 +42,14 @@ const KICK_FLOOR: f32 = 0.01;
 /// (1,6 → 1,24) : un kick noyé dans une basse dense dépasse à peine le fond.
 const EXPECTED_RELAX: f32 = 0.4;
 const EXPECTED_RISE_RATIO: f32 = 1.15;
+/// … sans descendre sous 65 % de l'avance habituelle des kicks du morceau sur le fond : quand les
+/// kicks dominent nettement (hard techno), la sous-basse qui enfle entre eux (« rumble ») n'atteint
+/// pas ce seuil, alors que dans un mix dense, où les kicks dépassent à peine, rien ne change.
+const PROMINENCE_SHARE: f32 = 0.65;
+const PROMINENCE_LEARN: f32 = 0.1;
+const PROMINENCE_MEMORY: f32 = 8.0;
+const PROMINENCE_MAX: f32 = 4.0;
+const PROMINENCE_PEAK: f32 = 0.03;
 /// Écart minimal avec la détection précédente quand le kick est attendu : une note de basse
 /// juste avant le temps ne doit pas masquer le kick.
 const EXPECTED_REFRACTORY: f32 = 0.04;
@@ -229,6 +237,14 @@ pub struct KickDetector {
     since_click: u32,
     /// Le dernier kick est tombé sur un temps attendu : le suivant ne peut pas être sur le même.
     last_on_beat: bool,
+    /// Avance habituelle des kicks sur le fond des basses (moyenne glissante, à leur sommet).
+    prominence: f32,
+    /// Part de l'avance gardée à chaque échantillon : sans kick détecté, elle revient au seuil en 8 s
+    /// (un mix qui se densifie ne reste pas bloqué sur l'avance des kicks d'avant).
+    prominence_keep: f32,
+    /// Kick en cours de mesure : échantillons restants et plus forte avance sur le fond jusque-là.
+    rising: Option<(u32, f32)>,
+    peak_window: u32,
     refractory: u32,
     expected_refractory: u32,
     click_window: u32,
@@ -253,6 +269,10 @@ impl KickDetector {
             since_kick: u32::MAX,
             since_click: u32::MAX,
             last_on_beat: false,
+            prominence: threshold,
+            prominence_keep: (-1.0 / (rate * PROMINENCE_MEMORY)).exp(),
+            rising: None,
+            peak_window: (rate * PROMINENCE_PEAK) as u32,
             refractory: (rate * KICK_REFRACTORY) as u32,
             expected_refractory: (rate * EXPECTED_REFRACTORY) as u32,
             click_window: (rate * CLICK_WINDOW) as u32,
@@ -276,6 +296,21 @@ impl KickDetector {
         let body = self.body.process(body.abs());
         let body_reference = self.body_reference.process(body);
         self.since_kick = self.since_kick.saturating_add(1);
+        self.prominence = self.threshold + (self.prominence - self.threshold) * self.prominence_keep;
+        // L'avance d'un kick se mesure à son sommet, dans les 30 ms qui suivent sa détection.
+        if let Some((left, peak)) = self.rising {
+            let peak = peak.max(level / background.max(1e-9));
+            self.rising = if left > 0 {
+                Some((left - 1, peak))
+            } else {
+                // Seul un vrai kick, qui atteint le seuil ordinaire à son sommet, l'apprend ; après un
+                // silence, le fond est presque nul : l'avance est bornée.
+                if peak >= self.threshold {
+                    self.prominence += PROMINENCE_LEARN * (peak.min(PROMINENCE_MAX) - self.prominence);
+                }
+                None
+            };
+        }
         self.since_click = self.since_click.saturating_add(1);
         if click > CLICK_FLOOR && click > click_reference * CLICK_RISE_RATIO {
             self.since_click = 0;
@@ -286,7 +321,8 @@ impl KickDetector {
             // Attente courte seulement si le kick précédent n'était pas déjà celui de ce temps.
             Expectation::Kick => {
                 let refractory = if self.last_on_beat { self.refractory } else { self.expected_refractory };
-                (1.0 + excess * EXPECTED_RELAX, EXPECTED_RISE_RATIO, refractory)
+                let relaxed = (1.0 + excess * EXPECTED_RELAX).max(PROMINENCE_SHARE * self.prominence);
+                (relaxed, EXPECTED_RISE_RATIO, refractory)
             }
             Expectation::Offbeat => (1.0 + excess * OFFBEAT_STRICT, OFFBEAT_RISE_RATIO, self.refractory),
         };
@@ -313,6 +349,7 @@ impl KickDetector {
             && level > KICK_FLOOR
             && (fused || from_valley || punched || (level > reference * rise && level > background * threshold));
         if kick {
+            self.rising = Some((self.peak_window, level / background.max(1e-9)));
             self.last_on_beat = expectation == Expectation::Kick;
             self.since_kick = 0;
         }

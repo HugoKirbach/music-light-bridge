@@ -4,6 +4,8 @@
 //! tempo en très grand, et un dock replié en bas qui rouvre ces mêmes pages.
 
 mod light;
+mod plan;
+mod presets;
 mod setup;
 mod stage;
 mod theme;
@@ -69,11 +71,13 @@ enum TempoChoice {
     Link,
 }
 
-/// Onglets du dock de la scène : les pages de la lumière, le tempo et la source.
+/// Onglets du dock de la scène : les pages de la lumière (dont les scènes), le tempo, la synchro
+/// des lampes et la source.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Light(light::Page),
     Tempo,
+    Lamps,
     Source,
 }
 
@@ -112,6 +116,17 @@ struct App {
     summary: Option<String>,
     /// Captures automatiques déjà signalées pendant ce live.
     auto_captures_seen: u32,
+    /// Scène rappelée en dernier, nom et note saisis pour en enregistrer une, et changements faits
+    /// hors de la fenêtre déjà repris.
+    active_preset: Option<String>,
+    preset_name: String,
+    preset_note: String,
+    outside_changes_seen: u32,
+    /// Plan de la pièce déplié ; lampe choisie sur le plan (pour sa hauteur), et pièce ou
+    /// disposition qu'on renomme.
+    show_room: bool,
+    selected_lamp: Option<String>,
+    renaming: Option<(plan::Renaming, String)>,
 }
 
 impl App {
@@ -150,6 +165,13 @@ impl App {
             message: None,
             summary: None,
             auto_captures_seen: 0,
+            active_preset: None,
+            preset_name: String::new(),
+            preset_note: String::new(),
+            outside_changes_seen: 0,
+            show_room: false,
+            selected_lamp: None,
+            renaming: None,
         };
         app.refresh_devices();
         app
@@ -223,6 +245,13 @@ impl App {
         self.settings.link = self.tempo == TempoChoice::Link;
         self.settings.bpm = if self.tempo == TempoChoice::Auto { None } else { bpm };
         self.save_config();
+        let remote = match self.settings.remote {
+            true => match self.cfg.remote_token() {
+                Ok(token) => Some(token),
+                Err(e) => return self.show(format!("Télécommande : {e:#}")),
+            },
+            false => None,
+        };
         let options = engine::Options {
             input: self.settings.input.clone(),
             audio: self.settings.audio,
@@ -232,6 +261,8 @@ impl App {
             flash: self.settings.flash,
             motion: self.settings.motion,
             spread: self.settings.spread,
+            director: self.settings.director,
+            remote,
             rotation: self.settings.rotation,
             link: self.settings.link,
             midi: self.settings.midi.clone().map(Some),
@@ -246,7 +277,11 @@ impl App {
                 self.shown_bpm = None;
                 self.summary = None;
                 self.auto_captures_seen = 0;
+                self.outside_changes_seen = 0;
                 self.message = None;
+                if let Some(url) = &engine.info.remote_url {
+                    self.show(format!("Télécommande : ouvre {url} sur ton téléphone (onglet Source)."));
+                }
                 // La scène s'ouvre dégagée : le dock reste replié jusqu'au premier onglet choisi.
                 self.dock_open = false;
                 self.engine = Some(engine);
@@ -279,6 +314,21 @@ impl App {
         self.settings.spread = spread;
         if let Some(engine) = &self.engine {
             engine.set_spread(spread);
+        }
+    }
+
+    fn set_director(&mut self, on: bool) {
+        self.settings.director = on;
+        if let Some(engine) = &self.engine {
+            engine.set_director(on);
+        }
+    }
+
+    /// Case du régisseur, sous les dispositions.
+    fn director_chip(&mut self, ui: &mut egui::Ui) {
+        let hint = "En disposition Auto, la mise en scène du groove et la teinte varient d'une section à l'autre selon l'énergie du set";
+        if theme::chip(ui, "Régisseur auto", self.settings.director).on_hover_text(hint).clicked() {
+            self.set_director(!self.settings.director);
         }
     }
 
@@ -374,6 +424,9 @@ impl eframe::App for App {
             self.stop();
             self.show("Le mode live s'est arrêté : bridge injoignable ?");
         }
+        if let Some(Ok(())) = self.engine.as_mut().and_then(Engine::recover_audio) {
+            self.show("Entrée audio retrouvée.");
+        }
         let status = self.engine.as_ref().map(Engine::status);
         match status {
             Some(status) => {
@@ -383,6 +436,7 @@ impl eframe::App for App {
                     self.shown_source = status.source;
                     self.next_refresh = Instant::now() + BPM_REFRESH;
                 }
+                self.follow_outside_changes(&status);
                 if status.auto_captures > self.auto_captures_seen {
                     self.auto_captures_seen = status.auto_captures;
                     self.show("Le groove a décroché : capture automatique enregistrée pour le banc d'essai.");
@@ -413,13 +467,7 @@ fn motion_text(motion: Motion) -> (&'static str, &'static str) {
 
 /// Titre court et explication d'une disposition des lampes.
 fn spread_text(spread: Spread) -> (&'static str, &'static str) {
-    match spread {
-        Spread::Auto => ("Auto", "Suit les phases"),
-        Spread::Together => ("Ensemble", "Toutes à chaque kick"),
-        Spread::Wave => ("Vague", "Traverse la pièce"),
-        Spread::Alternate => ("Alternance", "Gauche, puis droite"),
-        Spread::Split => ("Graves / aigus", "Kicks et ambiance"),
-    }
+    (spread.label(), spread.hint())
 }
 
 /// Titre court d'une rotation des couleurs.

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use crossterm::event::{KeyCode, KeyEvent};
 use tokio::runtime::Runtime;
 
@@ -28,13 +28,14 @@ enum KeyOutcome {
 }
 
 pub fn run(rt: Arc<Runtime>, cfg: &Config, options: Options) -> Result<()> {
-    let engine = Engine::start(rt, cfg, options)?;
+    let mut engine = Engine::start(rt, cfg, options)?;
     println!("{}", engine.info);
     println!();
     println!("  b        saisir le BPM (chiffres puis Entrée)   + / -   BPM ±{BPM_NUDGE}");
     println!("  a        BPM automatique                       m       mode : kicks → réactif → temps");
     println!("  ↑ / ↓    seuil de détection des kicks (plus haut = moins de kicks)");
     println!("  r        enregistre les 40 dernières secondes, pour `dj-bridge analyze`");
+    println!("  1 à 9    rappelle une scène enregistrée dans la fenêtre");
     println!("  Échap    quitte");
     println!();
     println!("Ligne d'état : B/M/A = basses, médiums, aigus ; ● = kick ; ♪ = note MIDI ;");
@@ -47,7 +48,7 @@ pub fn run(rt: Arc<Runtime>, cfg: &Config, options: Options) -> Result<()> {
     println!("±n ms = écart moyen kicks/temps ; n ms = réaction côté PC ; ⚠n = coupures audio.");
     println!();
 
-    let captures = status_loop(&engine);
+    let captures = status_loop(&mut engine);
     let summary = engine.stop()?;
     println!("{summary}");
     for path in &captures? {
@@ -57,7 +58,7 @@ pub fn run(rt: Arc<Runtime>, cfg: &Config, options: Options) -> Result<()> {
 }
 
 /// Affiche la ligne d'état et traite le clavier ; renvoie les captures enregistrées.
-fn status_loop(engine: &Engine) -> Result<Vec<PathBuf>> {
+fn status_loop(engine: &mut Engine) -> Result<Vec<PathBuf>> {
     let _raw = RawMode::enable()?;
     let mut out = std::io::stdout();
     // BPM en cours de saisie, après la touche `b`.
@@ -89,6 +90,9 @@ fn status_loop(engine: &Engine) -> Result<Vec<PathBuf>> {
                     Err(e) => show(format!("{e:#}")),
                 }
             }
+        }
+        if let Some(Ok(())) = engine.recover_audio() {
+            message = Some((Instant::now() + MESSAGE_DURATION, "entrée audio retrouvée".to_owned()));
         }
         let line = match (&typing, &message) {
             (Some(text), _) => format!("BPM : {text}_   Entrée = valider, Échap = annuler"),
@@ -140,6 +144,10 @@ fn handle_key(engine: &Engine, key: &KeyEvent) -> Result<KeyOutcome> {
         }
         KeyCode::Char('a') => engine.set_auto()?,
         KeyCode::Char('m') => engine.set_mode(engine.status().mode.next()),
+        KeyCode::Char(digit @ '1'..='9') => {
+            let index = usize::from(digit as u8 - b'1');
+            engine.recall_preset(index).ok_or_else(|| anyhow!("pas de scène n° {}", index + 1))?;
+        }
         _ => {}
     }
     Ok(KeyOutcome::Nothing)
@@ -156,7 +164,8 @@ fn status_text(status: &Status) -> String {
         FlashMode::Kicks | FlashMode::EveryBeat => format!("±{:.0}ms", status.offset_ms),
     };
     let alert = match status.glitches {
-        _ if status.input_lost => " ⚠ entrée perdue".to_owned(),
+        _ if status.bridge_lost => " ⚠ bridge injoignable, reconnexion…".to_owned(),
+        _ if status.input_lost => " ⚠ entrée perdue, reconnexion…".to_owned(),
         0 => String::new(),
         n => format!(" ⚠{n}"),
     };
@@ -164,16 +173,20 @@ fn status_text(status: &Status) -> String {
         0 => String::new(),
         n => format!(" ●rec{n}"),
     };
+    let preset = status.preset.as_ref().map_or(String::new(), |name| format!(" ★{name}"));
+    let phase = match status.build {
+        Some(build) => format!("{} {build}%", status.phase.label()),
+        None => status.phase.label().to_owned(),
+    };
     let levels = status.levels;
     format!(
-        "B{} M{} A{} {}{} ♩{tempo} {source} {} {} s{:.2} {metric}{alert}{auto}",
+        "B{} M{} A{} {}{} ♩{tempo} {source} {} {phase} s{:.2} {metric}{preset}{alert}{auto}",
         tui::meter(levels.bass, METER_WIDTH),
         tui::meter(levels.mid, METER_WIDTH),
         tui::meter(levels.high, METER_WIDTH),
         if status.kick_lit { "●" } else { "○" },
         if status.note_lit { "♪" } else { " " },
         status.mode.label(),
-        status.phase.label(),
         status.threshold,
     )
 }

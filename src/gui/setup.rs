@@ -60,7 +60,7 @@ impl App {
             theme::pill(ui, theme::spaced(state, theme::font(12.0, BOLD), MUTED, 1.0), RAISED, Some(dot));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &*bridge {
                 Bridge::Ready { area, lamps } => {
-                    let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded_lights.contains(&lamp.id)).count();
+                    let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded().contains(&lamp.id)).count();
                     let lamps = match (lamps.len(), piloted) {
                         (1, 1) => "1 lampe".to_owned(),
                         (total, piloted) if total == piloted => format!("{total} lampes"),
@@ -251,10 +251,14 @@ impl App {
         });
         parts.push(format!("flashs : {}", flash_text(self.settings.flash).0.to_lowercase()));
         parts.push(format!("seuil {:.2}", self.settings.threshold));
+        if self.settings.remote {
+            parts.push("télécommande".to_owned());
+        }
         parts.join(" · ")
     }
 
-    /// Options repliées : pilote de la carte son, MIDI, déclenchement des flashs et seuil des kicks.
+    /// Options repliées : pilote de la carte son, MIDI, télécommande, déclenchement des flashs et
+    /// seuil des kicks.
     fn options(&mut self, ui: &mut Ui, width: f32) {
         ui.add_space(4.0);
         if self.settings.audio != Backend::Output {
@@ -274,6 +278,9 @@ impl App {
         }
         theme::section(ui, "MIDI");
         self.midi_row(ui);
+        ui.add_space(OPTION_GAP);
+        theme::section(ui, "TÉLÉCOMMANDE");
+        self.remote_row(ui);
         ui.add_space(OPTION_GAP);
         theme::section(ui, "DÉCLENCHEMENT DES FLASHS");
         ui.horizontal(|ui| {
@@ -310,7 +317,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
             for lamp in lamps {
-                let checked = !self.cfg.excluded_lights.contains(&lamp.id);
+                let checked = !self.cfg.excluded().contains(&lamp.id);
                 let chip = theme::chip(ui, &lamp.name, checked);
                 let chip = if lamp.channels.len() > 1 {
                     chip.on_hover_text(format!("{} segments, éclairés ensemble", lamp.channels.len()))
@@ -322,25 +329,35 @@ impl App {
                 }
             }
         });
-        let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded_lights.contains(&lamp.id)).count();
+        let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded().contains(&lamp.id)).count();
+        let lamps = lamps.clone();
         drop(bridge);
         match toggled {
             Some((_, true)) if piloted == 1 => self.show("Garde au moins une lampe pour le live."),
             Some((id, true)) => {
-                self.cfg.excluded_lights.push(id);
+                self.cfg.layout_mut().excluded.push(id);
                 self.save_config();
             }
             Some((id, false)) => {
-                self.cfg.excluded_lights.retain(|excluded| *excluded != id);
+                self.cfg.layout_mut().excluded.retain(|excluded| *excluded != id);
                 self.save_config();
             }
             None => {}
         }
         ui.label(theme::text(
-            "Les lampes décochées gardent leur état pendant le live. Zone modifiée dans l'app Hue ? « Mettre à jour » la relit.",
+            "Lampes décochées : elles gardent leur état pendant le live (choix propre à chaque configuration). Zone modifiée dans l'app Hue ? « Mettre à jour » la relit.",
             theme::regular(12.0),
             LABEL,
         ));
+
+        // Le plan de la pièce, replié : il sert à la mise en place, pas à chaque session.
+        let summary = format!("« {} » · configuration « {} »", self.cfg.room().name, self.cfg.layout().name);
+        if disclosure(ui, ui.available_width(), self.show_room, "Pièce et plan des lampes", &summary) {
+            self.show_room = !self.show_room;
+        }
+        if self.show_room {
+            self.room_panel(ui, &lamps);
+        }
     }
 
     fn tempo_row(&mut self, ui: &mut Ui, width: f32) {
@@ -420,6 +437,26 @@ impl App {
                             let text = if count == 1 { "1 appareil MIDI".to_owned() } else { format!("{count} appareils MIDI") };
                             ui.label(theme::text(text, theme::regular(13.0), MUTED));
                         }
+                    });
+                });
+            });
+    }
+
+    fn remote_row(&mut self, ui: &mut Ui) {
+        Frame::new()
+            .fill(CARD)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(10)
+            .inner_margin(Margin::symmetric(16, 10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(32.0);
+                ui.horizontal(|ui| {
+                    let label = theme::text("Piloter le live depuis un téléphone", theme::regular(14.0), TEXT);
+                    ui.checkbox(&mut self.settings.remote, label);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let hint = "Même Wi-Fi que le PC ; l'adresse s'affiche au lancement";
+                        ui.label(theme::text(hint, theme::regular(13.0), MUTED));
                     });
                 });
             });

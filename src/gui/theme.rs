@@ -467,3 +467,4 @@ pub fn slider_row(ui: &mut Ui, label: &str, value: String, slider: egui::Slider<
     })
     .inner
 }
+

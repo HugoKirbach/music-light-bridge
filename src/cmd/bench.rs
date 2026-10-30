@@ -85,6 +85,11 @@ pub struct Score {
     groove_as_break: u32,
     break_seconds: f64,
     break_flashes: u32,
+    /// Images de break, et celles où la lumière le reconnaît (temps creux).
+    #[serde(default)]
+    break_frames: u32,
+    #[serde(default)]
+    break_seen: u32,
     /// Relevés de la place dans la structure (une par seconde, en groove, avec tête de phrase
     /// connue), têtes de mesure et de phrase justes.
     #[serde(default)]
@@ -107,6 +112,8 @@ impl Score {
         self.groove_as_break += other.groove_as_break;
         self.break_seconds += other.break_seconds;
         self.break_flashes += other.break_flashes;
+        self.break_frames += other.break_frames;
+        self.break_seen += other.break_seen;
         self.structure_checks += other.structure_checks;
         self.bar_right += other.bar_right;
         self.phrase_right += other.phrase_right;
@@ -171,8 +178,8 @@ pub fn run(cfg: &Config, detail: bool, lights: bool) -> Result<()> {
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
     println!(
-        "  {:<24} {:>5}  {:>9}  {:>9}  {:>7}  {:>8}  {:>6}  {:>13}  {:>12}  {:>6}  {:>6}",
-        "capture", "note", "à l'heure", "en retard", "manqués", "en trop", "tempo", "groove→break", "break flashs", "mesure", "phrase"
+        "  {:<24} {:>5}  {:>9}  {:>9}  {:>7}  {:>8}  {:>6}  {:>13}  {:>8}  {:>12}  {:>6}  {:>6}",
+        "capture", "note", "à l'heure", "en retard", "manqués", "en trop", "tempo", "groove→break", "break vu", "break flashs", "mesure", "phrase"
     );
     let mut total = Score::default();
     let mut current = BTreeMap::new();
@@ -233,7 +240,7 @@ fn print_row(name: &str, score: &Score, delta: Option<f64>) {
     let delta = delta.map_or(String::new(), |d| if d.abs() < 0.5 { " (=)".to_owned() } else { format!(" ({d:+.0})") });
     let per_second = if score.break_seconds > 0.0 { f64::from(score.break_flashes) / score.break_seconds } else { 0.0 };
     println!(
-        "  {name:<24} {:>4.0}{delta:<6} {:>7.0} %  {:>7.0} %  {:>5.0} %  {:>8.2}  {:>4.0} %  {:>11.0} %  {:>8.1} /s  {:>4} %  {:>4} %",
+        "  {name:<24} {:>4.0}{delta:<6} {:>7.0} %  {:>7.0} %  {:>5.0} %  {:>8.2}  {:>4.0} %  {:>11.0} %  {:>6} %  {:>8.1} /s  {:>4} %  {:>4} %",
         score.grade(),
         Score::share(score.on_time, score.beats),
         Score::share(score.late, score.beats),
@@ -241,6 +248,7 @@ fn print_row(name: &str, score: &Score, delta: Option<f64>) {
         f64::from(score.extra) / f64::from(score.beats.max(1)),
         Score::share(score.tempo_right, score.tempo_checks),
         Score::share(score.groove_as_break, score.groove_frames),
+        structure(score.break_seen, score.break_frames),
         per_second,
         structure(score.bar_right, score.structure_checks),
         structure(score.phrase_right, score.structure_checks),
@@ -371,7 +379,15 @@ fn score(
         let flashes = lights.iter().filter(|&&t| (from..to).contains(&t)).count() as u32;
         let at: Vec<String> = lights.iter().filter(|&&t| (from..to).contains(&t)).map(|t| format!("{t:.2}")).collect();
         details.push(format!("break {from:.1}–{to:.1} s : {flashes} flash(s) {}", at.join(" ")));
-        score.add(&Score { break_seconds: to - from, break_flashes: flashes, ..Score::default() });
+        let frames: Vec<Phase> = timeline.phases.iter().filter(|(t, _)| (from..to).contains(t)).map(|&(_, p)| p).collect();
+        let seen = frames.iter().filter(|&&p| p == Phase::Calm).count() as u32;
+        score.add(&Score {
+            break_seconds: to - from,
+            break_flashes: flashes,
+            break_frames: frames.len() as u32,
+            break_seen: seen,
+            ..Score::default()
+        });
     }
     (score, details)
 }

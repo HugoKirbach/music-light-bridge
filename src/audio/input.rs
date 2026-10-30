@@ -100,14 +100,20 @@ impl AudioInput {
     /// En mode `Output`, `wanted` est un morceau du nom de la sortie ; à défaut, la sortie par
     /// défaut de Windows.
     pub fn start(wanted: Option<&str>, backend: Backend, features: Arc<Features>) -> Result<Self> {
+        Self::start_into(wanted, backend, features, Arc::new(Mutex::new(Capture::new(1, 0))))
+    }
+
+    /// Comme `start`, en enregistrant les dernières secondes dans `capture` : une entrée rouverte
+    /// garde ainsi la même mémoire que ceux qui la lisent.
+    pub fn start_into(wanted: Option<&str>, backend: Backend, features: Arc<Features>, capture: Arc<Mutex<Capture>>) -> Result<Self> {
         match backend {
-            Backend::Asio => Self::open(HostId::Asio, wanted, features),
-            Backend::Wasapi => Self::open(HostId::Wasapi, wanted, features),
-            Backend::Output => Self::open_output(wanted, features),
-            Backend::Auto => match Self::open(HostId::Asio, wanted, features.clone()) {
+            Backend::Asio => Self::open(HostId::Asio, wanted, features, capture),
+            Backend::Wasapi => Self::open(HostId::Wasapi, wanted, features, capture),
+            Backend::Output => Self::open_output(wanted, features, capture),
+            Backend::Auto => match Self::open(HostId::Asio, wanted, features.clone(), capture.clone()) {
                 Ok(input) => Ok(input),
                 Err(asio) => {
-                    let mut input = Self::open(HostId::Wasapi, wanted, features)?;
+                    let mut input = Self::open(HostId::Wasapi, wanted, features, capture)?;
                     input.fallback = Some(format!("{asio:#}"));
                     Ok(input)
                 }
@@ -115,16 +121,16 @@ impl AudioInput {
         }
     }
 
-    fn open(host_id: HostId, wanted: Option<&str>, features: Arc<Features>) -> Result<Self> {
+    fn open(host_id: HostId, wanted: Option<&str>, features: Arc<Features>, capture: Arc<Mutex<Capture>>) -> Result<Self> {
         let host = cpal::host_from_id(host_id)?;
         let device = pick_device(&host, host_id, wanted)?;
         let supported = device.default_input_config()?;
         let backend = if host_id == HostId::Asio { "ASIO" } else { "WASAPI" };
-        Self::capture(device, supported, backend, features)
+        Self::capture(device, supported, backend, features, capture)
     }
 
     /// Ouvre une sortie comme une entrée : WASAPI capte alors ce qui y est joué (loopback).
-    fn open_output(wanted: Option<&str>, features: Arc<Features>) -> Result<Self> {
+    fn open_output(wanted: Option<&str>, features: Arc<Features>, capture: Arc<Mutex<Capture>>) -> Result<Self> {
         let host = cpal::host_from_id(HostId::Wasapi)?;
         let device = match wanted {
             Some(name) => {
@@ -136,7 +142,7 @@ impl AudioInput {
             None => host.default_output_device().context("aucune sortie audio disponible")?,
         };
         let supported = device.default_output_config()?;
-        Self::capture(device, supported, "sortie du PC", features)
+        Self::capture(device, supported, "sortie du PC", features, capture)
     }
 
     fn capture(
@@ -144,11 +150,12 @@ impl AudioInput {
         supported: cpal::SupportedStreamConfig,
         backend: &'static str,
         features: Arc<Features>,
+        capture: Arc<Mutex<Capture>>,
     ) -> Result<Self> {
         let format = supported.sample_format();
         let config: StreamConfig = supported.into();
         let (sample_rate, channels) = (config.sample_rate, config.channels);
-        let capture = Arc::new(Mutex::new(Capture::new(sample_rate, CAPTURE_SECONDS)));
+        *capture.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Capture::new(sample_rate, CAPTURE_SECONDS);
         let recorder = capture.clone();
         let stream = match format {
             SampleFormat::F32 => build::<f32>(&device, config, features, recorder)?,

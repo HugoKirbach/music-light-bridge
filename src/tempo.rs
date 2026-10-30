@@ -8,7 +8,8 @@ use std::collections::VecDeque;
 use std::f64::consts::TAU;
 
 use crate::audio::analysis::Onset;
-use crate::phrase::{PhraseTracker, Position};
+use crate::phrase::{BEATS_PER_PHRASE, PhraseTracker, Position};
+use crate::rhythm::{PatternLearner, Rhythm};
 
 /// Plage de la détection automatique : exclut les octaves trompeuses (77,5 ou 310 pour 155 BPM).
 pub const DEFAULT_BPM_RANGE: (f64, f64) = (100.0, 190.0);
@@ -47,6 +48,9 @@ const OFFSET_SMOOTHING: f64 = 0.1;
 /// 2,5 fois la moyenne (avec ses voisines) pour recaler la grille.
 const COMB_BIN: f64 = 0.01;
 const COMB_MIN_SPAN: f64 = 3.0;
+/// Chaque trame compte au plus 2,5 dans le peigne : un roulement trois fois plus fort que les kicks
+/// ne tire pas la grille vers lui pendant les 6 s où il reste dans la fenêtre.
+const COMB_CAP: f32 = 2.5;
 /// Trames gardées pour le peigne du tempo ; celui de la phase ne regarde que les 6 dernières
 /// secondes.
 const FRAME_MEMORY: f64 = 10.0;
@@ -212,7 +216,7 @@ impl CombProfile {
         let mut sums = vec![0.0f64; bins];
         for &(t, strength) in frames {
             let position = (t - last).rem_euclid(period) / period;
-            sums[((position * bins as f64) as usize).min(bins - 1)] += f64::from(strength);
+            sums[((position * bins as f64) as usize).min(bins - 1)] += f64::from(strength.min(COMB_CAP));
         }
         let smoothed: Vec<f64> =
             (0..bins).map(|i| sums[(i + bins - 1) % bins] + sums[i] + sums[(i + 1) % bins]).collect();
@@ -267,12 +271,6 @@ impl BeatClock {
         self.anchor
     }
 
-    /// Premier temps strictement après `t`.
-    pub fn next_beat_after(&self, t: f64) -> Option<f64> {
-        let period = self.period?;
-        Some(self.anchor + (((t - self.anchor) / period).floor() + 1.0) * period)
-    }
-
     /// Temps le plus proche de `t`.
     pub fn nearest_beat(&self, t: f64) -> Option<f64> {
         let period = self.period?;
@@ -324,6 +322,8 @@ pub struct Tracker {
     frames: VecDeque<(f64, f32)>,
     /// Têtes de mesure et de phrase.
     phrase: PhraseTracker,
+    /// Où tombent les kicks dans la mesure.
+    pattern: PatternLearner,
 }
 
 impl Tracker {
@@ -338,11 +338,19 @@ impl Tracker {
             locked_until: f64::NEG_INFINITY,
             frames: VecDeque::new(),
             phrase: PhraseTracker::default(),
+            pattern: PatternLearner::default(),
         }
     }
 
     pub fn clock(&self) -> BeatClock {
         self.clock
+    }
+
+    /// Grille et motif rythmique : où et quand les kicks sont attendus, si le tempo est connu.
+    pub fn rhythm(&self) -> Option<Rhythm> {
+        let period = self.clock.period()?;
+        let bar = self.pattern.bar_start(period).unwrap_or(self.clock.anchor());
+        Some(Rhythm { period, bar, hits: self.pattern.hits() })
     }
 
     pub fn source(&self) -> TempoSource {
@@ -361,14 +369,34 @@ impl Tracker {
         self.phrase.position(t, &self.clock)
     }
 
+    /// Période du temps (s) et nombre de temps, fractionnaire, jusqu'à la prochaine tête de
+    /// phrase, quand la structure est reconnue.
+    pub fn structure(&self, t: f64) -> Option<(f32, f32)> {
+        let period = self.clock.period()?;
+        let beat = self.clock.nearest_beat(t)?;
+        let phrase = u64::from(self.position(beat)?.phrase);
+        let mut to_head = ((BEATS_PER_PHRASE - phrase) % BEATS_PER_PHRASE) as f64 - (t - beat) / period;
+        if to_head <= 0.0 {
+            to_head += BEATS_PER_PHRASE as f64;
+        }
+        Some((period as f32, to_head as f32))
+    }
+
     /// Écart moyen (s) entre les kicks sur le temps et les temps de l'horloge.
     pub fn mean_offset(&self) -> f64 {
         self.mean_offset
     }
 
+    /// Drop d'une montée : la force d'attaque d'avant (roulement de caisse claire, souffle) ne compte
+    /// plus pour placer les temps, que les kicks du drop recalent aussitôt.
+    pub fn on_drop(&mut self) {
+        self.frames.clear();
+    }
+
     /// Kick détecté à l'instant `t` : mémorisé pour l'estimation et utilisé pour caler la phase.
     pub fn on_kick(&mut self, t: f64) {
         self.onsets.push_back(t);
+        self.pattern.on_kick(t, &self.clock);
         self.forget_before(t - WINDOW);
         let (Some(period), Some(beat)) = (self.clock.period, self.clock.nearest_beat(t)) else {
             return;
@@ -443,6 +471,7 @@ impl Tracker {
     pub fn on_onset(&mut self, t: f64, onset: Onset) {
         self.frames.push_back((t, onset.kick));
         self.phrase.on_frame(t, onset, &self.clock);
+        self.pattern.on_frame(t, &self.clock);
         self.forget_frames_before(t - FRAME_MEMORY);
     }
 

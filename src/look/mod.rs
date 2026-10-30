@@ -15,6 +15,18 @@ use serde::{Deserialize, Serialize};
 use crate::audio::analysis::Levels;
 use crate::hue::stream::Rgb;
 
+mod director;
+mod lamps;
+mod phases;
+mod space;
+
+pub use lamps::{Accent, Spread};
+pub use space::Space;
+pub use phases::{Phase, Pulse};
+use director::Director;
+use lamps::Lamp;
+use phases::PhaseTracker;
+
 /// Part de la lueur qui suit les basses, au-dessus du fond.
 const GLOW: f32 = 0.25;
 /// Part de blanc au sommet d'un flash de kick, pour un impact plus franc.
@@ -24,7 +36,6 @@ const PHRASE_PUNCH: f32 = 0.85;
 /// Intensité d'un flash de note : de 35 % (vélocité minimale) à 100 %.
 const NOTE_MIN_STRENGTH: f32 = 0.35;
 /// Sans kick depuis 1,5 s, la musique est dans un temps creux.
-const CALM_AFTER: f32 = 1.5;
 /// Durée du fondu d'une couleur de scène à l'autre.
 const SCENE_FADE: f32 = 0.6;
 /// Mémoire de l'équilibre grave/aigu habituel du morceau.
@@ -43,25 +54,6 @@ const SWEEP_MIN: f32 = 0.4;
 const HUE_STEP: f32 = 0.125;
 const TURN_GAP: f32 = 1.0;
 
-/// Une montée s'annonce quand la présence (médiums et aigus) dépasse de 4 dB sa moyenne des
-/// 6 dernières secondes alors que les basses sont faibles…
-const BUILD_RISE_DB: f32 = 4.0;
-const PRESENCE_FAST: f32 = 1.0;
-const PRESENCE_SLOW: f32 = 6.0;
-const BUILD_MAX_BASS: f32 = 0.5;
-/// … ou quand les kicks roulent : plus de 4,5 par seconde.
-const ROLL_RATE: f32 = 4.5;
-const KICK_RATE_WINDOW: f32 = 2.0;
-/// Une montée dure au moins 1,5 s avant qu'un drop puisse la conclure, et retombe si plus rien
-/// ne monte pendant 4 s.
-const BUILD_MIN: f32 = 1.5;
-const BUILD_STALL: f32 = 4.0;
-/// Temps pour qu'une montée atteigne son plein.
-const BUILD_RAMP: f32 = 8.0;
-/// Le drop : un kick aux basses fortes, après une seconde de basses faibles.
-const DROP_BASS: f32 = 0.6;
-const DROP_QUIET_BASS: f32 = 0.35;
-const BASS_MEMORY: f32 = 1.0;
 /// Respiration : la luminosité suit l'énergie, vite en montée et lentement en descente ; un
 /// kick n'y ajoute qu'une légère houle.
 const BREATH_ATTACK: f32 = 0.35;
@@ -69,14 +61,15 @@ const BREATH_RELEASE: f32 = 0.9;
 const BREATH_KICK: f32 = 0.25;
 /// Fondu d'une animation à l'autre.
 const MOTION_FADE: f32 = 0.4;
-/// Vague : le flash met 120 ms à traverser la pièce.
-const WAVE_SWEEP: f32 = 0.12;
-/// Ondulation des breaks en vague : elle traverse la pièce en deux mesures (en 4 s sans tempo) et
-/// creuse la respiration de 35 %.
+/// Ondulation des breaks : elle parcourt la pièce en deux mesures (en 4 s sans tempo) et creuse la
+/// respiration de 35 %.
 const RIPPLE_PERIOD: f32 = 4.0;
 const RIPPLE_DEPTH: f32 = 0.35;
 /// Lampes « aigus » (graves / aigus) : jusqu'à 70 % de luminosité avec médiums et aigus.
 const TREBLE_GLOW: f32 = 0.7;
+/// Hors groove, un kick porte au moins le quart des basses habituelles du groove : un charleston ou
+/// une mélodie n'en ont pour ainsi dire pas.
+const KICK_BASS: f32 = 0.25;
 /// Le bridge ne relaie qu'à ~25 Hz en Zigbee : le sommet d'un flash est tenu 40 ms, une
 /// période entière, pour que la lampe le reçoive toujours à pleine force.
 const FLASH_HOLD: f32 = 0.04;
@@ -127,40 +120,6 @@ impl Motion {
 
     pub fn from_index(index: u8) -> Self {
         Self::ALL.get(usize::from(index)).copied().unwrap_or(Self::Auto)
-    }
-}
-
-/// Phase du morceau, reconnue à l'écoute.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Phase {
-    /// Kicks réguliers.
-    #[default]
-    Groove,
-    /// Plus de kick : break, passage calme.
-    Calm,
-    /// Montée vers un drop.
-    BuildUp,
-}
-
-impl Phase {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Groove => "groove",
-            Self::Calm => "break",
-            Self::BuildUp => "montée",
-        }
-    }
-
-    pub fn index(self) -> u8 {
-        self as u8
-    }
-
-    pub fn from_index(index: u8) -> Self {
-        match index {
-            1 => Self::Calm,
-            2 => Self::BuildUp,
-            _ => Self::Groove,
-        }
     }
 }
 
@@ -381,166 +340,8 @@ fn approach(current: f32, target: f32, dt: f32, time: f32) -> f32 {
     current + (target - current) * (1.0 - (-dt / time).exp())
 }
 
-/// Ce qui permet de reconnaître la phase du morceau.
-#[derive(Debug, Default)]
-struct PhaseTracker {
-    phase: Phase,
-    /// Durée passée dans la phase actuelle (s).
-    phase_time: f32,
-    /// Horloge propre (s) et instants des derniers kicks, pour leur cadence.
-    time: f32,
-    kick_times: std::collections::VecDeque<f32>,
-    /// Un kick a été détecté depuis le dernier rendu.
-    kicked: bool,
-    presence_fast: Option<f32>,
-    presence_slow: Option<f32>,
-    bass_memory: f32,
-    /// Temps écoulé sans que rien ne monte, pendant une montée.
-    stall: f32,
-    /// Avancement de la montée, de 0 à 1.
-    build: f32,
-}
-
-impl PhaseTracker {
-    fn kick(&mut self) {
-        self.kicked = true;
-        self.kick_times.push_back(self.time);
-    }
-
-    /// Met la phase à jour ; `true` au drop qui conclut une montée.
-    fn update(&mut self, dt: f32, levels: Levels, grooving: bool) -> bool {
-        self.time += dt;
-        self.phase_time += dt;
-        while self.kick_times.front().is_some_and(|&t| self.time - t > KICK_RATE_WINDOW) {
-            self.kick_times.pop_front();
-        }
-        let rolling = self.kick_times.len() as f32 / KICK_RATE_WINDOW > ROLL_RATE;
-        let rise = match levels.presence {
-            Some(db) => {
-                let fast = approach(*self.presence_fast.get_or_insert(db), db, dt, PRESENCE_FAST);
-                let slow = approach(*self.presence_slow.get_or_insert(db), db, dt, PRESENCE_SLOW);
-                self.presence_fast = Some(fast);
-                self.presence_slow = Some(slow);
-                fast - slow
-            }
-            None => 0.0,
-        };
-        let quiet_bass_before = self.bass_memory < DROP_QUIET_BASS;
-        self.bass_memory = approach(self.bass_memory, levels.bass, dt, BASS_MEMORY);
-        let kicked = std::mem::take(&mut self.kicked);
-        // Une simple hausse de présence ne suffit pas quand les basses sont là : c'est un drop
-        // ou l'entrée d'un élément, pas une montée.
-        let building = (rise > BUILD_RISE_DB && self.bass_memory < BUILD_MAX_BASS) || rolling;
-        self.stall = if building { 0.0 } else { self.stall + dt };
-
-        let mut dropped = false;
-        let next = match self.phase {
-            Phase::BuildUp
-                if kicked
-                    && self.phase_time > BUILD_MIN
-                    && quiet_bass_before
-                    && levels.bass > DROP_BASS
-                    && !rolling =>
-            {
-                dropped = true;
-                Phase::Groove
-            }
-            Phase::BuildUp if self.stall > BUILD_STALL => {
-                if grooving { Phase::Groove } else { Phase::Calm }
-            }
-            Phase::BuildUp => Phase::BuildUp,
-            _ if building => Phase::BuildUp,
-            _ if grooving => Phase::Groove,
-            _ => Phase::Calm,
-        };
-        if next != self.phase {
-            self.phase = next;
-            self.phase_time = 0.0;
-        }
-        self.build = if self.phase == Phase::BuildUp {
-            let surge = ((rise - BUILD_RISE_DB) / 10.0).clamp(0.0, 1.0);
-            (self.build + dt / BUILD_RAMP).max(surge).min(1.0)
-        } else {
-            approach(self.build, 0.0, dt, MOTION_FADE)
-        };
-        dropped
-    }
-}
 
 /// Répartition des flashs entre les lampes de la zone, selon leur place dans la pièce.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum Spread {
-    /// Suit les phases : alternance sur le groove, vague en montée, ondulation en break
-    #[default]
-    Auto,
-    /// Toutes les lampes ensemble
-    Together,
-    /// Le flash traverse la pièce, d'un côté puis de l'autre
-    Wave,
-    /// Gauche et droite à tour de rôle, toutes ensemble en tête de mesure
-    Alternate,
-    /// Une lampe sur deux flashe sur les kicks, les autres respirent avec médiums et aigus
-    Split,
-}
-
-impl Spread {
-    pub const ALL: [Self; 5] = [Self::Auto, Self::Together, Self::Wave, Self::Alternate, Self::Split];
-
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Auto => "Auto : alternance sur le groove, vague en montée, ondulation en break",
-            Self::Together => "Ensemble : toutes les lampes à chaque kick",
-            Self::Wave => "Vague : le flash traverse la pièce, d'un côté puis de l'autre",
-            Self::Alternate => "Alternance : gauche et droite à tour de rôle, toutes en tête de mesure",
-            Self::Split => "Graves / aigus : une lampe sur deux sur les kicks, les autres respirent",
-        }
-    }
-
-    pub fn index(self) -> u8 {
-        self as u8
-    }
-
-    pub fn from_index(index: u8) -> Self {
-        Self::ALL.get(usize::from(index)).copied().unwrap_or(Self::Auto)
-    }
-}
-
-/// Place d'un kick dans la musique : un temps quelconque, le premier d'une mesure (l'alternance y
-/// flashe toutes les lampes) ou celui qui ouvre une phrase (toutes les lampes, en blanc plus franc).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Accent {
-    Beat,
-    Bar,
-    Phrase,
-}
-
-/// Une lampe (ou un segment de ruban) et son flash.
-#[derive(Debug, Clone, Default)]
-struct Lamp {
-    /// Place de gauche (0) à droite (1), par rang : deux lampes ne sont jamais confondues.
-    place: f32,
-    /// Moitié droite de la pièce (alternance) ; une lampe sur deux par rang (graves / aigus).
-    right: bool,
-    odd: bool,
-    flash: f32,
-    /// Part de blanc du flash en cours.
-    punch: f32,
-    /// Flash déclenché depuis le dernier rendu : il s'affiche sans décroissance.
-    fresh: bool,
-    /// Temps (s) pendant lequel le sommet du flash est encore tenu.
-    hold: f32,
-    /// Flash qui part dans quelques ms (vague) : délai restant (s), force, part de blanc.
-    pending: Option<(f32, f32, f32)>,
-}
-
-impl Lamp {
-    fn fire(&mut self, strength: f32, punch: f32) {
-        if strength >= self.flash {
-            (self.flash, self.punch, self.fresh, self.hold) = (strength, punch, true, FLASH_HOLD);
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct ReactiveLook {
@@ -569,6 +370,8 @@ pub struct ReactiveLook {
     kicks: u64,
     /// Secondes écoulées depuis le dernier kick détecté.
     since_kick: f32,
+    /// La grille de temps confirme des kicks réguliers (`None` tant que le tempo est inconnu).
+    grid_groove: Option<bool>,
     /// Part des couleurs « temps creux » et « filtres » dans la scène, en fondu.
     calm: f32,
     filtered: f32,
@@ -586,6 +389,16 @@ pub struct ReactiveLook {
     hue: f32,
     /// Couleur de la dernière note MIDI ; elle remplace celle de la scène.
     note_color: Option<Color>,
+    /// Avance des lampes (s) : le drop prévu d'une montée s'allume d'autant plus tôt ; et drop
+    /// déjà montré d'avance, qui ne se rejoue pas à sa confirmation.
+    drop_advance: f32,
+    drop_shown: bool,
+    /// Une montée vient de se conclure par son drop (voir `take_drop`).
+    dropped: bool,
+    /// Régisseur de la disposition Auto.
+    director: Director,
+    /// Dispositions que la place des lampes rend possibles.
+    possible: Vec<Spread>,
 }
 
 impl Default for ReactiveLook {
@@ -609,6 +422,7 @@ impl Default for ReactiveLook {
             colors: vec![Rgb::OFF],
             kicks: 0,
             since_kick: 0.0,
+            grid_groove: None,
             calm: 0.0,
             filtered: 0.0,
             tilt_reference: None,
@@ -619,6 +433,11 @@ impl Default for ReactiveLook {
             hue_target: 0.0,
             hue: 0.0,
             note_color: None,
+            drop_advance: 0.0,
+            drop_shown: false,
+            dropped: false,
+            director: Director::default(),
+            possible: vec![Spread::Auto, Spread::Together],
         }
     }
 }
@@ -628,21 +447,24 @@ impl ReactiveLook {
         Self { palette, ..Self::default() }
     }
 
-    /// Place des lampes dans la pièce, de gauche à droite (x de la zone Hue, de -1 à 1), dans
-    /// l'ordre où `render_lamps` rendra leurs couleurs.
+    /// Lampes alignées de gauche à droite (x de la zone Hue, de -1 à 1), faute de pièce décrite.
+    #[cfg(test)]
     pub fn set_lamps(&mut self, positions: &[f32]) {
-        let count = positions.len().max(1);
-        let x = |i: usize| positions.get(i).copied().unwrap_or(0.0);
-        let mut order: Vec<usize> = (0..count).collect();
-        order.sort_by(|&a, &b| x(a).total_cmp(&x(b)).then(a.cmp(&b)));
+        self.set_space(&Space::line(positions));
+    }
+
+    /// Lampes dans la pièce, dans l'ordre où `render_lamps` rendra leurs couleurs : leur place
+    /// règle chaque mouvement, et les mouvements possibles bornent les choix du régisseur.
+    pub fn set_space(&mut self, space: &Space) {
+        let coords = space.coords();
+        let count = coords.len().max(1);
         self.lamps = vec![Lamp::default(); count];
-        for (rank, &i) in order.iter().enumerate() {
-            let lamp = &mut self.lamps[i];
-            lamp.place = if count > 1 { rank as f32 / (count - 1) as f32 } else { 0.0 };
-            lamp.right = count > 1 && rank >= count / 2;
-            lamp.odd = rank % 2 == 1;
+        for (lamp, at) in self.lamps.iter_mut().zip(coords) {
+            lamp.at = at;
         }
         self.colors = vec![Rgb::OFF; count];
+        self.possible = space.possible();
+        self.director.possible.clone_from(&self.possible);
     }
 
     /// Flash de kick, à pleine intensité, sans savoir où il tombe dans la mesure : un kick sur
@@ -654,10 +476,9 @@ impl ReactiveLook {
 
     /// Flash de kick, réparti entre les lampes selon la disposition et la place du kick.
     pub fn kick_at(&mut self, accent: Accent) {
-        let spread = self.active_spread();
-        let single = self.lamps.len() == 1;
-        let parity = self.kicks % 2 == 1;
-        self.kicks += 1;
+        if self.phases.phase == Phase::Groove {
+            self.director.kick(accent == Accent::Phrase);
+        }
         if accent == Accent::Phrase
             && let Some(every) = self.rotation.phrases()
         {
@@ -666,21 +487,40 @@ impl ReactiveLook {
                 self.turn();
             }
         }
-        for lamp in &mut self.lamps {
+        let spread = self.active_spread();
+        let single = self.lamps.len() == 1;
+        let kick = self.kicks as usize;
+        let parity = kick % 2 == 1;
+        // Rotation : la lampe du tour qui s'allume à ce kick.
+        let turn = kick % self.lamps.len().max(1);
+        // Poursuite le long d'un mouvement : le groupe de lampes qui s'allume à ce kick. Tout part
+        // sur le kick ; le mouvement se lit d'un kick à l'autre.
+        let chased_spread = matches!(spread, Spread::Wave | Spread::Diagonal | Spread::Depth | Spread::Rise | Spread::Ripple);
+        let chase = chased_spread.then(|| {
+            let coordinates: Vec<f32> =
+                self.lamps.iter().filter_map(|lamp| lamps::sweep_coordinate(spread, &lamp.at)).collect();
+            let (steps, count) = lamps::chase_steps(&coordinates);
+            let back_and_forth = matches!(spread, Spread::Wave | Spread::Diagonal);
+            (steps, lamps::chase_index(kick, count, back_and_forth))
+        });
+        self.kicks += 1;
+        let bar = accent != Accent::Beat;
+        for (i, lamp) in self.lamps.iter_mut().enumerate() {
+            let at = lamp.at;
+            let chased = chase.as_ref().is_some_and(|(steps, current)| steps[i] == *current);
             match spread {
                 _ if accent == Accent::Phrase => lamp.fire(1.0, PHRASE_PUNCH),
                 _ if single => lamp.fire(1.0, WHITE_PUNCH),
                 Spread::Auto | Spread::Together => lamp.fire(1.0, WHITE_PUNCH),
-                Spread::Wave => {
-                    let distance = if parity { 1.0 - lamp.place } else { lamp.place };
-                    lamp.pending = Some((WAVE_SWEEP * distance, 1.0, WHITE_PUNCH));
-                }
-                Spread::Alternate if accent != Accent::Beat || lamp.right == parity => {
+                Spread::Wave | Spread::Diagonal | Spread::Depth | Spread::Rise | Spread::Ripple if bar || chased => {
                     lamp.fire(1.0, WHITE_PUNCH);
                 }
-                Spread::Alternate => {}
-                Spread::Split if !lamp.odd => lamp.fire(1.0, WHITE_PUNCH),
-                Spread::Split => {}
+                Spread::Alternate if bar || at.right == parity => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::PingPong if bar || at.back == parity => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::Corners if bar || at.corner == parity => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::Rotate if at.turn == turn => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::Split if !at.odd => lamp.fire(1.0, WHITE_PUNCH),
+                _ => {}
             }
         }
     }
@@ -691,15 +531,57 @@ impl ReactiveLook {
         self.hue_target += HUE_STEP;
     }
 
-    /// Un kick vient d'être détecté (flashé ou non) : la musique n'est pas dans un temps creux.
-    pub fn kick_detected(&mut self) {
+    /// Place actuelle sur la grille des temps (`None` sans tempo) : les mouvements lents s'y calent.
+    pub fn set_beat_time(&mut self, beat_time: Option<BeatTime>) {
+        self.beat_time = beat_time;
+    }
+
+    /// État de la grille de temps à cet instant : des kicks réguliers sur les temps (`Some(true)`),
+    /// ou non, ou tempo inconnu (`None`).
+    pub fn set_grid_groove(&mut self, groove: Option<bool>) {
+        self.grid_groove = groove;
+    }
+
+    /// Un coup détecté compte comme kick. En groove, toujours ; ailleurs (break, montée), seulement
+    /// s'il porte du grave (`raw_bass`, enveloppe brute des basses) : au moins le quart du niveau
+    /// habituel du groove. Charleston, clap ou mélodie ne flashent donc pas : la lumière flotte.
+    /// Tant que le niveau habituel n'est pas connu, tout passe.
+    pub fn carries_bass(&self, raw_bass: f32) -> bool {
+        self.phases.phase == Phase::Groove || raw_bass >= KICK_BASS * self.phases.groove_bass
+    }
+
+    /// Un kick vient d'être détecté (flashé ou non), avec `raw_bass` de grave à son arrivée : la
+    /// musique n'est pas dans un temps creux. Seuls les kicks qui portent du grave font un roulement
+    /// de montée : des charlestons en croches n'en sont pas un.
+    pub fn kick_detected(&mut self, raw_bass: f32) {
         self.since_kick = 0.0;
-        self.phases.kick();
+        self.phases.kick(raw_bass >= KICK_BASS * self.phases.groove_bass);
+    }
+
+    /// `true` une fois après le drop qui conclut une montée.
+    pub fn take_drop(&mut self) -> bool {
+        std::mem::take(&mut self.dropped)
     }
 
     /// Phase du morceau reconnue à l'écoute.
     pub fn phase(&self) -> Phase {
         self.phases.phase
+    }
+
+    /// Structure du morceau, quand elle est connue : période du temps (s) et temps restant avant
+    /// la prochaine tête de phrase. Une montée vise son drop sur une tête de phrase.
+    pub fn set_structure(&mut self, structure: Option<(f32, f32)>) {
+        self.phases.structure = structure;
+    }
+
+    /// Avancement de la montée en cours, de 0 à 1.
+    pub fn build_progress(&self) -> Option<f32> {
+        (self.phases.phase == Phase::BuildUp).then_some(self.phases.build)
+    }
+
+    /// Secondes avant le drop prévu de la montée en cours.
+    pub fn drop_in(&self) -> Option<f32> {
+        self.phases.drop_in()
     }
 
     /// Animation effectivement jouée : celle choisie, ou celle de la phase en mode Auto.
@@ -713,10 +595,18 @@ impl ReactiveLook {
     }
 
     /// Disposition effectivement jouée : celle choisie, ou celle de la phase en mode Auto.
+    /// Première des dispositions `wanted` possible ici, sinon toutes ensemble.
+    fn first_possible(&self, wanted: &[Spread]) -> Spread {
+        wanted.iter().copied().find(|spread| self.possible.contains(spread)).unwrap_or(Spread::Together)
+    }
+
     pub fn active_spread(&self) -> Spread {
         match (self.spread, self.phases.phase) {
-            (Spread::Auto, Phase::Groove) => Spread::Alternate,
-            (Spread::Auto, Phase::BuildUp | Phase::Calm) => Spread::Wave,
+            (Spread::Auto, Phase::Groove) => self.director.groove_spread(),
+            // La montée grimpe vers le plafond si des lampes y sont ; le break tourne autour de la
+            // pièce si les lampes l'entourent.
+            (Spread::Auto, Phase::BuildUp) => self.first_possible(&[Spread::Rise, Spread::Wave, Spread::Depth]),
+            (Spread::Auto, Phase::Calm) => self.first_possible(&[Spread::Rotate, Spread::Wave, Spread::Depth]),
             (spread, _) => spread,
         }
     }
@@ -732,16 +622,33 @@ impl ReactiveLook {
         }
     }
 
-    /// Éteint les flashs en cours (kick anticipé qui n'est pas venu).
-    pub fn cancel_flash(&mut self) {
+    /// Régisseur : en disposition Auto, la mise en scène et la teinte varient d'une section à
+    /// l'autre.
+    pub fn set_director(&mut self, on: bool) {
+        self.director.enabled = on;
+    }
+
+    /// Avance des lampes (s), dont le drop prévu d'une montée s'allume d'autant plus tôt.
+    pub fn set_drop_advance(&mut self, advance: f32) {
+        self.drop_advance = advance;
+    }
+
+    /// Drop à la main (télécommande) : éclat blanc à pleine puissance, partout.
+    pub fn drop_now(&mut self) {
+        self.fire_drop();
+    }
+
+    fn fire_drop(&mut self) {
         for lamp in &mut self.lamps {
-            (lamp.flash, lamp.hold, lamp.pending) = (0.0, 0.0, None);
+            lamp.fire(1.0, 1.0);
         }
     }
 
-    /// Place actuelle sur la grille des temps (`None` sans tempo) : les mouvements lents s'y calent.
-    pub fn set_beat_time(&mut self, beat_time: Option<BeatTime>) {
-        self.beat_time = beat_time;
+    /// Éteint les flashs en cours (kick anticipé qui n'est pas venu).
+    pub fn cancel_flash(&mut self) {
+        for lamp in &mut self.lamps {
+            (lamp.flash, lamp.hold) = (0.0, 0.0);
+        }
     }
 
     /// Couleur de la première lampe, `dt` après le rendu précédent.
@@ -761,22 +668,28 @@ impl ReactiveLook {
                 lamp.hold -= held;
                 lamp.flash *= (-(dt - held) / decay).exp();
             }
-            if let Some((delay, strength, punch)) = lamp.pending {
-                if delay - dt <= 0.0 {
-                    lamp.pending = None;
-                    lamp.fire(strength, punch);
-                } else {
-                    lamp.pending = Some((delay - dt, strength, punch));
-                }
-            }
         }
 
-        let dropped = self.phases.update(dt, levels, self.since_kick <= CALM_AFTER);
-        if dropped && matches!(self.motion, Motion::Auto | Motion::BuildUp) {
-            // Le drop : un éclat blanc à pleine puissance, partout.
-            for lamp in &mut self.lamps {
-                lamp.fire(1.0, 1.0);
-            }
+        let pulse = Pulse { since_kick: self.since_kick, grid_groove: self.grid_groove };
+        let drops = matches!(self.motion, Motion::Auto | Motion::BuildUp);
+        // Le drop : un éclat blanc à pleine puissance, partout ; d'avance quand la structure le
+        // prévoit, pour qu'il tombe pile.
+        if drops && self.phases.anticipate_drop(self.drop_advance) {
+            self.fire_drop();
+            self.drop_shown = true;
+        }
+        let before = self.phases.phase;
+        let dropped = self.phases.update(dt, levels, pulse);
+        self.dropped |= dropped;
+        // Le régisseur ouvre une nouvelle section au drop et au retour du groove.
+        if dropped || (before != Phase::Groove && self.phases.phase == Phase::Groove) {
+            self.director.next_section();
+        }
+        if std::mem::take(&mut self.phases.false_drop) && std::mem::take(&mut self.drop_shown) {
+            self.cancel_flash();
+        }
+        if dropped && drops && !std::mem::take(&mut self.drop_shown) {
+            self.fire_drop();
         }
         self.since_turn += dt;
         if self.rotation == Rotation::Off {
@@ -798,16 +711,16 @@ impl ReactiveLook {
             *weight = approach(*weight, if i == target { 1.0 } else { 0.0 }, dt, MOTION_FADE);
         }
 
-        let calm = if self.since_kick > CALM_AFTER { 1.0 } else { 0.0 };
+        let calm = if self.phases.grooving { 0.0 } else { 1.0 };
         let filtered = self.filter_amount(levels.tilt, dt);
         self.calm = approach(self.calm, calm, dt, SCENE_FADE);
         self.filtered = approach(self.filtered, filtered, dt, SCENE_FADE);
         let scene = rotate_hue(
-            blend(
+            self.director.tint(blend(
                 blend(color(self.palette.primary), color(self.palette.calm), self.calm),
                 color(self.palette.filtered),
                 self.filtered,
-            ),
+            )),
             self.hue,
         );
         let base = self.note_color.unwrap_or(scene);
@@ -827,6 +740,7 @@ impl ReactiveLook {
         let swell = if grid.is_some() { 1.0 - swell_depth * (0.5 - 0.5 * (TAU * swell_phase).cos()) } else { 1.0 };
         let ripple_phase = self.ripple.advance(dt, grid.map(|g| g.cycle(RIPPLE_BEATS)), RIPPLE_PERIOD);
         let energy = 0.5 * levels.bass + 0.3 * levels.mid + 0.2 * levels.high;
+        self.director.update(dt, energy);
         let breath_time = if energy > self.breath { BREATH_ATTACK } else { BREATH_RELEASE };
         self.breath = approach(self.breath, energy, dt, breath_time);
         let treble = 0.5 * (levels.mid + levels.high);
@@ -842,12 +756,11 @@ impl ReactiveLook {
             let flash = lamp.flash * intensity;
             // Pulse : le flash part de la lueur de fond et monte, selon l'intensité choisie.
             let pulse = (glow + (1.0 - glow) * flash, lamp.punch * flash);
-            // Respiration : suit l'énergie, un kick n'ajoute qu'une houle. En vague, une
-            // ondulation lente traverse la pièce.
-            let ripple = if several && spread == Spread::Wave {
-                1.0 - RIPPLE_DEPTH * (0.5 + 0.5 * (TAU * (ripple_phase - lamp.place)).sin())
-            } else {
-                1.0
+            // Respiration : suit l'énergie, un kick n'ajoute qu'une houle. Une ondulation lente
+            // parcourt la pièce le long du mouvement (tout autour en rotation).
+            let ripple = match lamps::sweep_coordinate(spread, &lamp.at) {
+                Some(place) if several => 1.0 - RIPPLE_DEPTH * (0.5 + 0.5 * (TAU * (ripple_phase - place)).sin()),
+                _ => 1.0,
             };
             let breathing = 0.8 * self.breath * ripple * swell + BREATH_KICK * flash;
             let breath = ((floor + (1.0 - floor) * breathing).min(1.0), 0.0);
@@ -860,7 +773,7 @@ impl ReactiveLook {
                 (w_pulse * pulse.0 + w_breath * breath.0 + w_build * build_up.0) / total,
                 (w_pulse * pulse.1 + w_breath * breath.1 + w_build * build_up.1) / total,
             );
-            if several && spread == Spread::Split && lamp.odd {
+            if several && spread == Spread::Split && lamp.at.odd {
                 // Lampes « aigus » : elles suivent médiums et aigus, sans flash de kick.
                 value = (floor + (1.0 - floor) * (TREBLE_GLOW * self.treble + 0.6 * flash)).min(1.0);
                 white = 0.0;
@@ -870,8 +783,9 @@ impl ReactiveLook {
             if floor < 1.0 {
                 value = floor + (1.0 - floor) * ((value - floor) / (1.0 - floor)).clamp(0.0, 1.0).powf(curve);
             }
-            // Dégradé : chaque lampe s'écarte un peu de la teinte de la scène, et l'écart dérive.
-            let tint = rotate_hue(base, gradient * (TAU * (wander - lamp.place)).sin());
+            // Dégradé : chaque lampe s'écarte un peu de la teinte de la scène, et l'écart dérive à
+            // travers la pièce, de gauche à droite.
+            let tint = rotate_hue(base, gradient * (TAU * (wander - lamp.at.x)).sin());
             let [r, g, b] = tint.map(|c| ((c * (1.0 - white) + white) * value).clamp(0.0, 1.0));
             let quantize = |u: f32| (u * f32::from(u16::MAX)) as u16;
             *out = Rgb { r: quantize(r), g: quantize(g), b: quantize(b) };
@@ -910,6 +824,7 @@ impl ReactiveLook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::space::Spot;
 
     const FRAME: Duration = Duration::from_micros(16_667);
     const FRAMES_PER_SECOND: usize = 60;
@@ -917,10 +832,11 @@ mod tests {
     /// Rouge pour le groove, bleu pour les temps creux, vert pour les filtres.
     const PALETTE: Palette = Palette { primary: [255, 0, 0], calm: [0, 0, 255], filtered: [0, 255, 0] };
 
-    /// Rendu sans dégradé de teintes, pour juger les couleurs de la scène.
+    /// Rendu sans dégradé de teintes ni variantes du régisseur, pour juger les couleurs de la scène.
     fn still(palette: Palette) -> ReactiveLook {
         let mut look = ReactiveLook::new(palette);
         look.dynamics.gradient = 0.0;
+        look.set_director(false);
         look
     }
 
@@ -934,7 +850,7 @@ mod tests {
         let mut color = Rgb::OFF;
         for frame in 0..(seconds * FRAMES_PER_SECOND as f32) as usize {
             if kicks && frame % 24 == 0 {
-                look.kick_detected();
+                look.kick_detected(1.0);
             }
             color = look.render(FRAME, levels);
         }
@@ -956,6 +872,7 @@ mod tests {
 
     #[test]
     fn the_groove_shows_the_primary_color_and_a_break_the_calm_one() {
+        // Sans dégradé ni variantes de teinte du régisseur, pour juger les couleurs choisies.
         let mut look = still(PALETTE);
         let groove = play(&mut look, 5.0, 1.0, true);
         assert!(groove.r > 10 * groove.b.max(groove.g).max(1), "groove : {groove:?}");
@@ -1001,7 +918,7 @@ mod tests {
         // Passe-haut tourné sur 2 s : le kick disparaît à mi-chemin.
         for frame in 0..2 * FRAMES_PER_SECOND {
             if frame < FRAMES_PER_SECOND && frame % 24 == 0 {
-                look.kick_detected();
+                look.kick_detected(1.0);
             }
             let tilt = 1.0 - 4.0 * frame as f32 / (2 * FRAMES_PER_SECOND) as f32;
             look.render(FRAME, Levels { bass: 1.0, tilt: Some(tilt), ..Levels::default() });
@@ -1078,7 +995,7 @@ mod tests {
         let mut color = Rgb::OFF;
         for frame in 0..frames {
             if kick_every.is_some_and(|every| frame % every == 0) {
-                look.kick_detected();
+                look.kick_detected(1.0);
                 look.kick();
             }
             color = look.render(FRAME, levels(frame as f32 / FRAMES_PER_SECOND as f32));
@@ -1120,11 +1037,88 @@ mod tests {
         assert_eq!(look.phase(), Phase::Groove);
     }
 
+    /// Joue de `from` à `until` (s) un morceau à 150 BPM dont la structure est connue : une
+    /// phrase de 16 temps dure 6,4 s, têtes à 0, 6,4, 12,8 et 19,2 s. Un kick toutes les
+    /// `kick_every` trames, aux basses `bass(t)`. Renvoie l'avancement de la montée et le temps
+    /// avant son drop.
+    fn structured(look: &mut ReactiveLook, from: f32, until: f32, kick_every: usize, bass: impl Fn(f32) -> f32) -> (Option<f32>, Option<f32>) {
+        let (period, phrase) = (0.4f32, 6.4f32);
+        for frame in (from * 60.0).round() as usize..(until * 60.0).round() as usize {
+            let t = frame as f32 / 60.0;
+            look.set_structure(Some((period, (phrase - t.rem_euclid(phrase)) / period)));
+            if frame % kick_every == 0 {
+                look.kick_detected(1.0);
+                look.kick();
+            }
+            look.render(FRAME, sound(bass(t), -20.0));
+        }
+        (look.build_progress(), look.drop_in())
+    }
+
+    #[test]
+    fn a_build_up_aims_its_drop_at_a_phrase_head() {
+        let mut look = white_look(Motion::Auto);
+        structured(&mut look, 0.0, 4.0, 24, |_| 0.8);
+        // Un roulement de kicks à 4 s : la montée vise la tête de 12,8 s (celle de 6,4 s est trop
+        // proche de son début).
+        let (early, drop_in) = structured(&mut look, 4.0, 6.0, 6, |_| 0.8);
+        assert!(early.is_some_and(|p| p < 0.3), "{early:?}");
+        assert!(drop_in.is_some_and(|s| (s - 6.8).abs() < 0.3), "{drop_in:?}");
+        let (late, _) = structured(&mut look, 6.0, 11.0, 6, |_| 0.8);
+        assert!(late.is_some_and(|p| (0.6..0.9).contains(&p)), "{late:?}");
+        // Pas de drop à 12,8 s : il est attendu à la tête suivante, la tension reste au plein.
+        let (full, drop_in) = structured(&mut look, 11.0, 13.2, 6, |_| 0.8);
+        assert_eq!(full, Some(1.0));
+        assert!(drop_in.is_some_and(|s| (s - 6.0).abs() < 0.3), "{drop_in:?}");
+    }
+
+    #[test]
+    fn a_predicted_drop_lights_up_ahead_and_is_not_replayed() {
+        let mut look = white_look(Motion::Auto);
+        look.set_drop_advance(0.2);
+        structured(&mut look, 0.0, 4.0, 24, |_| 0.8);
+        // Roulement filtré (basses faibles) jusqu'au drop de 12,8 s.
+        structured(&mut look, 4.0, 12.5, 6, |_| 0.3);
+        assert!(!look.drop_shown);
+        structured(&mut look, 12.5, 12.65, 6, |_| 0.3);
+        assert!(look.drop_shown, "l'éclat part 0,2 s avant le drop");
+        // Le drop tombe : un kick aux basses pleines, l'éclat n'est pas rejoué.
+        structured(&mut look, 12.65, 12.8, 1000, |_| 0.3);
+        structured(&mut look, 12.8, 14.0, 24, |_| 0.9);
+        assert_eq!(look.phase(), Phase::Groove);
+        assert!(!look.drop_shown && !look.phases.anticipation_missed);
+    }
+
+    #[test]
+    fn a_drop_that_does_not_come_cuts_its_flash_and_is_not_predicted_again() {
+        let mut look = white_look(Motion::Auto);
+        look.set_drop_advance(0.2);
+        structured(&mut look, 0.0, 4.0, 24, |_| 0.8);
+        structured(&mut look, 4.0, 12.65, 6, |_| 0.3);
+        assert!(look.drop_shown);
+        // Le roulement continue, sans drop : l'éclat s'éteint 0,25 s après l'instant prévu.
+        structured(&mut look, 12.65, 13.1, 6, |_| 0.3);
+        assert!(!look.drop_shown && look.phases.anticipation_missed);
+        assert_eq!(look.phase(), Phase::BuildUp);
+        // Et la tête suivante n'est plus montrée d'avance.
+        structured(&mut look, 13.1, 19.1, 6, |_| 0.3);
+        assert!(!look.drop_shown);
+    }
+
     #[test]
     fn kick_rolls_are_a_build_up() {
         let mut look = white_look(Motion::Auto);
+        perform(&mut look, 6.0, |_| sound(0.8, -20.0), Some(24));
         perform(&mut look, 3.0, |_| sound(0.8, -20.0), Some(6));
         assert_eq!(look.phase(), Phase::BuildUp);
+    }
+
+    #[test]
+    fn steady_eighths_are_a_groove_not_a_roll() {
+        // Hard house : kick et donk en croches, cinq coups par seconde, depuis le début.
+        let mut look = white_look(Motion::Auto);
+        perform(&mut look, 20.0, |_| sound(0.8, -20.0), Some(12));
+        assert_eq!(look.phase(), Phase::Groove);
     }
 
     #[test]
@@ -1170,7 +1164,7 @@ mod tests {
     /// Quatre lampes de gauche à droite, données dans le désordre ; flash de 1 s pour bien voir
     /// lesquelles sont allumées.
     fn room(spread: Spread) -> ReactiveLook {
-        let mut look = still(PALETTE);
+        let mut look = ReactiveLook::new(PALETTE);
         look.motion = Motion::Pulse;
         look.spread = spread;
         look.dynamics = Dynamics { flash: 1.0, decay: 1.0, floor: 0.0, curve: 1.0, gradient: 0.0, ..Dynamics::default() };
@@ -1200,14 +1194,102 @@ mod tests {
     }
 
     #[test]
-    fn the_wave_crosses_the_room_then_comes_back() {
+    fn the_wave_goes_lamp_by_lamp_on_the_kicks_then_comes_back() {
         let mut look = room(Spread::Wave);
+        // Un groupe par kick, allumé sur le kick même : gauche → droite, puis retour.
+        let mut lamps = Vec::new();
+        for _ in 0..6 {
+            look.kick_at(Accent::Beat);
+            let lit = lit(&mut look, FRAME);
+            assert_eq!(lit.iter().filter(|&&on| on).count(), 1, "{lit:?}");
+            lamps.push(lit.iter().position(|&on| on).unwrap());
+            look.cancel_flash();
+        }
+        assert_eq!(lamps, [0, 1, 2, 3, 2, 1]);
+        // Tête de mesure : toutes ensemble.
+        look.kick_at(Accent::Bar);
+        assert_eq!(lit(&mut look, FRAME), [true; 4]);
+    }
+
+    /// Une lampe par coin, de 5 × 4 m, DJ au milieu du devant : devant gauche au sol, devant droite
+    /// et fond gauche à mi-hauteur, fond droite au plafond.
+    fn corners(spread: Spread) -> ReactiveLook {
+        let mut look = room(spread);
+        let spot = |x, y, z| Spot { x, y, z };
+        look.set_space(&Space {
+            spots: vec![spot(0.5, 0.5, 0.0), spot(4.5, 0.5, 0.5), spot(0.5, 3.5, 0.5), spot(4.5, 3.5, 1.0)],
+            dj: [2.5, 0.0],
+        });
+        look
+    }
+
+    /// Lampes allumées dans l'ordre de `corners` : devant gauche, devant droite, fond gauche, fond
+    /// droite.
+    fn lit_corners(look: &mut ReactiveLook, dt: Duration) -> [bool; 4] {
+        let colors = look.render_lamps(dt, Levels::default()).to_vec();
+        std::array::from_fn(|i| brightness(colors[i]) > u16::MAX / 2)
+    }
+
+    #[test]
+    fn rotation_goes_around_the_room_one_lamp_per_kick() {
+        let mut look = corners(Spread::Rotate);
+        let mut order = Vec::new();
+        for _ in 0..4 {
+            look.kick_at(Accent::Beat);
+            let lit = lit_corners(&mut look, FRAME);
+            assert_eq!(lit.iter().filter(|&&on| on).count(), 1, "{lit:?}");
+            order.push(lit.iter().position(|&on| on).unwrap());
+            look.cancel_flash();
+        }
+        // Vue de dessus, devant en bas : devant gauche, fond gauche, fond droite, devant droite, en
+        // partant de n'importe laquelle.
+        let start = order.iter().position(|&i| i == 0).unwrap();
+        order.rotate_left(start);
+        assert_eq!(order, [0, 2, 3, 1]);
+    }
+
+    #[test]
+    fn ping_pong_and_corners_answer_each_other() {
+        let mut look = corners(Spread::PingPong);
         look.kick_at(Accent::Beat);
-        assert_eq!(lit(&mut look, FRAME), [true, false, false, false], "départ à gauche");
-        assert_eq!(lit(&mut look, Duration::from_millis(130)), [true; 4], "arrivée à droite");
+        assert_eq!(lit_corners(&mut look, FRAME), [true, true, false, false], "devant");
         look.cancel_flash();
         look.kick_at(Accent::Beat);
-        assert_eq!(lit(&mut look, FRAME), [false, false, false, true], "retour depuis la droite");
+        assert_eq!(lit_corners(&mut look, FRAME), [false, false, true, true], "fond");
+        let mut look = corners(Spread::Corners);
+        look.kick_at(Accent::Beat);
+        let first = lit_corners(&mut look, FRAME);
+        assert!(first == [true, false, false, true] || first == [false, true, true, false], "{first:?}");
+    }
+
+    #[test]
+    fn chases_start_where_they_should_and_never_wait() {
+        // Onde du DJ : le devant puis le fond ; bas → haut : le sol, la mi-hauteur, le plafond.
+        let cases = [
+            (Spread::Ripple, vec![[true, true, false, false], [false, false, true, true]]),
+            (Spread::Rise, vec![[true, false, false, false], [false, true, true, false], [false, false, false, true]]),
+        ];
+        for (spread, expected) in cases {
+            let mut look = corners(spread);
+            for (n, lamps) in expected.iter().chain(expected.first()).enumerate() {
+                look.kick_at(Accent::Beat);
+                assert_eq!(lit_corners(&mut look, FRAME), *lamps, "{spread:?} kick {n}");
+                // Rien ne s'allume après coup : tout part sur le kick.
+                assert_eq!(lit_corners(&mut look, Duration::from_millis(130)), *lamps, "{spread:?} kick {n}");
+                look.cancel_flash();
+            }
+        }
+    }
+
+    #[test]
+    fn auto_climbs_in_a_build_up_and_turns_in_a_break_when_the_room_allows() {
+        let look = corners(Spread::Auto);
+        assert_eq!(look.first_possible(&[Spread::Rise, Spread::Wave]), Spread::Rise);
+        assert_eq!(look.first_possible(&[Spread::Rotate, Spread::Wave]), Spread::Rotate);
+        // Lampes alignées au même niveau : ni montée ni rotation, la vague les remplace.
+        let line = room(Spread::Auto);
+        assert_eq!(line.first_possible(&[Spread::Rise, Spread::Wave]), Spread::Wave);
+        assert_eq!(line.first_possible(&[Spread::Rotate, Spread::Wave]), Spread::Wave);
     }
 
     #[test]
@@ -1220,7 +1302,7 @@ mod tests {
     #[test]
     fn a_single_lamp_flashes_on_every_kick_whatever_the_spread() {
         for spread in Spread::ALL {
-            let mut look = still(PALETTE);
+            let mut look = ReactiveLook::new(PALETTE);
             look.motion = Motion::Pulse;
             look.spread = spread;
             for _ in 0..3 {
@@ -1247,6 +1329,79 @@ mod tests {
         look.kick_at(Accent::Phrase);
         let phrase = look.render(FRAME, Levels::default());
         assert!(phrase.g > beat.g && phrase.b > beat.b, "{beat:?} {phrase:?}");
+    }
+
+    /// Joue `seconds` avec la grille dans l'état `grid`, les basses à `bass`, un kick tous les
+    /// `every` images (jamais si 0) ; rend la dernière phase.
+    fn groove_run(look: &mut ReactiveLook, seconds: f32, grid: bool, bass: f32, every: usize) -> Phase {
+        let levels = Levels { bass, raw_bass: bass, tilt: Some(0.0), ..Levels::default() };
+        look.set_grid_groove(Some(grid));
+        for frame in 0..(seconds * FRAMES_PER_SECOND as f32) as usize {
+            if every > 0 && frame % every == 0 {
+                look.kick_detected(1.0);
+            }
+            look.render(FRAME, levels);
+        }
+        look.phase()
+    }
+
+    #[test]
+    fn a_break_with_a_few_hits_stays_a_break_until_the_grid_finds_the_kicks_again() {
+        let mut look = ReactiveLook::new(PALETTE);
+        assert_eq!(groove_run(&mut look, 10.0, true, 0.5, 24), Phase::Groove);
+        // Break : la basse continue à moitié, un coup isolé toutes les 1,2 s.
+        assert_eq!(groove_run(&mut look, 3.0, false, 0.25, 72), Phase::Calm);
+        // Un roulement (kicks rapprochés) sans que la grille les confirme : toujours un break.
+        assert_eq!(groove_run(&mut look, 1.0, false, 0.25, 12), Phase::Calm, "roulement");
+        // La grille retrouve des kicks réguliers avec les basses : le groove reprend.
+        assert_eq!(groove_run(&mut look, 1.0, true, 0.5, 24), Phase::Groove);
+    }
+
+    #[test]
+    fn percussion_on_the_beats_of_a_break_without_bass_is_not_a_groove() {
+        // Capture 1792832368 : groove aux basses à 0,10 ; break à 0,02 dont les percussions
+        // tombent sur les temps, et que la grille prend pour des kicks.
+        let mut look = ReactiveLook::new(PALETTE);
+        assert_eq!(groove_run(&mut look, 30.0, true, 0.5, 24), Phase::Groove);
+        // La grille ne lâche pas : les basses seules signent le break, 2 s après être tombées.
+        assert_eq!(groove_run(&mut look, 4.0, true, 0.1, 24), Phase::Calm);
+        for _ in 0..16 {
+            assert_eq!(groove_run(&mut look, 0.5, true, 0.1, 24), Phase::Calm, "le break oscille");
+        }
+        // Le drop : les basses reviennent, le groove reprend aussitôt.
+        assert_eq!(groove_run(&mut look, 1.0, true, 0.5, 24), Phase::Groove);
+    }
+
+    #[test]
+    fn the_drop_brings_the_groove_back_before_the_grid_confirms_it() {
+        let mut look = ReactiveLook::new(PALETTE);
+        groove_run(&mut look, 30.0, true, 0.5, 24);
+        assert_eq!(groove_run(&mut look, 6.0, false, 0.1, 72), Phase::Calm);
+        // Un impact isolé aux basses pleines : toujours le break.
+        groove_run(&mut look, 1.0 / 60.0, false, 0.5, 1);
+        assert_eq!(groove_run(&mut look, 2.0, false, 0.1, 0), Phase::Calm, "impact isolé");
+        // Le drop : deux kicks aux basses pleines, la grille ne les a pas encore confirmés.
+        assert_eq!(groove_run(&mut look, 0.5, false, 0.5, 24), Phase::Groove);
+        // Et le groove tient le temps que la grille le rattrape.
+        assert_eq!(groove_run(&mut look, 1.5, false, 0.5, 24), Phase::Groove);
+        assert_eq!(groove_run(&mut look, 4.0, true, 0.5, 24), Phase::Groove);
+    }
+
+    #[test]
+    fn a_lighter_track_grooves_again_once_the_old_bass_level_is_forgotten() {
+        let mut look = ReactiveLook::new(PALETTE);
+        groove_run(&mut look, 30.0, true, 0.5, 24);
+        // Morceau suivant aux basses bien plus légères : un temps pris pour un break…
+        assert_eq!(groove_run(&mut look, 10.0, true, 0.1, 24), Phase::Calm);
+        // … puis le niveau habituel s'oublie et le groove revient.
+        assert_eq!(groove_run(&mut look, 120.0, true, 0.1, 24), Phase::Groove);
+    }
+
+    #[test]
+    fn a_short_grid_hiccup_in_a_loud_groove_is_not_a_break() {
+        let mut look = ReactiveLook::new(PALETTE);
+        groove_run(&mut look, 10.0, true, 0.5, 24);
+        assert_eq!(groove_run(&mut look, 0.8, false, 0.5, 24), Phase::Groove);
     }
 
     #[test]
@@ -1314,6 +1469,7 @@ mod tests {
     fn lamps_spread_around_the_scene_hue_and_the_gradient_drifts() {
         let mut look = ReactiveLook::new(PALETTE);
         (look.motion, look.spread) = (Motion::Pulse, Spread::Together);
+        look.set_director(false);
         look.set_lamps(&[-1.0, -0.3, 0.3, 1.0]);
         let quiet = Levels { bass: 1.0, ..Levels::default() };
         let mut first = Vec::new();
