@@ -39,8 +39,11 @@ pub fn devices() -> Result<()> {
 
     println!();
     println!("Sorties du PC captables avec `--audio output` (→ : sortie par défaut, sans --input) :");
+    let names: Vec<String> = inputs.iter().map(|input| input.name.clone()).collect();
     for (i, output) in audio::list_outputs()?.iter().enumerate() {
-        println!("{} {output}", if i == 0 { "→" } else { " " });
+        // Une carte qui a son entrée Loopback est écoutée par elle : ASIO compris.
+        let heard = audio::card_loopback(output, &names).map_or(String::new(), |loopback| format!("  (par « {loopback} », ASIO compris)"));
+        println!("{} {output}{heard}", if i == 0 { "→" } else { " " });
     }
 
     println!();
@@ -91,7 +94,7 @@ pub fn test_input(input: Option<String>, backend: Backend) -> Result<()> {
     let features = Arc::new(Features::new(DEFAULT_THRESHOLD));
     let audio = AudioInput::start(input.as_deref(), backend, features.clone())?;
     if let Some(reason) = &audio.fallback {
-        println!("ASIO indisponible ({reason}) : repli sur WASAPI.");
+        println!("{reason}.");
     }
     println!(
         "« {} » en {} ({} Hz, {} canaux) : écoute pendant {} s…",

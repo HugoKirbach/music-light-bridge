@@ -21,6 +21,10 @@ const PREFERRED_INPUT: &str = "focusrite";
 const PREFERRED_ASIO: &str = "focusrite usb";
 /// Durée gardée en mémoire pour la capture (touche `r` du mode live).
 pub const CAPTURE_SECONDS: u32 = 40;
+/// Capture de la sortie du PC par Windows (WASAPI loopback) : un logiciel en ASIO n'y passe pas.
+pub const WINDOWS_LOOPBACK: &str = "sortie du PC";
+/// Capture de la sortie du PC par l'entrée Loopback de la carte son : ASIO compris.
+pub const CARD_LOOPBACK: &str = "Loopback de la carte";
 
 /// Pilote audio utilisé pour la capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
@@ -32,8 +36,36 @@ pub enum Backend {
     Asio,
     /// WASAPI : pilote standard de Windows, partageable avec d'autres logiciels
     Wasapi,
-    /// Sortie du PC (haut-parleurs, carte son) : capte ce que Windows joue, en WASAPI loopback
+    /// Sortie du PC (haut-parleurs, carte son) : capte ce qu'elle joue, par l'entrée Loopback de
+    /// la carte si elle en a une (ASIO compris), sinon en WASAPI loopback
     Output,
+}
+
+/// Entrée Loopback de la carte son qui porte la sortie `output` (Scarlett 4e génération,
+/// Clarett+…), parmi les entrées `inputs` : elle entend tout ce que joue la carte, y compris un
+/// logiciel en ASIO comme Ableton, que le loopback de Windows ne voit pas.
+pub fn card_loopback<'a>(output: &str, inputs: &'a [String]) -> Option<&'a String> {
+    let card = card_name(output)?;
+    inputs.iter().find(|input| input.to_lowercase().contains("loopback") && card_name(input).as_deref() == Some(card.as_str()))
+}
+
+/// Windows nomme ses appareils « Point d'accès (Carte) » : la carte est entre les dernières
+/// parenthèses, qui peuvent en contenir d'autres (« Realtek(R) Audio »).
+fn card_name(device: &str) -> Option<String> {
+    let inner = device.trim_end().strip_suffix(')')?;
+    let mut depth = 0;
+    for (i, c) in inner.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' if depth > 0 => depth -= 1,
+            '(' => {
+                let card = inner[i + 1..].trim().to_lowercase();
+                return (!card.is_empty()).then_some(card);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Sorties audio du PC, captables en mode `Output` ; la première est la sortie par défaut.
@@ -86,7 +118,8 @@ pub struct AudioInput {
     pub device: String,
     /// « ASIO », « WASAPI » ou « sortie du PC ».
     pub backend: &'static str,
-    /// En mode automatique, la raison pour laquelle l'ASIO n'a pas pu être utilisé.
+    /// Pourquoi la capture préférée n'a pas pu être utilisée (l'ASIO en mode automatique,
+    /// l'entrée Loopback de la carte pour la sortie du PC), et ce qui la remplace.
     pub fallback: Option<String>,
     pub sample_rate: u32,
     pub channels: u16,
@@ -98,7 +131,7 @@ impl AudioInput {
     /// `wanted` : morceau du nom de l'entrée (ou du pilote ASIO) ; à défaut, la Focusrite,
     /// et en WASAPI l'entrée par défaut de Windows si elle n'est pas branchée.
     /// En mode `Output`, `wanted` est un morceau du nom de la sortie ; à défaut, la sortie par
-    /// défaut de Windows.
+    /// défaut de Windows. Sa carte est écoutée par son entrée Loopback quand elle en a une.
     pub fn start(wanted: Option<&str>, backend: Backend, features: Arc<Features>) -> Result<Self> {
         Self::start_into(wanted, backend, features, Arc::new(Mutex::new(Capture::new(1, 0))))
     }
@@ -114,7 +147,7 @@ impl AudioInput {
                 Ok(input) => Ok(input),
                 Err(asio) => {
                     let mut input = Self::open(HostId::Wasapi, wanted, features, capture)?;
-                    input.fallback = Some(format!("{asio:#}"));
+                    input.fallback = Some(format!("ASIO indisponible ({asio:#}) : capture en WASAPI"));
                     Ok(input)
                 }
             },
@@ -129,7 +162,9 @@ impl AudioInput {
         Self::capture(device, supported, backend, features, capture)
     }
 
-    /// Ouvre une sortie comme une entrée : WASAPI capte alors ce qui y est joué (loopback).
+    /// Capte ce que joue une sortie : par l'entrée Loopback de sa carte si elle en a une, qui
+    /// entend aussi les logiciels en ASIO ; sinon en ouvrant la sortie comme une entrée, et
+    /// WASAPI capte ce que Windows y joue (loopback).
     fn open_output(wanted: Option<&str>, features: Arc<Features>, capture: Arc<Mutex<Capture>>) -> Result<Self> {
         let host = cpal::host_from_id(HostId::Wasapi)?;
         let device = match wanted {
@@ -141,8 +176,24 @@ impl AudioInput {
             }
             None => host.default_output_device().context("aucune sortie audio disponible")?,
         };
+        let inputs: Vec<cpal::Device> = host.input_devices()?.collect();
+        let names: Vec<String> = inputs.iter().map(ToString::to_string).collect();
+        let mut fallback = None;
+        if let Some(name) = card_loopback(&device.to_string(), &names) {
+            let input = inputs.into_iter().find(|input| input.to_string() == *name).context("entrée Loopback disparue")?;
+            let opened = input
+                .default_input_config()
+                .map_err(anyhow::Error::from)
+                .and_then(|supported| Self::capture(input, supported, CARD_LOOPBACK, features.clone(), capture.clone()));
+            match opened {
+                Ok(audio) => return Ok(audio),
+                Err(e) => fallback = Some(format!("Entrée « {name} » indisponible ({e:#}) : capture par Windows")),
+            }
+        }
         let supported = device.default_output_config()?;
-        Self::capture(device, supported, "sortie du PC", features, capture)
+        let mut audio = Self::capture(device, supported, WINDOWS_LOOPBACK, features, capture)?;
+        audio.fallback = fallback;
+        Ok(audio)
     }
 
     fn capture(
@@ -246,4 +297,26 @@ where
         None,
     )?;
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_card_is_heard_through_its_own_loopback_input() {
+        let inputs = [
+            "Analogue 1 + 2 (Focusrite USB Audio)".to_owned(),
+            "Loopback (Focusrite USB Audio)".to_owned(),
+            "Microphone (Realtek(R) Audio)".to_owned(),
+        ];
+        let loopback = card_loopback("Haut-parleurs (Focusrite USB Audio)", &inputs);
+        assert_eq!(loopback.map(String::as_str), Some("Loopback (Focusrite USB Audio)"));
+        assert_eq!(card_loopback("Haut-parleurs (Realtek(R) Audio)", &inputs), None, "pas de Loopback sur la carte de la carte mère");
+        let two = ["Loopback 1 + 2 (2- Focusrite USB Audio)".to_owned()];
+        assert_eq!(card_loopback("Speakers (Focusrite USB Audio)", &two), None, "une autre Focusrite branchée");
+        assert!(card_loopback("Speakers (2- Focusrite USB Audio)", &two).is_some());
+        assert_eq!(card_loopback("Sortie sans carte", &inputs), None);
+        assert_eq!(card_name("Haut-parleurs (Realtek(R) Audio)").as_deref(), Some("realtek(r) audio"));
+    }
 }

@@ -52,7 +52,7 @@ et répartit la lumière entre les lampes selon leur place dans la pièce.
 - Une source audio, au choix :
   - une carte son (testé avec une Focusrite Scarlett 2i2) branchée sur la table de mixage ou le
     synthé, de préférence en ASIO ;
-  - rien du tout : l'option **Sortie du PC** capte ce que joue Windows (Spotify, Ableton…).
+  - rien du tout : l'option **Sortie du PC** capte ce que joue le PC (Spotify, Ableton…).
 - Le PC et le bridge sur le même réseau local. Le téléphone aussi, pour la télécommande.
 
 ## Installation
@@ -140,7 +140,11 @@ zone pilotée et le nombre de lampes.
 
 1. **Source audio.**
    - **Carte son** : platines ou synthé branchés sur la carte son.
-   - **Sortie du PC** : capte ce que joue Windows (WASAPI loopback).
+   - **Sortie du PC** : capte ce que joue le PC, sans rien brancher. Si la carte de cette sortie
+     a une entrée **Loopback** (Scarlett 4e génération, Clarett+…), DJ-Bridge écoute celle-ci :
+     elle entend tout ce que joue la carte, y compris Ableton en ASIO. Sinon, il capte ce que
+     Windows joue sur la sortie (WASAPI loopback), où un logiciel en ASIO ne passe pas. La ligne
+     sous l'appareil dit laquelle sera écoutée.
 2. **Lampes.**
    - Cochez les lampes de la zone à piloter. Les autres gardent leur état pendant le live.
    - **Mettre à jour** relit la zone si elle a changé dans l'app Hue.
@@ -549,6 +553,17 @@ Ne publiez pas `config.json` : il contient les clés d'accès au bridge.
   Paramètres > Confidentialité > Microphone et activez « Autoriser les applications de bureau ».
 - **ASIO indisponible** : un pilote ASIO n'accepte souvent qu'un logiciel à la fois (Ableton
   l'occupe). DJ-Bridge se replie alors sur WASAPI et le dit.
+- **Ableton n'est pas entendu** (« Rien n'arrive de la sortie du PC ») : en ASIO, Ableton joue
+  directement sur la carte, sans passer par Windows. Choisissez **Sortie du PC** avec la sortie
+  de la carte : si elle a une entrée Loopback, DJ-Bridge l'écoute et entend Ableton. Vérifiez
+  dans Focusrite Control que le Loopback reprend bien la lecture de l'ordinateur. Sans entrée
+  Loopback, deux solutions :
+  - dans Ableton, Préférences > Audio, passez le type de pilote sur **MME/DirectX** (plus de
+    latence pour jouer) ;
+  - ou gardez l'ASIO et prenez le tempo **Ableton Link** avec les flashs **Chaque temps** : la
+    lumière suit alors la session sans écouter le son.
+- **« Aucun son capté depuis 10 s »** : la source n'entend rien. Vérifiez l'appareil choisi et
+  son gain.
 - **Les flashs arrivent après le son** : refaites `dj-bridge latency`. Avec plusieurs lampes,
   réglez leurs retards avec le test de synchro.
 - **Lampe absente** : elle doit faire partie de la zone de divertissement (app Hue), puis cliquez

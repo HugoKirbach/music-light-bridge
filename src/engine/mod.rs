@@ -53,6 +53,8 @@ const NO_BUILD: u8 = u8::MAX;
 const AUDIO_RETRY: Duration = Duration::from_secs(2);
 /// Plus aucun bloc audio depuis 1 s : l'entrée est perdue.
 const AUDIO_STALL: Duration = Duration::from_secs(1);
+/// Rien entendu depuis 10 s : mauvaise source, ou un logiciel en ASIO que Windows ne voit pas.
+const SILENT_AFTER: Duration = Duration::from_secs(10);
 const BRIDGE_RETRY: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(5));
 pub const THRESHOLD_RANGE: (f32, f32) = (1.1, 4.0);
 /// Retard propre maximal d'une lampe (ms) : au-delà, c'est un réglage d'avance générale.
@@ -97,7 +99,7 @@ pub struct Options {
 pub struct Info {
     pub device: String,
     pub backend: &'static str,
-    /// Pourquoi l'ASIO n'a pas pu être utilisé, en mode automatique.
+    /// Pourquoi la capture préférée n'a pas pu être utilisée, et ce qui la remplace.
     pub fallback: Option<String>,
     pub sample_rate: u32,
     pub channels: u16,
@@ -132,6 +134,8 @@ pub struct Status {
     pub reaction_ms: f64,
     pub glitches: u32,
     pub input_lost: bool,
+    /// La source n'a rien fait entendre depuis 10 s.
+    pub silent: bool,
     /// Le bridge ne répond plus : le flux tente de se rouvrir.
     pub bridge_lost: bool,
     /// Dernière scène rappelée.
@@ -533,6 +537,7 @@ impl Engine {
             reaction_ms: self.shared.average_reaction_ms(),
             glitches: features.glitches(),
             input_lost: self.audio_lost(),
+            silent: features.silence() > SILENT_AFTER,
             bridge_lost: self.shared.bridge_lost.load(Ordering::Relaxed),
             preset: lock(&self.shared.preset).clone(),
             outside_changes: self.shared.outside_changes.load(Ordering::Relaxed),
@@ -767,7 +772,7 @@ impl fmt::Display for Info {
             self.device, self.backend, self.sample_rate, self.channels, self.area
         )?;
         if let Some(reason) = &self.fallback {
-            write!(f, "\nASIO indisponible ({reason}) : capture en WASAPI.")?;
+            write!(f, "\n{reason}.")?;
         }
         if !self.lamps.is_empty() {
             write!(f, "\nLampes pilotées : {}.", self.lamps.join(", "))?;

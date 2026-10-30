@@ -166,6 +166,7 @@ fn status_text(status: &Status) -> String {
     let alert = match status.glitches {
         _ if status.bridge_lost => " ⚠ bridge injoignable, reconnexion…".to_owned(),
         _ if status.input_lost => " ⚠ entrée perdue, reconnexion…".to_owned(),
+        _ if status.silent => " ⚠ aucun son capté".to_owned(),
         0 => String::new(),
         n => format!(" ⚠{n}"),
     };

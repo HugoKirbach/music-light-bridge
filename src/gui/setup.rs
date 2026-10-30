@@ -9,7 +9,7 @@ use eframe::egui::{self, Align, Frame, Layout, Margin, Sense, Stroke, Ui, pos2, 
 use super::light::{PAGES, SETUP_SKIN};
 use super::theme::{self, ACCENT, BG, BOLD, BORDER, CARD, DANGER, Icon, LABEL, LIVE, MUTED, PANEL, RAISED, SEMIBOLD, TEXT};
 use super::{App, Bridge, MODES, TempoChoice, flash_text};
-use crate::audio::Backend;
+use crate::audio::{self, Backend};
 use crate::tempo::DEFAULT_BPM_RANGE;
 
 const ASIDE_WIDTH: f32 = 360.0;
@@ -119,7 +119,7 @@ impl App {
                 output,
                 Some(Icon::Speaker),
                 "Sortie du PC",
-                "Ce que joue Windows : Spotify, Ableton…",
+                "Ce que joue le PC : Spotify, Ableton…",
             );
             if card.clicked() && !output {
                 self.card_backend = self.settings.audio;
@@ -225,11 +225,15 @@ impl App {
                 }
             });
         if output {
-            ui.label(theme::text(
-                "Capte ce que le PC joue sur cette sortie (WASAPI loopback), sans rien brancher.",
-                theme::regular(12.0),
-                LABEL,
-            ));
+            // La sortie choisie, ou celle par défaut de Windows (la première de la liste).
+            let chosen = self.settings.input.as_ref().or(self.outputs.first());
+            let note = match chosen.and_then(|output| audio::card_loopback(output, &self.inputs)) {
+                Some(loopback) => format!("Écoute l'entrée « {loopback} » de la carte : tout ce qu'elle joue, Ableton en ASIO compris."),
+                None => "Capte ce que Windows joue sur cette sortie, sans rien brancher. Ableton en ASIO n'y passe pas : \
+                         choisis MME/DirectX dans Ableton, ou Ableton Link."
+                    .to_owned(),
+            };
+            ui.label(theme::text(note, theme::regular(12.0), LABEL));
         }
     }
 

@@ -7,6 +7,7 @@ use eframe::egui::{self, Align, Color32, CornerRadius, Frame, Layout, Margin, Se
 use super::light::{Page, STAGE_SKIN};
 use super::theme::{self, BOLD, Icon, LIVE, MONO_BOLD, SEMIBOLD, STAGE_BG};
 use super::{App, MODES, Tab, flash_text, format_bpm};
+use crate::audio::WINDOWS_LOOPBACK;
 use crate::engine::{MAX_LAMP_DELAY_MS, Status};
 use crate::tempo::TempoSource;
 
@@ -20,6 +21,10 @@ const TABS: [(Tab, &str); 7] = [
     (Tab::Lamps, "Lampes"),
     (Tab::Source, "Source"),
 ];
+/// Que faire quand la sortie du PC n'entend pas Ableton.
+const ASIO_HINT: &str = "Ableton en ASIO joue directement sur la carte, sans passer par Windows. Une carte avec \
+     entrée Loopback (Scarlett 4e génération…) est écoutée d'office ; sinon, choisis MME/DirectX dans Ableton, ou \
+     Ableton Link avec les flashs « Chaque temps ».";
 const SOFT: Color32 = Color32::from_rgb(0xD9, 0xDC, 0xE1);
 const DIM: Color32 = Color32::from_rgb(0xB4, 0xB9, 0xC1);
 
@@ -148,11 +153,23 @@ impl App {
             Some("Bridge injoignable : reconnexion en cours…".to_owned())
         } else if status.input_lost {
             Some("Entrée audio perdue (câble ou pilote ?) : reconnexion en cours…".to_owned())
+        } else if status.silent {
+            let text = if self.windows_loopback() {
+                "Rien n'arrive de la sortie du PC : Ableton en ASIO n'y passe pas (onglet Source)"
+            } else {
+                "Aucun son capté depuis 10 s : vérifie l'appareil (onglet Source)"
+            };
+            Some(text.to_owned())
         } else if status.glitches > 0 {
             Some(format!("{} coupure(s) audio", status.glitches))
         } else {
             None
         }
+    }
+
+    /// La sortie du PC est captée par Windows, qui ne voit pas les logiciels en ASIO.
+    fn windows_loopback(&self) -> bool {
+        self.engine.as_ref().is_some_and(|engine| engine.info.backend == WINDOWS_LOOPBACK)
     }
 
     /// Dock des réglages modifiables pendant le live, en onglets.
@@ -313,7 +330,10 @@ impl App {
                 ui.label(theme::text(format!("Lampes pilotées : {}", info.lamps.join(", ")), theme::regular(13.0), DIM));
             }
             if let Some(reason) = &info.fallback {
-                ui.label(theme::text(format!("ASIO indisponible : {reason}"), theme::regular(12.0), DIM));
+                ui.label(theme::text(reason, theme::regular(12.0), DIM));
+            }
+            if status.silent && info.backend == WINDOWS_LOOPBACK {
+                ui.label(theme::text(ASIO_HINT, theme::regular(13.0), Color32::WHITE));
             }
             if let Some(url) = &info.remote_url {
                 ui.label(theme::text(format!("Télécommande : {url}"), theme::font(13.0, SEMIBOLD), Color32::WHITE));

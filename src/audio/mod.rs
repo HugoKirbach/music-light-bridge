@@ -6,7 +6,7 @@ mod input;
 #[cfg(test)]
 pub mod synth;
 
-pub use input::{AudioInput, Backend, CAPTURE_SECONDS, list_inputs, list_outputs};
+pub use input::{AudioInput, Backend, CAPTURE_SECONDS, WINDOWS_LOOPBACK, card_loopback, list_inputs, list_outputs};
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -110,6 +110,8 @@ pub struct Features {
     input_lost: AtomicBool,
     /// Arrivée du dernier bloc audio (ns depuis l'origine) ; 0 avant le premier.
     last_block_ns: AtomicU64,
+    /// Arrivée du dernier bloc où l'on entendait quelque chose (ns) ; 0 avant le premier.
+    last_sound_ns: AtomicU64,
     grid_period: AtomicU64,
     grid_anchor: AtomicU64,
     grid_locked: AtomicBool,
@@ -138,6 +140,7 @@ impl Features {
             glitches: AtomicU32::new(0),
             input_lost: AtomicBool::new(false),
             last_block_ns: AtomicU64::new(0),
+            last_sound_ns: AtomicU64::new(0),
             grid_period: AtomicU64::new(0),
             grid_anchor: AtomicU64::new(0),
             grid_locked: AtomicBool::new(false),
@@ -166,6 +169,12 @@ impl Features {
     pub fn block_age(&self) -> Option<Duration> {
         let last = self.last_block_ns.load(Ordering::Relaxed);
         (last > 0).then(|| self.epoch.elapsed().saturating_sub(Duration::from_nanos(last)))
+    }
+
+    /// Temps écoulé sans rien entendre (blocs muets, ou plus aucun bloc), depuis l'origine si
+    /// rien n'a encore été entendu.
+    pub fn silence(&self) -> Duration {
+        self.epoch.elapsed().saturating_sub(Duration::from_nanos(self.last_sound_ns.load(Ordering::Relaxed)))
     }
 
     /// Secondes écoulées entre l'origine commune et `t` : l'unité de temps de l'horloge de tempo.
@@ -264,7 +273,12 @@ impl Features {
     }
 
     fn publish_levels(&self, levels: Levels) {
-        self.last_block_ns.store(self.epoch.elapsed().as_nanos().max(1) as u64, Ordering::Relaxed);
+        let now = self.epoch.elapsed().as_nanos().max(1) as u64;
+        self.last_block_ns.store(now, Ordering::Relaxed);
+        // Basses ou aigus au-dessus du plancher du gain : il y a du son.
+        if levels.tilt.is_some() {
+            self.last_sound_ns.store(now, Ordering::Relaxed);
+        }
         self.bass.store(levels.bass);
         self.mid.store(levels.mid);
         self.high.store(levels.high);
@@ -298,6 +312,16 @@ mod tests {
         features.clear_input_lost();
         assert!(!features.input_lost());
         assert!(features.block_age().is_some_and(|age| age < Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn silence_counts_from_the_last_block_that_carried_sound() {
+        let features = Features::new(1.6);
+        std::thread::sleep(Duration::from_millis(20));
+        features.publish_levels(Levels::default());
+        assert!(features.silence() >= Duration::from_millis(20), "des blocs muets ne comptent pas");
+        features.publish_levels(Levels { tilt: Some(0.0), ..Levels::default() });
+        assert!(features.silence() < Duration::from_millis(20));
     }
 
     #[test]
