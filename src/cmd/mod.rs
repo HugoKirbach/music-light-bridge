@@ -6,6 +6,7 @@ pub mod bench;
 mod catalogue;
 pub mod latency;
 pub mod live;
+pub mod probe;
 pub mod setup;
 pub mod test;
 mod tui;

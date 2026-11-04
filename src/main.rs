@@ -12,6 +12,7 @@ mod link;
 mod look;
 mod metronome;
 mod phrase;
+mod prolink;
 mod rhythm;
 mod room;
 mod midi;
@@ -110,6 +111,19 @@ enum Command {
         /// Durée de chaque tranche du résumé (s)
         #[arg(long, default_value_t = 4.0)]
         slice: f64,
+    },
+    /// Sonde OPUS-QUAD : écoute ce que l'OPUS envoie par le câble USB et rend compte de la liaison
+    #[command(name = "sonde-opus")]
+    Probe {
+        /// Durée de l'écoute (s) ; Échap arrête avant
+        #[arg(long, default_value_t = 180)]
+        seconds: u64,
+        /// Morceau du nom de la carte réseau à utiliser ; sinon celle où l'OPUS s'annonce
+        #[arg(long)]
+        interface: Option<String>,
+        /// Écoute seulement, sans se présenter comme rekordbox
+        #[arg(long = "passif")]
+        passive: bool,
     },
 }
 
@@ -216,5 +230,8 @@ fn main() -> Result<()> {
             &cfg,
             cmd::analyze::Options { path, threshold, bpm, bpm_range: (bpm_min, bpm_max), slice },
         ),
+        Command::Probe { seconds, interface, passive } => {
+            cmd::probe::run(cmd::probe::Options { seconds, interface, passive })
+        }
     }
 }

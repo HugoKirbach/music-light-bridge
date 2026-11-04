@@ -527,6 +527,23 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
 
   Chaque cas vérifie que la lumière tape sur les kicks en groove et flotte en break.
 
+## OPUS-QUAD par le câble USB (sonde)
+
+L'OPUS-QUAD a une carte réseau intégrée côté USB. Il ne parle pas vraiment Pro DJ Link : il ne
+dialogue qu'avec rekordbox, pour le mode Lighting. `dj-bridge sonde-opus` se présente donc comme
+rekordbox, écoute ce que l'OPUS envoie, et fait le bilan : la carte réseau utilisée, l'état de
+chaque platine (morceau, tempo, pitch, lecture, maître, à l'antenne), la structure des morceaux
+(analyse de phrases de rekordbox) et les coupures de la liaison. Chaque paquet est écrit dans
+`captures\opus-….txt`.
+
+- Options : `--seconds` (180 par défaut), `--interface "nom partiel"` pour imposer la carte
+  réseau, `--passif` pour écouter sans rien envoyer.
+- rekordbox doit être fermé : il prend les mêmes ports (50000 à 50002).
+- L'OPUS n'envoie ni paquets de temps ni position précise : la phase restera l'affaire du son.
+  Ces informations serviront de carte (tempo exact, structure des morceaux).
+- Le protocole vient du travail de Deep Symmetry (Beat Link, analyse Pro DJ Link) et de Kyle
+  Awayan (analyse des échanges entre l'OPUS et rekordbox).
+
 ## Fichiers et état des lampes
 
 Avant de prendre la main sur la zone, DJ-Bridge photographie l'état de chaque lampe : marche,

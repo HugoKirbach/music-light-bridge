@@ -1,11 +1,12 @@
 # Guide d'essai des évolutions
 
-Toutes les évolutions sont sur la branche `evolutions`, une par commit, le numéro entre crochets
-(`[15] …`). `master` n'a pas bougé : il reste la version stable (étiquette `stable-2026-10`).
+Les évolutions arrivent sur la branche `evolutions`, une par commit, le numéro entre crochets
+(`[26] …`). Depuis la PR #3, tout ce qui précède [26] est aussi dans `master`. `master` reste la
+version pour jouer : une nouvelle évolution n'y passe qu'une fois essayée et gardée.
 
 **Comment répondre :** pour chaque numéro, dis « ok », « pas ok » (avec ce que tu as vu) ou « à
-revoir ». Je reconstruis ensuite `master` à partir de la version stable avec seulement ce que tu
-gardes, puis je vérifie compilation, tests et banc d'essai. Tu n'as rien à faire dans git.
+revoir ». Je fais passer dans `master` ce que tu gardes, puis je vérifie compilation, tests et banc
+d'essai. Tu n'as rien à faire dans git.
 
 **Avant de commencer :**
 
@@ -191,6 +192,43 @@ hard trance du 28 octobre (158 à 163 BPM).
   à côté. Dis-moi ce qui se passe dans la capture manuelle de 19 h 55, je l'ajouterai au banc.
 - Une caisse claire qui continue dans le trou du kick fait flasher son temps.
 
+## [26] Sonde OPUS-QUAD par le câble USB
+
+Avant de brancher l'OPUS sur la lumière, il faut savoir ce qu'il envoie au PC par le seul câble
+USB, et si la liaison tient. La sonde se présente à l'OPUS comme rekordbox (mode Lighting), écoute,
+et fait le bilan. Elle ne touche pas aux lampes.
+
+**À faire :**
+1. Ferme rekordbox : il prend les mêmes ports réseau.
+2. Branche l'OPUS au PC en USB-C, avec ta clé USB dans l'OPUS, comme pour mixer.
+3. Lance la sonde (3 minutes, Échap pour arrêter avant) :
+
+   ```bash
+   .\target\release\dj-bridge.exe sonde-opus
+   ```
+
+4. Si Windows demande d'autoriser dj-bridge sur le réseau, accepte. Si la carte réseau de l'OPUS
+   est rangée dans les réseaux publics, il faut aussi cocher « publics ».
+5. Pendant l'écoute :
+   - charge un morceau sur la platine 1, lance-le, bouge le pitch ;
+   - charge un morceau sur la platine 2, lance-le ;
+   - passe le rôle de maître de l'une à l'autre ;
+   - baisse puis remonte le fader d'une platine.
+6. Copie-moi le bilan affiché à la fin. Le journal complet est dans
+   `%APPDATA%\dj-bridge\captures\opus-….txt`, je le relirai.
+
+**Ce que la sonde dit :**
+- La liste des cartes réseau au démarrage. Si aucune carte de l'OPUS n'y apparaît, la liaison
+  réseau par USB n'existe pas quand l'OPUS joue en autonome. C'est la première chose à savoir.
+- Si l'OPUS répond quand on se présente comme rekordbox.
+- L'état de chaque platine : morceau, tempo, pitch, lecture, maître, à l'antenne.
+- La structure des morceaux chargés (Intro, Up, Down, Chorus, Outro), si l'OPUS l'envoie.
+- Les coupures de la liaison, et le tempo mesuré par le compteur de temps de l'OPUS comparé au
+  tempo annoncé.
+
+**Si rien n'arrive :** relance une fois après une minute (la carte réseau USB peut mettre ce temps
+à recevoir une adresse). Essaie aussi `sonde-opus --passif`, qui écoute sans rien envoyer.
+
 ---
 
 ## Ce qui a été vérifié de mon côté
@@ -201,6 +239,9 @@ hard trance du 28 octobre (158 à 163 BPM).
   21.
 - [25] : 120 tests, dont 12 cas musicaux de synthèse ; banc d'essai inchangé sur les 7 captures
   annotées.
+- [26] : 138 tests, dont 6 sur les paquets de l'OPUS ; la sonde a tourné contre un faux OPUS
+  simulé sur le PC (annonce, réponse, états à 160 BPM, structure en deux parties, coupure) ;
+  banc d'essai inchangé. Elle n'a jamais vu le vrai OPUS.
 - La fenêtre (capture d'écran) et la page mobile (aperçu dans un navigateur, à la taille d'un
   téléphone).
 
