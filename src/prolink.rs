@@ -27,8 +27,19 @@ const HOST_NAME: &str = "DJ-Bridge";
 /// L'OPUS numérote ses platines 9 à 12 dans ses paquets.
 const OPUS_FIRST_DEVICE: u8 = 9;
 
-/// Type de bloc de métadonnées : structure du morceau (PSSI).
-pub const METADATA_PSSI: u8 = 0x0a;
+/// Types des blocs de métadonnées que l'OPUS envoie d'un morceau quand il est chargé.
+pub mod block {
+    /// Pochette, en JPEG.
+    pub const ARTWORK: u8 = 0x02;
+    /// Aperçu de la waveform en couleur (1200 points).
+    pub const WAVEFORM_PREVIEW: u8 = 0x03;
+    /// Waveform détaillée en couleur (150 points par seconde).
+    pub const WAVEFORM_DETAIL: u8 = 0x04;
+    /// Grille des temps.
+    pub const BEAT_GRID: u8 = 0x06;
+    /// Structure du morceau (bloc PSSI de l'analyse de phrases).
+    pub const SONG_STRUCTURE: u8 = 0x0a;
+}
 
 /// Annonce de présence (port 50000, 54 octets), répétée toutes les 1,5 s.
 pub fn keep_alive(mac: [u8; 6], ip: Ipv4Addr) -> Vec<u8> {
@@ -122,15 +133,18 @@ pub struct Status {
     pub flags: u8,
     /// Tempo du morceau, sans la variation de pitch.
     pub bpm: Option<f64>,
-    /// Variation de pitch (%).
+    /// Variation de pitch du fader (%).
     pub pitch: f64,
-    /// Numéro du temps dans le morceau.
+    /// Vitesse réellement jouée (%), coups de jog compris ; -100 à l'arrêt.
+    pub speed: f64,
+    /// Numéro du temps dans le morceau, à partir de 1 : il désigne un temps de la grille.
     pub beat: Option<u32>,
-    /// Temps dans la mesure (1 à 4, 0 si inconnu).
+    /// Temps dans la mesure (1 à 4) ; toujours 0 sur l'OPUS, la grille le donne.
     pub beat_in_bar: u8,
 }
 
 impl Status {
+    const PLAY_STATE_LOOPING: u8 = 0x04;
     const FLAG_ON_AIR: u8 = 0x08;
     const FLAG_SYNC: u8 = 0x10;
     const FLAG_MASTER: u8 = 0x20;
@@ -161,9 +175,18 @@ impl Status {
         self.flags & Self::FLAG_SYNC != 0
     }
 
-    /// Tempo joué, pitch compris.
+    pub fn looping(&self) -> bool {
+        self.play_state == Self::PLAY_STATE_LOOPING
+    }
+
+    /// Tempo réglé, pitch du fader compris.
     pub fn effective_bpm(&self) -> Option<f64> {
         self.bpm.map(|bpm| bpm * (1.0 + self.pitch / 100.0))
+    }
+
+    /// Tempo réellement joué à l'instant du paquet, coups de jog compris.
+    pub fn played_bpm(&self) -> Option<f64> {
+        self.bpm.map(|bpm| bpm * (1.0 + self.speed / 100.0))
     }
 }
 
@@ -203,6 +226,7 @@ pub fn parse(port: u16, data: &[u8]) -> Option<Packet<'_>> {
         (STATUS_PORT, 0x0a) if data.len() >= 0xa7 => {
             let bpm = u16::from_be_bytes([data[0x92], data[0x93]]);
             let pitch = u32::from_be_bytes(data[0x8c..0x90].try_into().ok()?);
+            let speed = u32::from_be_bytes(data[0x98..0x9c].try_into().ok()?);
             let beat = u32::from_be_bytes(data[0xa0..0xa4].try_into().ok()?);
             Packet::Status(Status {
                 device: data[0x21],
@@ -213,6 +237,7 @@ pub fn parse(port: u16, data: &[u8]) -> Option<Packet<'_>> {
                 flags: data[0x89],
                 bpm: (bpm != 0xffff).then(|| f64::from(bpm) / 100.0),
                 pitch: pitch_percent(pitch),
+                speed: pitch_percent(speed),
                 beat: (beat != u32::MAX).then_some(beat),
                 beat_in_bar: data[0xa6],
             })
@@ -277,6 +302,65 @@ impl Reassembler {
         }
         let parts = self.parts.remove(&key)?;
         Some(parts.into_iter().flatten().flatten().collect())
+    }
+}
+
+/// Un temps de la grille rekordbox.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridBeat {
+    /// Place dans la mesure, 1 à 4.
+    pub bar_beat: u8,
+    pub bpm: f64,
+    /// Instant du temps dans le morceau, à vitesse normale (ms).
+    pub time_ms: u32,
+}
+
+/// Grille des temps d'un morceau ; le numéro de temps des états y renvoie (le temps 1 est le premier).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BeatGrid {
+    pub beats: Vec<GridBeat>,
+}
+
+const GRID_HEADER: usize = 8;
+const GRID_ENTRY_LEN: usize = 8;
+
+impl BeatGrid {
+    /// Décode un bloc de grille complet : 4 octets inconnus, le nombre de temps, puis 8 octets
+    /// par temps (place dans la mesure, tempo × 100, instant en ms).
+    pub fn parse(block: &[u8]) -> Option<Self> {
+        let count = u32::from_be_bytes(block.get(4..GRID_HEADER)?.try_into().ok()?) as usize;
+        let entries = block.get(GRID_HEADER..GRID_HEADER + count * GRID_ENTRY_LEN)?;
+        let beats = entries
+            .as_chunks::<GRID_ENTRY_LEN>()
+            .0
+            .iter()
+            .map(|e| GridBeat {
+                bar_beat: e[1],
+                bpm: f64::from(u16::from_be_bytes([e[2], e[3]])) / 100.0,
+                time_ms: u32::from_be_bytes([e[4], e[5], e[6], e[7]]),
+            })
+            .collect();
+        Some(Self { beats })
+    }
+}
+
+/// En-tête d'un bloc de waveform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Waveform {
+    pub points: u32,
+    pub point_len: u16,
+    /// Points par seconde ; 0 pour l'aperçu, qui couvre tout le morceau.
+    pub per_second: u16,
+}
+
+impl Waveform {
+    pub fn parse(block: &[u8]) -> Option<Self> {
+        let header = block.get(..12)?;
+        Some(Self {
+            points: u32::from_be_bytes(header[0..4].try_into().ok()?),
+            point_len: u16::from_be_bytes([header[8], header[9]]),
+            per_second: u16::from_be_bytes([header[10], header[11]]),
+        })
     }
 }
 
@@ -472,13 +556,68 @@ mod tests {
         }
     }
 
+    /// État de la platine 1 de l'OPUS (firmware 1.32) le 4 novembre : morceau 1297 à 147 BPM, pitch
+    /// +0,7 %, en lecture, maître et à l'antenne, au temps 87.
+    const REAL_STATUS: &str = "5173707431576d4a4f4c0a4f5055532d515541440000000000000000000000010509010109000100090001000000051100000001000000050000402500000000000000000000001700000000000000000000000000000000000000000000000000000000000000000100040400000004000000040000000000000003312e3332000000000000000500ecfffa00101cac8000396c7fffffff00101cac000001ff0000005701ff0000000000000000000000000000000001040000000000000000000000000000000000000000001ff30000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000";
+
+    /// Structure masquée du morceau 1298, envoyée d'un bloc par l'OPUS (platine 2).
+    const REAL_PSSI: &str = "5173707431576d4a4f4c564f5055532d51554144000000000000000000000001000a01c8000a00000000051209000100000000015053534900000020000001b8000000180011dcf3ff0bf6ffbefff8e6fafdf2fa04f8fa04f2ddf2fe0bf6ffbefffae3fafcf2fa04f9fa05f2dcf0ff2af6fabefefae3fafcf2fa04f9fa05f2dcf2fe0bcbffbdffbbe3fffcf3fa04f9fa05f2dcf2ff0bf6ffbefefabefaf8f29b04fbfa05f2dcf2ff0bf6ffbefffae3fbfcf3fa81f9ff057bdcf7ff0af6ffbefffae3fafcf2fa04f9fa04f27bf2f90b5fffbbfffbe3fafcf2fa04f9fa05f2dcf2ff0af63abef8fa2afaf9f2fb04f9fa05f2dcf2ff0bf6ffbefffbe31ffcfafaedf9ff05f3dcf2ff0bf6ffbefffae3fafcf2fa04f9fa0cf3d5f2fc0bf6ffbefffae3fafcf2fa04f9fa05f2dcf2ff01f7d6befdfae3fafcf2fa04f9fa05f2dcf2fe0bf7fef9fff1e2b3fcf0fa04f9fb05f3ddbbfe42f7aebefffae2fba9f2f605a0fa00f2ddf2ff0bf6ffbefffae3fafcf2fa05f88d05ffdd8bff0ef6febefffae3fafcf2fa04f9fa05f2ddf36a0bf8fe27ffffe3fbfcf2fa04f9fa05f2dcf2ff0bf6febf4afaecfb45f2ff04f8fa05f2dcf2ff0bf6ffbefffae3fbfd27fa14f82305f7dcf3ff0bf6ffbefffae3fafcf2fa04f8fbf2f2cdf3060bf0ffbffffae3fafcf2fa04f9fa05f2dcf2ff0b";
+
+    /// Début de la première partie de la grille du morceau 1297 (784 temps à 147 BPM).
+    const REAL_GRID_START: &str = "5173707431576d4a4f4c564f5055532d51554144000000000000000000000001000905680006000100000511090001000000000500080000000003100001396c000000300002396c000001c80003396c000003600004396c000004f90001396c00000691";
+
+    #[test]
+    fn reads_real_opus_status() {
+        let data = hex::decode(REAL_STATUS).unwrap();
+        let Some(Packet::Status(status)) = parse(STATUS_PORT, &data) else { panic!("état illisible") };
+        assert_eq!((status.deck(), status.track_id, status.beat), (1, 1297, Some(87)));
+        assert!(status.playing() && status.master() && status.on_air() && !status.looping());
+        assert_eq!(status.bpm, Some(147.0));
+        assert!((status.effective_bpm().unwrap() - 148.03).abs() < 0.01);
+        assert!((status.played_bpm().unwrap() - 148.03).abs() < 0.01);
+    }
+
+    #[test]
+    fn decodes_real_masked_song_structure() {
+        let data = hex::decode(REAL_PSSI).unwrap();
+        let Some(Packet::Metadata(part)) = parse(STATUS_PORT, &data) else { panic!("bloc illisible") };
+        assert_eq!((part.deck(), part.kind, part.track_id, part.count), (2, block::SONG_STRUCTURE, 1298, 1));
+        let song = SongStructure::parse(part.payload).expect("PSSI illisible");
+        assert_eq!((song.mood, song.end_beat, song.phrases.len()), (1, 517, 17));
+        let first: Vec<(String, u16)> = song.phrases[..4].iter().map(|p| (song.label(p.kind), p.beat)).collect();
+        assert_eq!(first, [("Intro".into(), 1), ("Chorus".into(), 33), ("Chorus".into(), 65), ("Up".into(), 97)]);
+        assert_eq!(song.phrases.last().map(|p| (song.label(p.kind), p.beat)), Some(("Outro".into(), 505)));
+    }
+
+    #[test]
+    fn decodes_real_beat_grid() {
+        let data = hex::decode(REAL_GRID_START).unwrap();
+        let Some(Packet::Metadata(part)) = parse(STATUS_PORT, &data) else { panic!("bloc illisible") };
+        assert_eq!((part.kind, part.count), (block::BEAT_GRID, 5));
+        // Le début ne contient que 5 temps sur 784 : on ramène le nombre annoncé à 5.
+        let mut start = part.payload.to_vec();
+        start[4..8].copy_from_slice(&5u32.to_be_bytes());
+        let grid = BeatGrid::parse(&start).expect("grille illisible");
+        let first: Vec<(u8, u32)> = grid.beats.iter().map(|b| (b.bar_beat, b.time_ms)).collect();
+        assert_eq!(first, [(1, 48), (2, 456), (3, 864), (4, 1273), (1, 1681)]);
+        assert!(grid.beats.iter().all(|b| b.bpm == 147.0));
+        assert_eq!(BeatGrid::parse(part.payload), None, "grille tronquée refusée");
+    }
+
+    #[test]
+    fn reads_waveform_header() {
+        let header = hex::decode("0000bb870001770e00020096").unwrap();
+        assert_eq!(Waveform::parse(&header), Some(Waveform { points: 48007, point_len: 2, per_second: 150 }));
+    }
+
     #[test]
     fn reassembles_parts_in_any_order() {
-        let block = pssi_block();
-        let (first, second) = block.split_at(50);
-        let part = |index, payload| Metadata { device: 9, kind: METADATA_PSSI, track_id: 7, index, count: 2, payload };
+        let whole = pssi_block();
+        let (first, second) = whole.split_at(50);
+        let part =
+            |index, payload| Metadata { device: 9, kind: block::SONG_STRUCTURE, track_id: 7, index, count: 2, payload };
         let mut parts = Reassembler::default();
         assert_eq!(parts.push(&part(1, second)), None);
-        assert_eq!(parts.push(&part(0, first)), Some(block));
+        assert_eq!(parts.push(&part(0, first)), Some(whole));
     }
 }

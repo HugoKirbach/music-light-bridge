@@ -527,20 +527,27 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
 
   Chaque cas vérifie que la lumière tape sur les kicks en groove et flotte en break.
 
-## OPUS-QUAD par le câble USB (sonde)
+## OPUS-QUAD sur le réseau (sonde)
 
-L'OPUS-QUAD a une carte réseau intégrée côté USB. Il ne parle pas vraiment Pro DJ Link : il ne
-dialogue qu'avec rekordbox, pour le mode Lighting. `dj-bridge sonde-opus` se présente donc comme
-rekordbox, écoute ce que l'OPUS envoie, et fait le bilan : la carte réseau utilisée, l'état de
-chaque platine (morceau, tempo, pitch, lecture, maître, à l'antenne), la structure des morceaux
-(analyse de phrases de rekordbox) et les coupures de la liaison. Chaque paquet est écrit dans
-`captures\opus-….txt`.
+L'OPUS-QUAD parle au PC par le réseau : par sa carte réseau USB intégrée (« AlphaTheta Network
+Adapter » dans Windows), ou par le Wi-Fi s'il est sur le même réseau que le PC. Il ne parle pas
+vraiment Pro DJ Link : il ne dialogue qu'avec rekordbox, pour le mode Lighting.
+`dj-bridge sonde-opus` se présente donc comme rekordbox, écoute ce que l'OPUS envoie, et fait le
+bilan : par quel chemin, l'état de chaque platine, les données de chaque morceau chargé et les
+coupures de la liaison. Chaque paquet est écrit dans `captures\opus-….txt`.
+
+Ce que l'OPUS envoie (vérifié le 4 novembre 2026, firmware 1.32, par le Wi-Fi) :
+- l'état des quatre platines, 5 à 6 fois par seconde : morceau, tempo, pitch, vitesse jouée,
+  numéro du temps dans le morceau, lecture, boucle, maître, à l'antenne, sync ;
+- à chaque chargement, sans rien demander : la grille des temps, la structure du morceau
+  (analyse de phrases de rekordbox : Intro, Up, Down, Chorus, Outro), l'aperçu et la waveform
+  détaillée en couleur (150 points par seconde), la pochette ;
+- ni paquets de temps ni position précise : la phase restera l'affaire du son. Ces informations
+  serviront de carte (tempo exact, mesures, phrases, ce qui arrive).
 
 - Options : `--seconds` (180 par défaut), `--interface "nom partiel"` pour imposer la carte
   réseau, `--passif` pour écouter sans rien envoyer.
 - rekordbox doit être fermé : il prend les mêmes ports (50000 à 50002).
-- L'OPUS n'envoie ni paquets de temps ni position précise : la phase restera l'affaire du son.
-  Ces informations serviront de carte (tempo exact, structure des morceaux).
 - Le protocole vient du travail de Deep Symmetry (Beat Link, analyse Pro DJ Link) et de Kyle
   Awayan (analyse des échanges entre l'OPUS et rekordbox).
 

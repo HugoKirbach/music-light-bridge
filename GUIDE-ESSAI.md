@@ -192,10 +192,10 @@ hard trance du 28 octobre (158 à 163 BPM).
   à côté. Dis-moi ce qui se passe dans la capture manuelle de 19 h 55, je l'ajouterai au banc.
 - Une caisse claire qui continue dans le trou du kick fait flasher son temps.
 
-## [26] Sonde OPUS-QUAD par le câble USB
+## [26] Sonde OPUS-QUAD
 
-Avant de brancher l'OPUS sur la lumière, il faut savoir ce qu'il envoie au PC par le seul câble
-USB, et si la liaison tient. La sonde se présente à l'OPUS comme rekordbox (mode Lighting), écoute,
+Avant de brancher l'OPUS sur la lumière, il faut savoir ce qu'il envoie au PC, par quel chemin
+(câble USB ou Wi-Fi), et si la liaison tient. La sonde se présente à l'OPUS comme rekordbox (mode Lighting), écoute,
 et fait le bilan. Elle ne touche pas aux lampes.
 
 **À faire :**
@@ -229,6 +229,21 @@ et fait le bilan. Elle ne touche pas aux lampes.
 **Si rien n'arrive :** relance une fois après une minute (la carte réseau USB peut mettre ce temps
 à recevoir une adresse). Essaie aussi `sonde-opus --passif`, qui écoute sans rien envoyer.
 
+**Premier essai (4 novembre) :** tout est passé par le Wi-Fi de la maison (l'OPUS à
+192.168.1.88), sans aucune coupure, avec un état par platine toutes les 160 ms. Windows a bien vu
+la carte réseau USB de l'OPUS (« AlphaTheta Network Adapter »), mais sans adresse pendant la sonde.
+L'OPUS a envoyé de lui-même la grille, la structure, les waveforms et la pochette de chaque morceau
+chargé. Le compteur de temps suit le tempo joué ; il recule en lecture à l'envers et tourne en
+rond dans une boucle.
+
+**Deuxième essai, pour l'USB seul :**
+1. Coupe le Wi-Fi de l'OPUS dans ses réglages, puis branche l'USB.
+2. Attends une minute, puis lance la sonde.
+3. La liste du début doit montrer « AlphaTheta Network Adapter » avec une adresse (169.254.… ou
+   autre). Si l'adresse arrive pendant l'écoute, la sonde affiche « Nouvelle adresse ».
+4. Refais les mêmes gestes, et copie-moi le bilan. La ligne « Chemin » dit par où l'OPUS est
+   passé.
+
 ---
 
 ## Ce qui a été vérifié de mon côté
@@ -239,9 +254,9 @@ et fait le bilan. Elle ne touche pas aux lampes.
   21.
 - [25] : 120 tests, dont 12 cas musicaux de synthèse ; banc d'essai inchangé sur les 7 captures
   annotées.
-- [26] : 138 tests, dont 6 sur les paquets de l'OPUS ; la sonde a tourné contre un faux OPUS
-  simulé sur le PC (annonce, réponse, états à 160 BPM, structure en deux parties, coupure) ;
-  banc d'essai inchangé. Elle n'a jamais vu le vrai OPUS.
+- [26] : tests sur les paquets de l'OPUS, dont 4 sur de vrais paquets de ton premier essai
+  (état, structure masquée, grille, waveform) ; la sonde corrigée a relu tout le journal de ce
+  premier essai ; banc d'essai inchangé.
 - La fenêtre (capture d'écran) et la page mobile (aperçu dans un navigateur, à la taille d'un
   téléphone).
 

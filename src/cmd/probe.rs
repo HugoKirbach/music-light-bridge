@@ -1,9 +1,10 @@
-//! Sonde OPUS-QUAD : écoute ce que l'OPUS envoie par le câble USB (sa carte réseau intégrée),
-//! se présente comme rekordbox pour qu'il envoie l'état de ses platines, et rend compte de ce
-//! qui arrive, à quelle cadence, et des coupures de la liaison. Chaque paquet est aussi écrit
-//! dans un journal, dans le dossier des captures, pour être relu et servir de cas de test.
+//! Sonde OPUS-QUAD : écoute ce que l'OPUS envoie au PC (par sa carte réseau USB intégrée ou par le
+//! Wi-Fi), se présente comme rekordbox pour qu'il envoie l'état de ses platines et les données des
+//! morceaux chargés, et rend compte de ce qui arrive, par quel chemin, à quelle cadence, et des
+//! coupures. Chaque paquet est aussi écrit dans un journal, dans le dossier des captures, pour être
+//! relu et servir de cas de test.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{BufWriter, Stdout, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
@@ -19,7 +20,7 @@ use netdev::ipnet::Ipv4Net;
 
 use super::tui::{self, RawMode};
 use crate::config::Config;
-use crate::prolink::{self, Packet, Reassembler, SongStructure, Status};
+use crate::prolink::{self, BeatGrid, Packet, Reassembler, SongStructure, Status, Waveform, block};
 
 /// Cadence de l'annonce de présence et de la demande d'état (celle de Beat Link).
 const ANNOUNCE_INTERVAL: Duration = Duration::from_millis(1500);
@@ -27,12 +28,15 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_millis(1500);
 const SILENCE: Duration = Duration::from_secs(1);
 /// Sans nouvelles de l'OPUS passé ce délai, on rappelle quoi vérifier.
 const HINT_AFTER: Duration = Duration::from_secs(10);
+/// Cadence à laquelle on regarde si une carte réseau a reçu (ou perdu) une adresse.
+const RESCAN_INTERVAL: Duration = Duration::from_secs(5);
 const PSSI_RETRY: Duration = Duration::from_secs(3);
 const PSSI_TRIES: u32 = 4;
-/// Octet de platine de la demande de structure chez Beat Link, essayé en alternance avec 9–12.
-const PSSI_ANY_DECK: u8 = 0x02;
-/// Durée de lecture minimale pour comparer le compteur de temps au tempo annoncé.
-const MIN_TEMPO_RUN: f64 = 8.0;
+/// Écart de tempo et délai minimal entre deux lignes de tempo d'une platine.
+const TEMPO_STEP: f64 = 0.5;
+const TEMPO_EVERY: Duration = Duration::from_secs(1);
+/// Durée de lecture minimale pour comparer le compteur de temps au tempo annoncé (s).
+const MIN_TEMPO_CHECK: f64 = 8.0;
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 const LOOP_PERIOD: Duration = Duration::from_millis(50);
 
@@ -47,19 +51,16 @@ pub struct Options {
 pub fn run(options: Options) -> Result<()> {
     println!("Sonde OPUS-QUAD : écoute de ce que l'OPUS envoie au PC.");
     println!();
+    println!("Cartes réseau :");
+    for line in adapters() {
+        println!("  {line}");
+    }
     let interfaces = interfaces();
-    println!("Cartes réseau actives :");
-    for iface in &interfaces {
-        println!("  {} : {}/{} (MAC {})", iface.label, iface.ip, iface.net.prefix_len(), mac_text(iface.mac));
-    }
-    if interfaces.is_empty() {
-        println!("  aucune avec une adresse IPv4");
-    }
     let forced = match &options.interface {
         Some(part) => {
             let needle = part.to_lowercase();
             let Some(iface) = interfaces.iter().find(|i| i.label.to_lowercase().contains(&needle)) else {
-                bail!("aucune carte réseau active ne contient « {part} »");
+                bail!("aucune carte réseau avec une adresse IPv4 ne contient « {part} »");
             };
             Some(iface.clone())
         }
@@ -108,7 +109,7 @@ pub fn run(options: Options) -> Result<()> {
 }
 
 /// Carte réseau du PC, avec une de ses adresses IPv4.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Interface {
     label: String,
     ip: Ipv4Addr,
@@ -116,21 +117,45 @@ struct Interface {
     mac: [u8; 6],
 }
 
+fn label(i: &netdev::Interface) -> String {
+    let name = i.friendly_name.clone().unwrap_or_else(|| i.name.clone());
+    match &i.description {
+        Some(description) if *description != name => format!("{name} ({description})"),
+        _ => name,
+    }
+}
+
+/// Cartes réseau actives qui ont une adresse IPv4.
 fn interfaces() -> Vec<Interface> {
     netdev::get_interfaces()
         .into_iter()
         .filter(|i| i.is_up() && !i.is_loopback())
         .flat_map(|i| {
-            let name = i.friendly_name.clone().unwrap_or_else(|| i.name.clone());
-            let label = match &i.description {
-                Some(description) if *description != name => format!("{name} ({description})"),
-                _ => name,
-            };
+            let label = label(&i);
             let mac = i.mac_addr.map(|m| m.octets()).unwrap_or_default();
             i.ipv4
                 .iter()
                 .map(|net| Interface { label: label.clone(), ip: net.addr(), net: *net, mac })
                 .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Toutes les cartes réseau physiques, avec ou sans adresse : la carte USB de l'OPUS peut
+/// exister avant d'avoir une adresse.
+fn adapters() -> Vec<String> {
+    netdev::get_interfaces()
+        .iter()
+        .filter(|i| !i.is_loopback() && i.mac_addr.is_some_and(|m| m.octets() != [0; 6]))
+        .map(|i| {
+            let mac = i.mac_addr.map(|m| m.octets()).unwrap_or_default();
+            let addresses: Vec<String> = i.ipv4.iter().map(|net| format!("{}/{}", net.addr(), net.prefix_len())).collect();
+            let state = match (i.is_up(), addresses.is_empty()) {
+                (false, _) => "inactive".to_owned(),
+                (true, true) => "active, sans adresse IPv4".to_owned(),
+                (true, false) => addresses.join(", "),
+            };
+            format!("{} : {state} (MAC {})", label(i), mac_text(mac))
         })
         .collect()
 }
@@ -189,21 +214,30 @@ impl Journal {
     fn create(path: &Path, interfaces: &[Interface]) -> Result<Self> {
         let mut file = BufWriter::new(File::create(path)?);
         writeln!(file, "# Sonde OPUS-QUAD, DJ-Bridge {}", env!("CARGO_PKG_VERSION"))?;
-        for iface in interfaces {
-            writeln!(file, "# carte {} {}/{} {}", iface.label, iface.ip, iface.net.prefix_len(), mac_text(iface.mac))?;
+        for line in adapters() {
+            writeln!(file, "# carte {line}")?;
         }
-        writeln!(file, "# secondes < port_local source hex | secondes > destination hex")?;
+        for iface in interfaces {
+            writeln!(file, "# adresse {} {}/{}", iface.label, iface.ip, iface.net.prefix_len())?;
+        }
+        writeln!(file, "# secondes < port_local source hex | secondes > destination hex | secondes # note")?;
         Ok(Self { file, started: Instant::now() })
     }
 
+    fn seconds(&self, at: Instant) -> f64 {
+        at.saturating_duration_since(self.started).as_secs_f64()
+    }
+
     fn received(&mut self, at: Instant, port: u16, from: SocketAddr, data: &[u8]) {
-        let t = at.saturating_duration_since(self.started).as_secs_f64();
-        let _ = writeln!(self.file, "{t:.3} < {port} {from} {}", hex::encode(data));
+        let _ = writeln!(self.file, "{:.3} < {port} {from} {}", self.seconds(at), hex::encode(data));
     }
 
     fn sent(&mut self, at: Instant, to: SocketAddrV4, data: &[u8]) {
-        let t = at.saturating_duration_since(self.started).as_secs_f64();
-        let _ = writeln!(self.file, "{t:.3} > {to} {}", hex::encode(data));
+        let _ = writeln!(self.file, "{:.3} > {to} {}", self.seconds(at), hex::encode(data));
+    }
+
+    fn note(&mut self, at: Instant, text: &str) {
+        let _ = writeln!(self.file, "{:.3} # {text}", self.seconds(at));
     }
 
     fn flush(&mut self) {
@@ -215,52 +249,64 @@ impl Journal {
 #[derive(Default)]
 struct Deck {
     last: Option<Status>,
-    /// Dernière description affichée.
+    /// Dernière description affichée, sans le tempo.
     shown: Option<String>,
+    /// Dernier tempo affiché et quand.
+    shown_bpm: Option<(Instant, f64)>,
     /// Derniers drapeaux non nuls : l'OPUS envoie parfois des états aux drapeaux à zéro.
     flags: u8,
     count: u32,
     last_at: Option<Instant>,
-    gap_sum: Duration,
+    gap_sum: f64,
+    gap_square_sum: f64,
     gap_max: Duration,
-    /// Premier et dernier changement du compteur de temps pendant la lecture en cours.
-    run_start: Option<(Instant, u32)>,
-    run_last: Option<(Instant, u32)>,
-    run_bpm: Option<f64>,
-    best_run: Option<TempoCheck>,
-}
-
-/// Tempo mesuré par le compteur de temps, comparé au tempo annoncé.
-struct TempoCheck {
-    secs: f64,
-    measured: f64,
-    reported: f64,
+    /// Dernier changement du compteur de temps, pendant une lecture sans saut.
+    last_beat: Option<(Instant, u32)>,
+    /// Faux après un saut ou une marche arrière : l'intervalle suivant sert seulement à se recaler.
+    settled: bool,
+    /// Temps avancés, durée et tempo joué × durée, sur les intervalles sans saut ni boucle.
+    checked_beats: u32,
+    checked_secs: f64,
+    checked_bpm_secs: f64,
 }
 
 impl Deck {
-    fn update_run(&mut self, at: Instant, status: &Status, same_track: bool) {
-        match (status.playing() && same_track, status.beat, status.effective_bpm()) {
-            (true, Some(beat), Some(bpm)) => {
-                self.run_start.get_or_insert((at, beat));
-                if self.run_last.is_none_or(|(_, last)| last != beat) {
-                    self.run_last = Some((at, beat));
-                }
-                self.run_bpm = Some(bpm);
-            }
-            _ => self.close_run(),
+    fn record_gap(&mut self, at: Instant) {
+        if let Some(last) = self.last_at {
+            let gap = at.saturating_duration_since(last);
+            self.gap_sum += gap.as_secs_f64();
+            self.gap_square_sum += gap.as_secs_f64().powi(2);
+            self.gap_max = self.gap_max.max(gap);
         }
+        self.last_at = Some(at);
+        self.count += 1;
     }
 
-    fn close_run(&mut self) {
-        let (Some((t0, b0)), Some((t1, b1)), Some(reported)) =
-            (self.run_start.take(), self.run_last.take(), self.run_bpm.take())
+    /// Compare l'avance du compteur de temps au tempo joué, en écartant les sauts (recherche,
+    /// repère), les boucles et la lecture à l'envers.
+    fn check_beats(&mut self, at: Instant, status: &Status, same_track: bool) {
+        let (true, Some(beat), Some(bpm)) =
+            (status.playing() && !status.looping() && same_track, status.beat, status.played_bpm())
         else {
+            self.last_beat = None;
             return;
         };
-        let secs = t1.saturating_duration_since(t0).as_secs_f64();
-        if secs >= MIN_TEMPO_RUN && b1 > b0 && self.best_run.as_ref().is_none_or(|best| secs > best.secs) {
-            self.best_run = Some(TempoCheck { secs, measured: f64::from(b1 - b0) / secs * 60.0, reported });
+        match self.last_beat {
+            Some((_, last)) if last == beat => return,
+            Some((since, last)) => {
+                let secs = at.saturating_duration_since(since).as_secs_f64();
+                let expected = secs * bpm / 60.0;
+                let steady = beat > last && f64::from(beat - last) <= expected * 1.5 + 1.0;
+                if steady && self.settled {
+                    self.checked_beats += beat - last;
+                    self.checked_secs += secs;
+                    self.checked_bpm_secs += bpm * secs;
+                }
+                self.settled = steady;
+            }
+            None => self.settled = false,
         }
+        self.last_beat = Some((at, beat));
     }
 }
 
@@ -270,8 +316,19 @@ struct PssiRequest {
     device: u8,
     tries: u32,
     next: Instant,
-    first: Option<Instant>,
-    last_byte: u8,
+}
+
+/// Un bloc reçu pour un morceau : sa description et le nombre de fois qu'il est arrivé.
+struct BlockSeen {
+    text: String,
+    times: u32,
+}
+
+/// Ce qu'on a reçu d'une adresse.
+#[derive(Default)]
+struct Source {
+    packets: u32,
+    opus: bool,
 }
 
 struct Probe<'a> {
@@ -285,11 +342,13 @@ struct Probe<'a> {
     opus: Option<Ipv4Addr>,
     hello: Option<Instant>,
     next_announce: Instant,
+    next_rescan: Instant,
     send_failed: bool,
     hinted: bool,
     last_flush: Instant,
     counts: BTreeMap<(u16, u8), u32>,
     foreign: u32,
+    sources: BTreeMap<Ipv4Addr, Source>,
     others: BTreeMap<Ipv4Addr, String>,
     decks: BTreeMap<u8, Deck>,
     zero_flags: u32,
@@ -297,10 +356,10 @@ struct Probe<'a> {
     longest_gap: Duration,
     silent_since: Option<Instant>,
     silences: Vec<Duration>,
-    pssi: Reassembler,
+    parts: Reassembler,
     pending: HashMap<u8, PssiRequest>,
-    structures: Vec<String>,
-    other_metadata: HashSet<(u8, u8, u32)>,
+    /// Blocs reçus, par platine et morceau, puis par type.
+    blocks: BTreeMap<(u8, u32), BTreeMap<u8, BlockSeen>>,
     beats: u32,
 }
 
@@ -324,11 +383,13 @@ impl<'a> Probe<'a> {
             opus: None,
             hello: None,
             next_announce: now,
+            next_rescan: now + RESCAN_INTERVAL,
             send_failed: false,
             hinted: false,
             last_flush: now,
             counts: BTreeMap::new(),
             foreign: 0,
+            sources: BTreeMap::new(),
             others: BTreeMap::new(),
             decks: BTreeMap::new(),
             zero_flags: 0,
@@ -336,10 +397,9 @@ impl<'a> Probe<'a> {
             longest_gap: Duration::ZERO,
             silent_since: None,
             silences: Vec::new(),
-            pssi: Reassembler::default(),
+            parts: Reassembler::default(),
             pending: HashMap::new(),
-            structures: Vec::new(),
-            other_metadata: HashSet::new(),
+            blocks: BTreeMap::new(),
             beats: 0,
         }
     }
@@ -363,12 +423,22 @@ impl<'a> Probe<'a> {
         Ok(())
     }
 
-    /// Affiche un événement au-dessus de la ligne d'état.
+    /// Affiche un événement au-dessus de la ligne d'état, et le note dans le journal.
     fn say(&mut self, text: &str) {
+        self.journal.note(Instant::now(), text);
         let _ = write!(self.out, "\r{text}");
         let _ = crossterm::queue!(self.out, terminal::Clear(ClearType::UntilNewLine));
         let _ = write!(self.out, "\r\n");
         let _ = self.out.flush();
+    }
+
+    /// Carte réseau du PC qui mène à `ip`.
+    fn route(&self, ip: Ipv4Addr) -> Option<&Interface> {
+        self.interfaces.iter().find(|i| i.net.contains(&ip))
+    }
+
+    fn route_label(&self, ip: Ipv4Addr) -> String {
+        self.route(ip).map_or("carte inconnue".to_owned(), |i| format!("« {} »", i.label))
     }
 
     fn handle(&mut self, packet: Received) {
@@ -385,20 +455,12 @@ impl<'a> Probe<'a> {
             return;
         };
         *self.counts.entry((port, data[10])).or_default() += 1;
+        self.sources.entry(ip).or_default().packets += 1;
         if self.opus == Some(ip) {
             self.heard_opus(at);
         }
         match parsed {
-            Packet::KeepAlive(device) if device.is_opus() => {
-                if self.opus.is_none() {
-                    self.say(&format!(
-                        "OPUS-QUAD vu à {ip} (numéro {}, MAC {}).",
-                        device.device,
-                        mac_text(device.mac)
-                    ));
-                    self.set_opus(ip, at);
-                }
-            }
+            Packet::KeepAlive(device) if device.is_opus() => self.opus_seen(ip, at, &format!("numéro {}", device.device)),
             Packet::KeepAlive(device) => {
                 if self.others.insert(ip, device.name.clone()).is_none() {
                     let warning = if device.name == "rekordbox" { " : ferme rekordbox pendant la sonde" } else { "" };
@@ -406,17 +468,20 @@ impl<'a> Probe<'a> {
                 }
             }
             Packet::Hello { name } => {
+                self.opus_seen(ip, at, "bonjour");
                 if self.hello.is_none() {
                     self.hello = Some(at);
                     self.say(&format!("L'OPUS a répondu (« {name} ») : il nous prend pour rekordbox."));
-                    self.set_opus(ip, at);
                     if !self.passive {
                         self.send(SocketAddrV4::new(ip, prolink::STATUS_PORT), &prolink::lighting_request());
                     }
                 }
             }
-            Packet::Status(status) => self.status(at, ip, status),
-            Packet::Metadata(part) => self.metadata(at, &part),
+            Packet::Status(status) => {
+                self.opus_seen(ip, at, "état");
+                self.status(at, status);
+            }
+            Packet::Metadata(part) => self.metadata(&part),
             Packet::Beat { device, bpm, beat_in_bar } => {
                 self.beats += 1;
                 if self.beats == 1 {
@@ -430,23 +495,34 @@ impl<'a> Probe<'a> {
         }
     }
 
-    /// Retient l'adresse de l'OPUS et la carte réseau qui mène à lui.
-    fn set_opus(&mut self, ip: Ipv4Addr, at: Instant) {
-        if self.opus.is_some() {
+    /// Un paquet de l'OPUS est arrivé de `ip` : on retient la première adresse et la carte réseau
+    /// qui y mène, et on signale toute autre adresse (l'OPUS joignable par deux chemins).
+    fn opus_seen(&mut self, ip: Ipv4Addr, at: Instant, what: &str) {
+        let source = self.sources.entry(ip).or_default();
+        let first_from_here = !source.opus;
+        source.opus = true;
+        if !first_from_here {
             return;
+        }
+        if self.route(ip).is_none() {
+            // La carte de l'OPUS a pu recevoir son adresse après le démarrage de la sonde.
+            self.interfaces = interfaces();
+        }
+        let route = self.route_label(ip);
+        match self.opus {
+            Some(first) => {
+                self.say(&format!("L'OPUS parle aussi par {ip} ({route}) en plus de {first} : deux chemins à la fois."));
+                return;
+            }
+            None => self.say(&format!("OPUS-QUAD vu à {ip} par {route} ({what}).")),
         }
         self.opus = Some(ip);
         self.last_from_opus = Some(at);
         if self.chosen.is_some() {
             return;
         }
-        if !self.interfaces.iter().any(|i| i.net.contains(&ip)) {
-            // La carte de l'OPUS a pu recevoir son adresse après le démarrage de la sonde.
-            self.interfaces = interfaces();
-        }
-        match self.interfaces.iter().find(|i| i.net.contains(&ip)).cloned() {
+        match self.route(ip).cloned() {
             Some(iface) => {
-                self.say(&format!("Liaison par la carte « {} » ({}/{}).", iface.label, iface.ip, iface.net.prefix_len()));
                 if !self.passive {
                     self.say("On se présente comme rekordbox…");
                 }
@@ -468,8 +544,7 @@ impl<'a> Probe<'a> {
         self.last_from_opus = Some(at);
     }
 
-    fn status(&mut self, at: Instant, ip: Ipv4Addr, mut status: Status) {
-        self.set_opus(ip, at);
+    fn status(&mut self, at: Instant, mut status: Status) {
         let deck_number = status.deck();
         let deck = self.decks.entry(deck_number).or_default();
         if status.flags == 0 {
@@ -478,73 +553,51 @@ impl<'a> Probe<'a> {
         } else {
             deck.flags = status.flags;
         }
-        deck.count += 1;
-        if let Some(last) = deck.last_at {
-            let gap = at.saturating_duration_since(last);
-            deck.gap_sum += gap;
-            deck.gap_max = deck.gap_max.max(gap);
-        }
-        deck.last_at = Some(at);
+        deck.record_gap(at);
         let same_track = deck.last.as_ref().is_some_and(|last| last.track_id == status.track_id);
-        deck.update_run(at, &status, same_track);
-        let text = describe(&status);
-        let changed = deck.shown.as_deref() != Some(text.as_str());
-        if changed {
-            deck.shown = Some(text.clone());
+        deck.check_beats(at, &status, same_track);
+        let state = describe(&status);
+        let state_changed = deck.shown.as_deref() != Some(state.as_str());
+        // Un balayage du pitch ne donne qu'une ligne par seconde au plus.
+        let bpm = status.effective_bpm();
+        let tempo_moved = match (deck.shown_bpm, bpm) {
+            (Some((when, shown)), Some(bpm)) => {
+                (bpm - shown).abs() >= TEMPO_STEP && at.saturating_duration_since(when) >= TEMPO_EVERY
+            }
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        let line = (state_changed || tempo_moved).then(|| format!("Platine {deck_number} : {}", describe_tempo(&status, &state)));
+        if state_changed {
+            deck.shown = Some(state);
         }
-        let new_track = !same_track && status.track_id != 0;
-        if new_track {
-            self.pending.insert(
-                deck_number,
-                PssiRequest { track: status.track_id, device: status.device, tries: 0, next: at, first: None, last_byte: 0 },
-            );
+        if line.is_some() {
+            deck.shown_bpm = bpm.map(|bpm| (at, bpm));
+        }
+        if !same_track && status.track_id != 0 {
+            let request = PssiRequest { track: status.track_id, device: status.device, tries: 0, next: at };
+            self.pending.insert(deck_number, request);
         }
         deck.last = Some(status);
-        if changed {
-            self.say(&format!("Platine {deck_number} : {text}"));
+        if let Some(line) = line {
+            self.say(&line);
         }
     }
 
-    fn metadata(&mut self, at: Instant, part: &prolink::Metadata) {
+    fn metadata(&mut self, part: &prolink::Metadata) {
         let deck = part.deck();
-        if part.kind != prolink::METADATA_PSSI {
-            if part.index.saturating_add(1) >= part.count && self.other_metadata.insert((deck, part.kind, part.track_id)) {
-                self.say(&format!(
-                    "Platine {deck} : métadonnées de type {} reçues pour le morceau {}.",
-                    part.kind, part.track_id
-                ));
-            }
+        let Some(whole) = self.parts.push(part) else { return };
+        if part.kind == block::SONG_STRUCTURE && self.pending.get(&deck).is_some_and(|r| r.track == part.track_id) {
+            self.pending.remove(&deck);
+        }
+        let seen = self.blocks.entry((deck, part.track_id)).or_default();
+        if let Some(seen) = seen.get_mut(&part.kind) {
+            seen.times += 1;
             return;
         }
-        let Some(block) = self.pssi.push(part) else { return };
-        let request = match self.pending.get(&deck) {
-            Some(request) if request.track == part.track_id => self.pending.remove(&deck),
-            _ => None,
-        };
-        let how = match request.and_then(|r| r.first.map(|first| (first, r.last_byte))) {
-            Some((first, byte)) => format!(
-                "après demande, octet de platine 0x{byte:02x}, {:.1} s",
-                at.saturating_duration_since(first).as_secs_f64()
-            ),
-            None => "spontanément".to_owned(),
-        };
-        let line = match SongStructure::parse(&block) {
-            Some(song) => {
-                let phrases: Vec<String> =
-                    song.phrases.iter().map(|p| format!("{} {}", song.label(p.kind), p.beat)).collect();
-                format!(
-                    "morceau {} : humeur {}, fin au temps {}, {} parties ({how}) : {}",
-                    part.track_id,
-                    song.mood_label(),
-                    song.end_beat,
-                    song.phrases.len(),
-                    phrases.join(" · ")
-                )
-            }
-            None => format!("morceau {} : structure de {} octets, illisible ({how})", part.track_id, block.len()),
-        };
-        self.structures.push(format!("platine {deck}, {line}"));
-        self.say(&format!("Platine {deck}, structure du {line}"));
+        let text = describe_block(part.kind, &whole);
+        seen.insert(part.kind, BlockSeen { text: text.clone(), times: 1 });
+        self.say(&format!("Platine {deck}, morceau {} : {text}", part.track_id));
     }
 
     fn tick(&mut self, now: Instant) -> Result<()> {
@@ -568,14 +621,15 @@ impl<'a> Probe<'a> {
                 .collect();
             for deck in due {
                 let Some(request) = self.pending.get_mut(&deck) else { continue };
-                let byte = if request.tries % 2 == 0 { request.device } else { PSSI_ANY_DECK };
                 request.tries += 1;
                 request.next = now + PSSI_RETRY;
-                request.last_byte = byte;
-                request.first.get_or_insert(now);
-                let packet = prolink::pssi_request(request.track, byte);
+                let packet = prolink::pssi_request(request.track, request.device);
                 self.send(SocketAddrV4::new(opus, prolink::STATUS_PORT), &packet);
             }
+        }
+        if now >= self.next_rescan {
+            self.next_rescan = now + RESCAN_INTERVAL;
+            self.rescan();
         }
         if let Some(last) = self.last_from_opus
             && self.silent_since.is_none()
@@ -586,8 +640,8 @@ impl<'a> Probe<'a> {
         }
         if self.opus.is_none() && !self.hinted && now.saturating_duration_since(self.started) > HINT_AFTER {
             self.hinted = true;
-            self.say("Rien de l'OPUS pour l'instant. Vérifie qu'il est allumé et branché en USB, et qu'une carte");
-            self.say("réseau de l'OPUS figure dans la liste du début (sinon relance la sonde dans une minute).");
+            self.say("Rien de l'OPUS pour l'instant. Vérifie qu'il est allumé et branché en USB. Sa carte réseau");
+            self.say("USB peut mettre une minute à recevoir une adresse : la sonde le signalera.");
             self.say("Le pare-feu Windows peut aussi bloquer : dj-bridge doit être autorisé sur ce réseau.");
         }
         if now.saturating_duration_since(self.last_flush) >= Duration::from_secs(1) {
@@ -596,6 +650,26 @@ impl<'a> Probe<'a> {
         }
         let line = self.status_text(now);
         tui::status_line(&mut self.out, &line)
+    }
+
+    /// Signale les adresses apparues ou disparues sur les cartes réseau du PC.
+    fn rescan(&mut self) {
+        let fresh = interfaces();
+        let appeared: Vec<String> = fresh
+            .iter()
+            .filter(|i| !self.interfaces.contains(i))
+            .map(|i| format!("Nouvelle adresse sur « {} » : {}/{}.", i.label, i.ip, i.net.prefix_len()))
+            .collect();
+        let gone: Vec<String> = self
+            .interfaces
+            .iter()
+            .filter(|i| !fresh.contains(i))
+            .map(|i| format!("Adresse perdue sur « {} » : {}.", i.label, i.ip))
+            .collect();
+        self.interfaces = fresh;
+        for line in appeared.iter().chain(&gone) {
+            self.say(line);
+        }
     }
 
     fn send(&mut self, to: SocketAddrV4, data: &[u8]) {
@@ -623,9 +697,6 @@ impl<'a> Probe<'a> {
     }
 
     fn close(&mut self) {
-        for deck in self.decks.values_mut() {
-            deck.close_run();
-        }
         if let Some(since) = self.silent_since.take() {
             self.silences.push(Instant::now().saturating_duration_since(since));
         }
@@ -637,8 +708,8 @@ impl<'a> Probe<'a> {
         println!();
         println!("Bilan après {elapsed:.0} s :");
         match &self.chosen {
-            Some(iface) => println!("  Carte réseau : « {} » ({})", iface.label, iface.ip),
-            None => println!("  Carte réseau : aucune trouvée vers l'OPUS"),
+            Some(iface) => println!("  Carte réseau utilisée : « {} » ({})", iface.label, iface.ip),
+            None => println!("  Carte réseau utilisée : aucune trouvée vers l'OPUS"),
         }
         match (self.opus, self.hello) {
             (None, _) => println!("  OPUS-QUAD : jamais vu"),
@@ -647,6 +718,9 @@ impl<'a> Probe<'a> {
                 hello.saturating_duration_since(self.started).as_secs_f64()
             ),
             (Some(ip), None) => println!("  OPUS-QUAD : {ip}, sans réponse à rekordbox"),
+        }
+        for (ip, source) in self.sources.iter().filter(|(_, s)| s.opus) {
+            println!("  Chemin : {ip} par {}, {} paquets", self.route_label(*ip), source.packets);
         }
         for (ip, name) in &self.others {
             println!("  Autre appareil : « {name} » à {ip}");
@@ -658,28 +732,39 @@ impl<'a> Probe<'a> {
             println!("  Paquets étrangers au Pro DJ Link : {}", self.foreign);
         }
         for (number, deck) in &self.decks {
-            let mean = deck.gap_sum.as_secs_f64() * 1e3 / f64::from(deck.count.saturating_sub(1).max(1));
+            let gaps = f64::from(deck.count.saturating_sub(1).max(1));
+            let mean = deck.gap_sum / gaps;
+            let spread = (deck.gap_square_sum / gaps - mean * mean).max(0.0).sqrt();
             print!(
-                "  Platine {number} : {} états, un tous les {mean:.0} ms en moyenne (au plus {:.0} ms)",
+                "  Platine {number} : {} états, un tous les {:.0} ms (écart-type {:.0} ms, au plus {:.0} ms)",
                 deck.count,
+                mean * 1e3,
+                spread * 1e3,
                 deck.gap_max.as_secs_f64() * 1e3
             );
-            match &deck.best_run {
-                Some(run) => println!(
-                    " ; compteur de temps : {:.2} BPM mesurés sur {:.0} s, {:.2} annoncés",
-                    run.measured, run.secs, run.reported
-                ),
-                None => println!(),
+            if deck.checked_secs >= MIN_TEMPO_CHECK {
+                println!(
+                    " ; compteur de temps : {:.2} BPM mesurés sur {:.0} s de lecture, {:.2} joués",
+                    f64::from(deck.checked_beats) / deck.checked_secs * 60.0,
+                    deck.checked_secs,
+                    deck.checked_bpm_secs / deck.checked_secs
+                );
+            } else {
+                println!();
             }
         }
         if self.zero_flags > 0 {
             println!("  États aux drapeaux à zéro (remplacés par les précédents) : {}", self.zero_flags);
         }
-        if self.structures.is_empty() {
-            println!("  Structures de morceaux : aucune reçue");
+        if self.blocks.is_empty() {
+            println!("  Données des morceaux : aucune reçue");
         }
-        for line in &self.structures {
-            println!("  Structure : {line}");
+        for ((deck, track), blocks) in &self.blocks {
+            println!("  Platine {deck}, morceau {track} :");
+            for seen in blocks.values() {
+                let times = if seen.times > 1 { format!(" (reçu {} fois)", seen.times) } else { String::new() };
+                println!("    {}{times}", seen.text);
+            }
         }
         for (deck, request) in &self.pending {
             println!("  Structure demandée {} fois sans réponse : platine {deck}, morceau {}", request.tries, request.track);
@@ -697,13 +782,13 @@ impl<'a> Probe<'a> {
     }
 }
 
-/// Ce qui, dans l'état d'une platine, mérite d'être signalé quand ça change.
+/// Ce qui, dans l'état d'une platine hors tempo, mérite d'être signalé quand ça change.
 fn describe(status: &Status) -> String {
-    let tempo = match (status.bpm, status.effective_bpm()) {
-        (Some(bpm), Some(played)) => format!("{played:.1} BPM (morceau {bpm:.2}, pitch {:+.1} %)", status.pitch),
-        _ => "tempo inconnu".to_owned(),
-    };
-    let mut state = vec![if status.playing() { "lecture" } else { "arrêt" }];
+    let mut state = vec![match (status.playing(), status.looping()) {
+        (_, true) => "boucle",
+        (true, false) => "lecture",
+        (false, false) => "arrêt",
+    }];
     if status.master() {
         state.push("maître");
     }
@@ -714,13 +799,76 @@ fn describe(status: &Status) -> String {
         state.push("sync");
     }
     format!(
-        "morceau {} (source {}/{}) │ {tempo} │ {} (0x{:02x})",
+        "morceau {} (source {}/{}) │ {} (0x{:02x})",
         status.track_id,
         status.source_player,
         status.source_slot,
         state.join(", "),
         status.play_state
     )
+}
+
+/// Description de l'état avec le tempo, glissé après le morceau.
+fn describe_tempo(status: &Status, state: &str) -> String {
+    let tempo = match (status.bpm, status.effective_bpm()) {
+        (Some(bpm), Some(played)) => format!("{played:.1} BPM (morceau {bpm:.2}, pitch {:+.1} %)", status.pitch),
+        _ => "tempo inconnu".to_owned(),
+    };
+    match state.split_once(" │ ") {
+        Some((track, rest)) => format!("{track} │ {tempo} │ {rest}"),
+        None => format!("{state} │ {tempo}"),
+    }
+}
+
+/// Résumé d'un bloc de données d'un morceau.
+fn describe_block(kind: u8, whole: &[u8]) -> String {
+    match kind {
+        block::SONG_STRUCTURE => match SongStructure::parse(whole) {
+            Some(song) => {
+                let phrases: Vec<String> =
+                    song.phrases.iter().map(|p| format!("{} {}", song.label(p.kind), p.beat)).collect();
+                format!(
+                    "structure, humeur {}, fin au temps {}, {} parties : {}",
+                    song.mood_label(),
+                    song.end_beat,
+                    song.phrases.len(),
+                    phrases.join(" · ")
+                )
+            }
+            None => format!("structure illisible ({} octets)", whole.len()),
+        },
+        block::BEAT_GRID => match BeatGrid::parse(whole) {
+            Some(grid) => {
+                let tempos: BTreeSet<u32> = grid.beats.iter().map(|b| (b.bpm * 100.0).round() as u32).collect();
+                let tempo = match (tempos.first(), tempos.last()) {
+                    (Some(low), Some(high)) if low == high => format!("{:.2} BPM", f64::from(*low) / 100.0),
+                    (Some(low), Some(high)) => {
+                        format!("de {:.2} à {:.2} BPM", f64::from(*low) / 100.0, f64::from(*high) / 100.0)
+                    }
+                    _ => "sans tempo".to_owned(),
+                };
+                let first = grid.beats.first().map_or(0, |b| b.time_ms);
+                format!("grille de {} temps, {tempo}, premier temps à {first} ms", grid.beats.len())
+            }
+            None => format!("grille illisible ({} octets)", whole.len()),
+        },
+        block::WAVEFORM_PREVIEW | block::WAVEFORM_DETAIL => {
+            let name = if kind == block::WAVEFORM_DETAIL { "waveform détaillée" } else { "aperçu de waveform" };
+            match Waveform::parse(whole) {
+                Some(w) if w.per_second > 0 => format!(
+                    "{name} : {} points de {} octets, {} par seconde ({:.0} s)",
+                    w.points,
+                    w.point_len,
+                    w.per_second,
+                    f64::from(w.points) / f64::from(w.per_second)
+                ),
+                Some(w) => format!("{name} : {} points de {} octets", w.points, w.point_len),
+                None => format!("{name} illisible ({} octets)", whole.len()),
+            }
+        }
+        block::ARTWORK => format!("pochette de {} Ko", whole.len().div_ceil(1024)),
+        _ => format!("bloc de type 0x{kind:02x}, {} octets", whole.len()),
+    }
 }
 
 fn mac_text(mac: [u8; 6]) -> String {
