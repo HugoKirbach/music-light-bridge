@@ -284,6 +284,8 @@ pub enum TempoSource {
     Manual,
     /// Tempo et phase imposés par la session Ableton Link.
     Link,
+    /// Tempo et temps de la platine maître de l'OPUS-QUAD, par le réseau.
+    Opus,
 }
 
 impl TempoSource {
@@ -292,6 +294,7 @@ impl TempoSource {
             Self::Auto => "automatique",
             Self::Manual => "manuel",
             Self::Link => "Ableton Link",
+            Self::Opus => "OPUS-QUAD",
         }
     }
 
@@ -301,7 +304,13 @@ impl TempoSource {
             Self::Auto => "auto",
             Self::Manual => "man.",
             Self::Link => "link",
+            Self::Opus => "opus",
         }
+    }
+
+    /// Tempo et phase viennent d'ailleurs : les kicks entendus ne les déplacent pas.
+    fn external(self) -> bool {
+        matches!(self, Self::Link | Self::Opus)
     }
 }
 
@@ -406,8 +415,8 @@ impl Tracker {
         if on_beat {
             self.mean_offset += OFFSET_SMOOTHING * (offset.abs() - self.mean_offset);
         }
-        // Avec Link, la phase de la session fait foi : les kicks ne la déplacent pas.
-        if self.source != TempoSource::Link {
+        // Avec Link ou l'OPUS, la phase venue du réseau fait foi : les kicks ne la déplacent pas.
+        if !self.source.external() {
             // Le repère suit le dernier kick, pour qu'un changement de période ne décale pas la phase.
             self.clock.anchor = beat;
             if on_beat {
@@ -421,7 +430,7 @@ impl Tracker {
     /// l'horloge continue au dernier tempo connu.
     pub fn update(&mut self, now: f64) {
         self.forget_before(now - WINDOW);
-        if self.source == TempoSource::Link {
+        if self.source.external() {
             return;
         }
         let onsets = self.onsets.make_contiguous();
@@ -440,7 +449,7 @@ impl Tracker {
                     .or_else(|| estimate(onsets, self.bpm_range).filter(confident))
                     .or_else(|| comb_tempo(self.frames.make_contiguous(), self.bpm_range, self.clock.bpm()))
             }
-            TempoSource::Manual | TempoSource::Link => None,
+            TempoSource::Manual | TempoSource::Link | TempoSource::Opus => None,
         };
         if let (Some(e), Some(period)) = (estimate, self.clock.period) {
             let agrees = (60.0 / e.bpm - period).abs() / period < TEMPO_JUMP;
@@ -502,6 +511,13 @@ impl Tracker {
         self.source = TempoSource::Link;
         self.pending_jump = None;
         self.clock = BeatClock { period: Some(60.0 / bpm), anchor: beat_time };
+    }
+
+    /// Durée d'un temps et instant d'un temps de la platine maître de l'OPUS : l'horloge les suit.
+    pub fn set_opus(&mut self, period: f64, beat_time: f64) {
+        self.source = TempoSource::Opus;
+        self.pending_jump = None;
+        self.clock = BeatClock { period: Some(period), anchor: beat_time };
     }
 
     fn adopt(&mut self, estimate: TempoEstimate) {

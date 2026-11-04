@@ -22,6 +22,9 @@ pub struct Config {
     /// Avance donnée aux flashs pour compenser la latence de la chaîne Hue (ms).
     #[serde(default)]
     pub light_advance_ms: i64,
+    /// Retard des paquets de l'OPUS sur le son (ms) : les temps qu'il annonce sont avancés d'autant.
+    #[serde(default)]
+    pub opus_offset_ms: f64,
     /// Couleurs du mode live.
     #[serde(default)]
     pub palette: Palette,
@@ -85,6 +88,10 @@ pub struct LiveSettings {
     /// Tempo imposé au lancement ; `None` : détection automatique.
     pub bpm: Option<f64>,
     pub link: bool,
+    /// Tempo, temps, phrases et kicks viennent de l'OPUS-QUAD, par le réseau.
+    pub opus: bool,
+    /// Avec l'OPUS, les couleurs de la trame (waveform) teintent les lampes.
+    pub trame: bool,
     /// Port MIDI écouté ; `None` : pas de MIDI.
     pub midi: Option<String>,
     pub flash: FlashMode,
@@ -105,6 +112,8 @@ impl Default for LiveSettings {
             audio: Backend::Auto,
             bpm: None,
             link: false,
+            opus: false,
+            trame: true,
             midi: None,
             flash: FlashMode::Kicks,
             motion: Motion::Auto,

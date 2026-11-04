@@ -125,6 +125,13 @@ impl App {
                 ui.vertical(|ui| self.color_picker(ui, 150.0, skin.label));
             }
         });
+        if self.tempo == super::TempoChoice::Opus {
+            let hint = "Avec l'OPUS : les lampes prennent la couleur de la waveform du morceau (rouge pour les graves, \
+                        vert pour les médiums, bleu pour les aigus) au lieu de la palette";
+            if theme::chip(ui, "Couleurs de la trame", self.settings.trame).on_hover_text(hint).clicked() {
+                self.set_trame(!self.settings.trame);
+            }
+        }
         ui.add_space(6.0);
         theme::section(ui, "ROTATION DES COULEURS");
         if !skin.subtitles {

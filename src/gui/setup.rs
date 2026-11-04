@@ -16,8 +16,12 @@ const ASIDE_WIDTH: f32 = 360.0;
 const DRIVERS: [(Backend, &str); 3] =
     [(Backend::Auto, "Auto (ASIO si libre)"), (Backend::Asio, "ASIO"), (Backend::Wasapi, "WASAPI")];
 const OPTION_GAP: f32 = 12.0;
-const TEMPOS: [(TempoChoice, &str); 3] =
-    [(TempoChoice::Auto, "Détection auto"), (TempoChoice::Manual, "BPM imposé"), (TempoChoice::Link, "Ableton Link")];
+const TEMPOS: [(TempoChoice, &str); 4] = [
+    (TempoChoice::Auto, "Détection auto"),
+    (TempoChoice::Manual, "BPM imposé"),
+    (TempoChoice::Link, "Ableton Link"),
+    (TempoChoice::Opus, "OPUS-QUAD"),
+];
 
 impl App {
     pub(super) fn setup(&mut self, ui: &mut Ui) {
@@ -380,16 +384,21 @@ impl App {
                     TempoChoice::Auto => ("Plage", ""),
                     TempoChoice::Manual => ("BPM imposé", "128"),
                     TempoChoice::Link => ("BPM si tu crées la session", "120"),
+                    TempoChoice::Opus => ("Liaison", ""),
                 };
                 ui.label(theme::text(label, theme::regular(13.0), MUTED));
-                if self.tempo == TempoChoice::Auto {
+                if matches!(self.tempo, TempoChoice::Auto | TempoChoice::Opus) {
                     let (min, max) = DEFAULT_BPM_RANGE;
+                    let (value, hover) = match self.tempo {
+                        TempoChoice::Opus => ("Wi-Fi ou USB".to_owned(), "L'OPUS doit être sur le même réseau que le PC (Wi-Fi), ou branché en USB"),
+                        _ => (format!("{min:.0} – {max:.0} BPM"), "Tempos cherchés par la détection automatique"),
+                    };
                     Frame::new().fill(RAISED).corner_radius(8).inner_margin(Margin::symmetric(12, 10)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.label(theme::text(format!("{min:.0} – {max:.0} BPM"), egui::FontId::monospace(14.0), TEXT));
+                        ui.label(theme::text(value, egui::FontId::monospace(14.0), TEXT));
                     })
                     .response
-                    .on_hover_text("Tempos cherchés par la détection automatique");
+                    .on_hover_text(hover);
                 } else {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.bpm_input)
@@ -405,6 +414,10 @@ impl App {
             TempoChoice::Auto => "Le tempo se cale sur les kicks ; il tient pendant les breaks.",
             TempoChoice::Manual => "Le tempo reste fixe ; seule la phase se cale sur les kicks.",
             TempoChoice::Link => "Tempo et phase suivent la session Link (Ableton, synthé…).",
+            TempoChoice::Opus => {
+                "Tempo, temps, phrases et kicks suivent la platine maître de l'OPUS : le son n'est plus nécessaire. \
+                 Ferme rekordbox pendant le live."
+            }
         };
         ui.label(theme::text(note, theme::regular(12.0), LABEL));
     }

@@ -8,7 +8,7 @@ use super::light::{Page, STAGE_SKIN};
 use super::theme::{self, BOLD, Icon, LIVE, MONO_BOLD, SEMIBOLD, STAGE_BG};
 use super::{App, MODES, Tab, flash_text, format_bpm};
 use crate::audio::WINDOWS_LOOPBACK;
-use crate::engine::{MAX_LAMP_DELAY_MS, Status};
+use crate::engine::{MAX_LAMP_DELAY_MS, OPUS_OFFSET_RANGE, OpusStatus, Status};
 use crate::tempo::TempoSource;
 
 const DOCK_WIDTH: f32 = 1040.0;
@@ -117,6 +117,8 @@ impl App {
             let source = match (status.source, status.link_peers) {
                 (TempoSource::Link, Some(peers)) => format!("BPM · ABLETON LINK · {peers} PARTICIPANT(S)"),
                 (TempoSource::Link, None) => "BPM · ABLETON LINK".to_owned(),
+                (TempoSource::Opus, _) => opus_line(status),
+                (_, _) if status.opus.is_some() => format!("BPM · DÉTECTION AUTO · {}", opus_line(status)),
                 (TempoSource::Manual, _) => "BPM · TEMPO IMPOSÉ".to_owned(),
                 (TempoSource::Auto, _) => "BPM · DÉTECTION AUTO".to_owned(),
             };
@@ -151,9 +153,11 @@ impl App {
             Some(message.to_owned())
         } else if status.bridge_lost {
             Some("Bridge injoignable : reconnexion en cours…".to_owned())
+        } else if let Some(text) = status.opus.as_ref().and_then(opus_warning) {
+            Some(text)
         } else if status.input_lost {
             Some("Entrée audio perdue (câble ou pilote ?) : reconnexion en cours…".to_owned())
-        } else if status.silent {
+        } else if status.silent && status.opus.is_none() {
             let text = if self.windows_loopback() {
                 "Rien n'arrive de la sortie du PC : Ableton en ASIO n'y passe pas (onglet Source)"
             } else {
@@ -232,6 +236,37 @@ impl App {
     }
 
     fn tempo_tab(&mut self, ui: &mut Ui, status: &Status) {
+        if let Some(opus) = &status.opus {
+            ui.label(theme::text(
+                "Tempo, temps, phrases et kicks suivent la platine maître de l'OPUS-QUAD.",
+                theme::regular(15.0),
+                Color32::WHITE,
+            ));
+            let route = match (&opus.link.opus, &opus.link.route) {
+                (Some(ip), Some(route)) => format!("OPUS à {ip}, par « {route} »."),
+                (Some(ip), None) => format!("OPUS à {ip}, mais aucune carte réseau du PC n'y mène."),
+                (None, _) => "OPUS pas encore vu sur le réseau.".to_owned(),
+            };
+            ui.label(theme::text(route, theme::regular(13.0), DIM));
+            if let Some(now) = &opus.now {
+                let phrase = now.phrase.as_deref().unwrap_or("structure inconnue");
+                let calage = if now.settled { "" } else { " · phase en cours de calage" };
+                let line = format!("Platine {} · morceau {} · temps {} · {phrase}{calage}", now.deck, now.track, now.beat);
+                ui.label(theme::text(line, theme::regular(13.0), DIM));
+            }
+            let mut offset = self.cfg.opus_offset_ms;
+            let shown = format!("{offset:+.0} ms");
+            let slider = egui::Slider::new(&mut offset, OPUS_OFFSET_RANGE.0..=OPUS_OFFSET_RANGE.1).step_by(5.0);
+            if theme::slider_row(ui, "Retard de l'OPUS", shown, slider, DIM) {
+                self.set_opus_offset(offset);
+            }
+            ui.label(theme::text(
+                "Les flashs tombent après les kicks : monte ce retard. Avant : descends-le. Il s'ajoute à l'avance des lampes.",
+                theme::regular(12.0),
+                DIM,
+            ));
+            return;
+        }
         // Sorti le temps du rendu, pour que l'onglet puisse modifier l'application.
         let Some(engine) = self.engine.take() else { return };
         if engine.controls_tempo() {
@@ -412,6 +447,38 @@ fn meter(ui: &mut Ui, name: &str, level: f32) {
     });
 }
 
+
+/// Ligne de la source quand l'OPUS est suivi : la platine qui mène, la phrase rekordbox en cours
+/// et la suivante.
+fn opus_line(status: &Status) -> String {
+    let Some(now) = status.opus.as_ref().and_then(|opus| opus.now.as_ref()) else {
+        return "BPM · OPUS-QUAD · EN ATTENTE D'UNE PLATINE EN LECTURE".to_owned();
+    };
+    let mut line = format!("BPM · OPUS · PLATINE {}", now.deck);
+    if let Some(phrase) = &now.phrase {
+        line.push_str(&format!(" · {}", phrase.to_uppercase()));
+    }
+    if let (Some(next), Some(left)) = (&now.next, now.beats_left) {
+        line.push_str(&format!(" → {} DANS {left} T", next.to_uppercase()));
+    }
+    if !now.settled {
+        line.push_str(" · CALAGE");
+    }
+    line
+}
+
+/// Ce qui empêche l'OPUS de mener la lumière, s'il y a lieu.
+fn opus_warning(opus: &OpusStatus) -> Option<String> {
+    if let Some(error) = &opus.error {
+        return Some(format!("Liaison OPUS impossible : {error}"));
+    }
+    match (opus.link.opus, opus.link.answered, opus.link.live) {
+        (None, _, _) => Some("OPUS pas encore vu : même Wi-Fi que le PC ? Autorise dj-bridge sur le réseau si Windows le demande".to_owned()),
+        (Some(ip), false, _) => Some(format!("OPUS vu à {ip} : en attente de sa réponse (rekordbox fermé ?)")),
+        (Some(_), true, false) => Some("Plus rien de l'OPUS depuis 1 s : liaison coupée ?".to_owned()),
+        (Some(_), true, true) => None,
+    }
+}
 
 /// Couleur de chaque lampe, en pastilles (au plus 12), de droite à gauche dans l'en-tête.
 fn lamp_dots(ui: &mut Ui, colors: &[[u8; 3]]) {

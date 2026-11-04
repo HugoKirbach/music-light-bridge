@@ -16,10 +16,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use crossterm::terminal::{self, ClearType};
-use netdev::ipnet::Ipv4Net;
 
 use super::tui::{self, RawMode};
 use crate::config::Config;
+use crate::opus::{Interface, interfaces, label};
 use crate::prolink::{self, BeatGrid, Packet, Reassembler, SongStructure, Status, Waveform, block};
 
 /// Cadence de l'annonce de présence et de la demande d'état (celle de Beat Link).
@@ -106,39 +106,6 @@ pub fn run(options: Options) -> Result<()> {
     result?;
     probe.summary(&path);
     Ok(())
-}
-
-/// Carte réseau du PC, avec une de ses adresses IPv4.
-#[derive(Clone, PartialEq)]
-struct Interface {
-    label: String,
-    ip: Ipv4Addr,
-    net: Ipv4Net,
-    mac: [u8; 6],
-}
-
-fn label(i: &netdev::Interface) -> String {
-    let name = i.friendly_name.clone().unwrap_or_else(|| i.name.clone());
-    match &i.description {
-        Some(description) if *description != name => format!("{name} ({description})"),
-        _ => name,
-    }
-}
-
-/// Cartes réseau actives qui ont une adresse IPv4.
-fn interfaces() -> Vec<Interface> {
-    netdev::get_interfaces()
-        .into_iter()
-        .filter(|i| i.is_up() && !i.is_loopback())
-        .flat_map(|i| {
-            let label = label(&i);
-            let mac = i.mac_addr.map(|m| m.octets()).unwrap_or_default();
-            i.ipv4
-                .iter()
-                .map(|net| Interface { label: label.clone(), ip: net.addr(), net: *net, mac })
-                .collect::<Vec<_>>()
-        })
-        .collect()
 }
 
 /// Toutes les cartes réseau physiques, avec ou sans adresse : la carte USB de l'OPUS peut
@@ -623,7 +590,7 @@ impl<'a> Probe<'a> {
                 let Some(request) = self.pending.get_mut(&deck) else { continue };
                 request.tries += 1;
                 request.next = now + PSSI_RETRY;
-                let packet = prolink::pssi_request(request.track, request.device);
+                let packet = prolink::metadata_request(request.track, block::SONG_STRUCTURE, request.device);
                 self.send(SocketAddrV4::new(opus, prolink::STATUS_PORT), &packet);
             }
         }

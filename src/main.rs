@@ -11,6 +11,7 @@ mod hue;
 mod link;
 mod look;
 mod metronome;
+mod opus;
 mod phrase;
 mod prolink;
 mod rhythm;
@@ -28,7 +29,6 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
 use config::Config;
-use look::{Dynamics, Palette};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -171,6 +171,13 @@ struct LiveArgs {
     /// Rejoint la session Ableton Link : tempo et phase viennent de la session
     #[arg(long)]
     link: bool,
+    /// Suit l'OPUS-QUAD par le réseau (Wi-Fi ou USB) : tempo, temps, phrases et kicks de la platine
+    /// maître ; le son devient facultatif
+    #[arg(long)]
+    opus: bool,
+    /// Avec `--opus`, garde la palette au lieu des couleurs de la trame (waveform)
+    #[arg(long)]
+    palette_only: bool,
     /// Écoute une entrée MIDI (morceau de son nom, voir `devices` ; la première si vide) :
     /// chaque note flashe à sa couleur
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "NOM")]
@@ -178,7 +185,8 @@ struct LiveArgs {
 }
 
 impl LiveArgs {
-    fn into_options(self, palette: Palette, dynamics: Dynamics, remote: Option<String>) -> engine::Options {
+    fn into_options(self, cfg: &Config, remote: Option<String>) -> engine::Options {
+        let (palette, dynamics) = (cfg.palette, cfg.dynamics);
         engine::Options {
             input: self.input,
             audio: self.audio,
@@ -187,6 +195,9 @@ impl LiveArgs {
             bpm_range: (self.bpm_min, self.bpm_max),
             flash: self.flash,
             link: self.link,
+            opus: self.opus,
+            opus_offset_ms: cfg.opus_offset_ms,
+            trame: !self.palette_only,
             midi: self.midi.map(|name| (!name.is_empty()).then_some(name)),
             palette,
             dynamics,
@@ -221,7 +232,7 @@ fn main() -> Result<()> {
         Command::Devices { test: true, input, audio } => cmd::setup::test_input(input, audio),
         Command::Live(args) => {
             let remote = if args.remote { Some(cfg.remote_token()?) } else { None };
-            let options = args.into_options(cfg.palette, cfg.dynamics, remote);
+            let options = args.into_options(&cfg, remote);
             cmd::live::run(rt, &cfg, options)
         }
         Command::Gui => gui::run(rt, cfg),

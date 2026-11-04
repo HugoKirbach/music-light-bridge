@@ -1,15 +1,25 @@
-//! Boucles des fils du moteur : éclairage (60 Hz), tempo, Ableton Link.
+//! Boucles des fils du moteur : éclairage (60 Hz), tempo, Ableton Link, OPUS-QUAD.
+
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::mpsc::{self, RecvTimeoutError};
 
 use super::delays::LampDelays;
 use super::*;
+use crate::look::Guide;
+use crate::opus::{self, Client};
+use crate::prolink;
 
 /// Durée d'un flash du test de synchro, et sa cadence sans tempo connu.
 const SYNC_FLASH: f64 = 0.08;
 const SYNC_PERIOD: f64 = 0.5;
 const WHITE: Rgb = Rgb { r: u16::MAX, g: u16::MAX, b: u16::MAX };
+/// Un kick de l'OPUS encore dû avec ce retard (réveil tardif) flashe quand même.
+const OPUS_LATE: f64 = 0.1;
 
 /// Flashe selon le planificateur (vrais kicks, anticipés quand ils sont attendus) et sur chaque
-/// note MIDI, et entretient le flux à 60 Hz entre deux flashs.
+/// note MIDI, et entretient le flux à 60 Hz entre deux flashs. Quand l'OPUS mène, les flashs
+/// partent sur les kicks de sa waveform, en avance de la latence des lampes, et la phase, les
+/// niveaux et la couleur de la trame viennent de lui.
 pub(super) fn light_loop(
     rt: &Runtime,
     stream: &mut HueStream,
@@ -30,6 +40,10 @@ pub(super) fn light_loop(
     let mut next_frame = last;
     let mut delays = LampDelays::default();
     let mut lags: Vec<f32> = Vec::new();
+    // L'OPUS menait la lumière à la trame précédente ; dernier kick flashé d'après lui (platine,
+    // morceau, temps).
+    let mut guided = false;
+    let mut opus_flashed: Option<(u8, u32, u32)> = None;
     while !shared.stopped() {
         planner.mode = shared.mode();
         planner.hold_off_pattern = look.phase() != Phase::BuildUp;
@@ -43,27 +57,48 @@ pub(super) fn light_loop(
         planner.confirm_window = (features.input_latency().as_secs_f64() + CONFIRM_MARGIN)
             .clamp(CONFIRM_RANGE.0, CONFIRM_RANGE.1);
         let rhythm = shared.tracker().rhythm();
-        let deadline = match planner.next_event(rhythm.as_ref(), features.seconds(Instant::now())) {
+        let before = features.seconds(Instant::now());
+        // Réveil au prochain flash : anticipé par le planificateur, ou kick prévu par l'OPUS.
+        let opus_flash = shared
+            .opus_guide(before)
+            .and_then(|(_, guide)| guide.next_kick)
+            .map(|(_, at, _)| at - total_advance.as_secs_f64());
+        let event = match (planner.next_event(rhythm.as_ref(), before), opus_flash) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let deadline = match event {
             Some(event) => next_frame.min(features.instant(event)),
             None => next_frame,
         };
         timing::sleep_until_or(deadline, || features.kicks() != seen || notes.count() != seen_notes);
 
+        let now = Instant::now();
+        let opus = shared.opus_guide(features.seconds(now));
+        if guided && opus.is_none() {
+            // L'OPUS ne mène plus (liaison coupée, platine arrêtée) : l'écoute reprend la main.
+            shared.tracker().set_auto();
+            *lock(&shared.opus_now) = None;
+        }
+        guided = opus.is_some();
+
         let kicks = features.kicks();
         // Hors groove, un coup sans grave (charleston, clap, mélodie) n'est pas un kick : il ne flashe
-        // pas et ne compte ni pour le tempo ni pour le motif.
-        let kick = (kicks != seen && look.carries_bass(features.levels().raw_bass))
+        // pas et ne compte ni pour le tempo ni pour le motif. Quand l'OPUS mène, le son n'y est pour rien.
+        let kick = (kicks != seen && !guided && look.carries_bass(features.levels().raw_bass))
             .then(|| features.seconds(features.last_kick()) - KICK_DETECTION_DELAY);
         seen = kicks;
         if let Some(at) = kick {
             shared.tracker().on_kick(at);
             look.kick_detected(features.levels().raw_bass);
         }
+        if let Some((_, guide)) = &opus {
+            shared.tracker().set_opus(guide.period, guide.beat_time);
+        }
         let note_count = notes.count();
         let note = (note_count != seen_notes).then(|| notes.last());
         seen_notes = note_count;
 
-        let now = Instant::now();
         let (rhythm, locked, structure, beat_time) = {
             let tracker = shared.tracker();
             let clock = tracker.clock();
@@ -77,29 +112,54 @@ pub(super) fn light_loop(
             });
             (tracker.rhythm(), tracker.locked(features.seconds(now)), tracker.structure(features.seconds(now)), beat_time)
         };
-        let action = planner.poll(rhythm.as_ref(), features.seconds(now), kick);
-        // La détection cherche les kicks là où le motif les attend dès que le tempo est sûr, et se
-        // méfie de ce qui tombe ailleurs tant que le groove tient.
-        let grooving = planner.in_groove(rhythm.as_ref(), features.seconds(now));
-        features.set_grid(Grid::of(rhythm.as_ref(), locked, grooving));
+        let (action, grooving, beat_time) = match &opus {
+            Some((playing, guide)) => {
+                let (action, accent) = opus_action(playing, guide, features.seconds(now), total_advance.as_secs_f64(), &mut opus_flashed);
+                if let Some(accent) = accent {
+                    look.kick_at(accent);
+                }
+                // Les mouvements lents se calent sur la phrase rekordbox : un multiple de 16 en tête.
+                let start = guide.phrase.as_ref().map_or(1, |p| p.start);
+                let fraction = ((features.seconds(now) - guide.beat_time) / guide.period).clamp(0.0, 1.0);
+                let beats = f64::from(guide.beat.saturating_sub(start)) + fraction;
+                let beat_time = Some(BeatTime { beats, period: guide.period as f32 });
+                publish_opus(shared, playing, guide, now);
+                (action, guide.phase == Phase::Groove, beat_time)
+            }
+            None => {
+                let action = planner.poll(rhythm.as_ref(), features.seconds(now), kick);
+                // La détection cherche les kicks là où le motif les attend dès que le tempo est sûr, et
+                // se méfie de ce qui tombe ailleurs tant que le groove tient.
+                let grooving = planner.in_groove(rhythm.as_ref(), features.seconds(now));
+                features.set_grid(Grid::of(rhythm.as_ref(), locked, grooving));
+                match action {
+                    Action::Flash { reactive } => {
+                        // Place du temps flashé dans la structure : tête de phrase ou de mesure.
+                        let at = if reactive { kick.unwrap_or(features.seconds(now)) } else { features.seconds(now) + total_advance.as_secs_f64() };
+                        match shared.tracker().position(at) {
+                            Some(p) if p.phrase == 0 => look.kick_at(Accent::Phrase),
+                            Some(p) if p.beat == 0 => look.kick_at(Accent::Bar),
+                            Some(_) => look.kick_at(Accent::Beat),
+                            None => look.kick(),
+                        }
+                    }
+                    Action::Cancel => look.cancel_flash(),
+                    Action::None => {}
+                }
+                (action, grooving, beat_time)
+            }
+        };
         shared.grooving.store(grooving, Ordering::Relaxed);
         look.set_grid_groove(rhythm.map(|_| grooving));
         look.set_structure(structure);
         look.set_drop_advance(total_advance.as_secs_f32());
-        match action {
-            Action::Flash { reactive } => {
-                // Place du temps flashé dans la structure : tête de phrase ou de mesure.
-                let at = if reactive { kick.unwrap_or(features.seconds(now)) } else { features.seconds(now) + total_advance.as_secs_f64() };
-                match shared.tracker().position(at) {
-                    Some(p) if p.phrase == 0 => look.kick_at(Accent::Phrase),
-                    Some(p) if p.beat == 0 => look.kick_at(Accent::Bar),
-                    Some(_) => look.kick_at(Accent::Beat),
-                    None => look.kick(),
-                }
-            }
-            Action::Cancel => look.cancel_flash(),
-            Action::None => {}
-        }
+        let trame = shared.trame.load(Ordering::Relaxed);
+        look.set_guide(opus.as_ref().map(|(_, guide)| Guide {
+            phase: guide.phase,
+            build: guide.build.unwrap_or(0.0),
+            drop_in: guide.drop_in,
+            color: guide.color.filter(|_| trame),
+        }));
         if shared.drop_now.swap(false, Ordering::Relaxed) {
             look.drop_now();
         }
@@ -117,7 +177,8 @@ pub(super) fn light_loop(
         look.set_director(shared.director.load(Ordering::Relaxed));
         look.rotation = Rotation::from_index(shared.rotation.load(Ordering::Relaxed));
         look.set_beat_time(beat_time);
-        let mut colors = look.render_lamps(now - last, features.levels()).to_vec();
+        let levels = opus.as_ref().map_or_else(|| features.levels(), |(_, guide)| guide.levels);
+        let mut colors = look.render_lamps(now - last, levels).to_vec();
         if look.take_drop() {
             shared.tracker().on_drop();
         }
@@ -184,6 +245,109 @@ pub(super) fn link_loop(shared: &Shared, features: &Features, bpm: Option<f64>) 
         shared.tracker().set_link(beat.bpm, beat.beat_time);
         shared.link_peers.store(beat.peers, Ordering::Relaxed);
         thread::sleep(LINK_POLL);
+    }
+}
+
+/// Flash du prochain kick prévu par l'OPUS, quand son heure moins l'avance des lampes est venue :
+/// une seule fois par temps, et seulement une fois la phase assez sûre (jamais à côté du kick).
+fn opus_action(
+    playing: &Playing,
+    guide: &opus::Guide,
+    now: f64,
+    advance: f64,
+    flashed: &mut Option<(u8, u32, u32)>,
+) -> (Action, Option<Accent>) {
+    let Some((beat, at, accent)) = guide.next_kick else { return (Action::None, None) };
+    let key = (playing.deck, playing.track.id, beat);
+    if !playing.settled || *flashed == Some(key) || now < at - advance || now > at + OPUS_LATE {
+        return (Action::None, None);
+    }
+    *flashed = Some(key);
+    (Action::Flash { reactive: false }, Some(accent))
+}
+
+/// Publie, pour l'affichage, où en est la platine qui mène.
+fn publish_opus(shared: &Shared, playing: &Playing, guide: &opus::Guide, now: Instant) {
+    let phrase = guide.phrase.as_ref();
+    *lock(&shared.opus_now) = Some(OpusNow {
+        deck: playing.deck,
+        track: playing.track.id,
+        beat: guide.beat,
+        bar_beat: guide.bar_beat,
+        phrase_beat: guide.phrase_beat,
+        phrase: phrase.map(|p| p.label.clone()),
+        next: phrase.and_then(|p| p.next.clone()),
+        beats_left: phrase.map(|p| p.end.saturating_sub(guide.beat)),
+        settled: playing.settled,
+        at: now,
+    });
+}
+
+/// Suit l'OPUS-QUAD par le réseau : se présente comme rekordbox, digère ses paquets, et publie la
+/// platine qui mène à chaque paquet (au moins toutes les 20 ms).
+pub(super) fn opus_loop(shared: &Shared, features: &Features) {
+    let sockets = [prolink::STATUS_PORT, prolink::ANNOUNCE_PORT].map(bind_opus_port);
+    let [Ok(status), Ok(announce)] = sockets else {
+        let reason = sockets.into_iter().find_map(Result::err).unwrap_or_default();
+        *lock(&shared.opus_error) = Some(reason);
+        return;
+    };
+    let (tx, rx) = mpsc::channel();
+    thread::scope(|scope| {
+        for socket in [&status, &announce] {
+            let tx = tx.clone();
+            scope.spawn(move || receive_opus(socket, &tx, shared));
+        }
+        drop(tx);
+        let mut client = Client::new(opus::interfaces());
+        let mut out = Vec::new();
+        while !shared.stopped() {
+            match rx.recv_timeout(OPUS_POLL) {
+                Ok((at, port, from, data)) => client.on_packet(features.seconds(at), port, from, &data, &mut out),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            let now = features.seconds(Instant::now());
+            client.tick(now, &mut out);
+            for (to, data) in out.drain(..) {
+                let _ = status.send_to(&data, to);
+            }
+            *lock(&shared.opus_playing) = client.playing(now);
+            *lock(&shared.opus_link) = client.state(now);
+        }
+    });
+}
+
+/// Ouvre un port de la liaison sur toutes les cartes réseau.
+fn bind_opus_port(port: u16) -> std::result::Result<UdpSocket, String> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))
+        .map_err(|e| format!("port UDP {port} déjà pris (rekordbox ou la sonde ouverts ?) : {e}"))?;
+    socket.set_broadcast(true).map_err(|e| e.to_string())?;
+    socket.set_read_timeout(Some(OPUS_POLL)).map_err(|e| e.to_string())?;
+    Ok(socket)
+}
+
+/// Paquet reçu de l'OPUS : arrivée, port local, adresse d'origine, contenu.
+type OpusPacket = (Instant, u16, Ipv4Addr, Vec<u8>);
+
+fn receive_opus(socket: &UdpSocket, tx: &mpsc::Sender<OpusPacket>, shared: &Shared) {
+    let port = socket.local_addr().map_or(0, |a| a.port());
+    let mut buf = [0u8; 2048];
+    while !shared.stopped() {
+        match socket.recv_from(&mut buf) {
+            Ok((len, SocketAddr::V4(from))) => {
+                if tx.send((Instant::now(), port, *from.ip(), buf[..len].to_vec())).is_err() {
+                    return;
+                }
+            }
+            Ok(_) => {}
+            // Délai d'attente écoulé, ou écho ICMP d'un envoi précédent (Windows).
+            Err(e) if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::ConnectionReset
+            ) => {}
+            Err(_) => return,
+        }
     }
 }
 

@@ -244,6 +244,48 @@ rond dans une boucle.
 4. Refais les mêmes gestes, et copie-moi le bilan. La ligne « Chemin » dit par où l'OPUS est
    passé.
 
+## [27] La lumière menée par l'OPUS-QUAD
+
+La lumière suit la platine maître de l'OPUS par le Wi-Fi, comme au premier essai de la sonde, sans
+avoir besoin du son.
+- **Flashs :** sur les temps où la waveform du morceau montre un kick, en avance de la latence des
+  lampes.
+- **Phases :** une phrase rekordbox « Up » est une montée, dont le drop tombe au début de la phrase
+  suivante. Ailleurs, c'est un groove s'il y a des kicks, et un break qui flotte sinon.
+- **Régisseur :** il change de mise en scène aux têtes de phrase.
+- **Couleurs de la trame :** la couleur de la waveform du temps en cours teinte les lampes (rouge pour
+  les graves, vert pour les médiums, bleu pour les aigus).
+
+**À essayer :**
+1. Ferme rekordbox et la sonde. L'OPUS reste sur le Wi-Fi de la maison, comme au premier essai.
+2. Lance la fenêtre :
+
+   ```bash
+   .\target\release\dj-bridge.exe gui
+   ```
+
+3. Tempo : choisis « OPUS-QUAD », puis lance le live.
+4. Sous le BPM, une ligne du genre « BPM · OPUS · PLATINE 1 · CHORUS → UP DANS 12 T ». Juste après
+   un chargement ou un saut, elle affiche « CALAGE » une ou deux secondes : la lumière attend alors
+   avant de flasher.
+5. Mixe :
+   - les flashs tombent sur les kicks, et rien ne flashe dans le vide ;
+   - les breaks flottent ;
+   - une phrase Up monte, et son drop tombe pile au début de la suivante ;
+   - en passant le rôle de maître à l'autre platine, la lumière la suit.
+6. Si les flashs tombent toujours un peu après les kicks (ou avant), règle « Retard de l'OPUS » dans
+   l'onglet Tempo, par crans de 5 ms. La valeur est gardée.
+7. Couleurs : décoche « Couleurs de la trame » (onglet Couleurs) pour revenir à ta palette, et
+   compare.
+
+**Limites connues :**
+- La waveform est celle du morceau, pas du mix : faders, EQ et filtres de l'OPUS n'y changent rien.
+- Pendant une transition, c'est la platine maître qui mène.
+- Morceau déjà chargé avant le lancement : l'OPUS n'envoie ses données qu'au chargement. DJ-Bridge
+  les redemande, mais seule la demande de structure est vérifiée. Si la lumière reste en break,
+  recharge le morceau.
+- Fin de boucle : un ou deux flashs peuvent tomber jusqu'à 80 ms à côté.
+
 ---
 
 ## Ce qui a été vérifié de mon côté
@@ -257,6 +299,10 @@ rond dans une boucle.
 - [26] : tests sur les paquets de l'OPUS, dont 4 sur de vrais paquets de ton premier essai
   (état, structure masquée, grille, waveform) ; la sonde corrigée a relu tout le journal de ce
   premier essai ; banc d'essai inchangé.
+- [27] : 149 tests, dont 9 sur la liaison OPUS (kicks de la waveform, phases, prochain kick,
+  calage de la phase, boucles) ; ton journal rejoué à 60 images par seconde : les flashs visent le
+  vrai temps à ±15 ms en lecture normale (écart-type), aucun flash hors kick ; banc d'essai
+  inchangé ; la fenêtre s'ouvre. Jamais essayé avec les lampes ni avec l'OPUS en direct.
 - La fenêtre (capture d'écran) et la page mobile (aperçu dans un navigateur, à la taille d'un
   téléphone).
 

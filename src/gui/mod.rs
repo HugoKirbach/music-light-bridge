@@ -69,6 +69,8 @@ enum TempoChoice {
     Auto,
     Manual,
     Link,
+    /// L'OPUS-QUAD, par le réseau : tempo, temps, phrases et kicks.
+    Opus,
 }
 
 /// Onglets du dock de la scène : les pages de la lumière (dont les scènes), le tempo, la synchro
@@ -132,10 +134,11 @@ struct App {
 impl App {
     fn new(rt: Arc<Runtime>, cfg: Config) -> Self {
         let settings = cfg.live.clone();
-        let tempo = match (settings.link, settings.bpm) {
-            (true, _) => TempoChoice::Link,
-            (false, Some(_)) => TempoChoice::Manual,
-            (false, None) => TempoChoice::Auto,
+        let tempo = match (settings.opus, settings.link, settings.bpm) {
+            (true, _, _) => TempoChoice::Opus,
+            (_, true, _) => TempoChoice::Link,
+            (_, false, Some(_)) => TempoChoice::Manual,
+            (_, false, None) => TempoChoice::Auto,
         };
         let card_backend = if settings.audio == Backend::Output { Backend::Auto } else { settings.audio };
         let bridge = Arc::new(Mutex::new(Bridge::Unpaired));
@@ -243,7 +246,13 @@ impl App {
             return self.show("Indique le BPM à imposer, ou choisis la détection auto.");
         }
         self.settings.link = self.tempo == TempoChoice::Link;
-        self.settings.bpm = if self.tempo == TempoChoice::Auto { None } else { bpm };
+        self.settings.opus = self.tempo == TempoChoice::Opus;
+        self.settings.bpm = match self.tempo {
+            TempoChoice::Auto => None,
+            // L'OPUS donne le tempo : le BPM saisi reste pour une autre fois.
+            TempoChoice::Opus => self.settings.bpm,
+            TempoChoice::Manual | TempoChoice::Link => bpm,
+        };
         self.save_config();
         let remote = match self.settings.remote {
             true => match self.cfg.remote_token() {
@@ -265,6 +274,9 @@ impl App {
             remote,
             rotation: self.settings.rotation,
             link: self.settings.link,
+            opus: self.settings.opus,
+            opus_offset_ms: self.cfg.opus_offset_ms,
+            trame: self.settings.trame,
             midi: self.settings.midi.clone().map(Some),
             palette: self.palette,
             dynamics: self.dynamics,
@@ -336,6 +348,21 @@ impl App {
         self.settings.rotation = rotation;
         if let Some(engine) = &self.engine {
             engine.set_rotation(rotation);
+        }
+    }
+
+    fn set_trame(&mut self, on: bool) {
+        self.settings.trame = on;
+        if let Some(engine) = &self.engine {
+            engine.set_trame(on);
+        }
+    }
+
+    /// Retard des paquets de l'OPUS sur le son, enregistré pour les sessions suivantes.
+    fn set_opus_offset(&mut self, ms: f64) {
+        self.cfg.opus_offset_ms = ms;
+        if let Some(engine) = &self.engine {
+            engine.set_opus_offset(ms);
         }
     }
 

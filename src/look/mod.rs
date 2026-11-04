@@ -211,6 +211,16 @@ impl Default for Dynamics {
     }
 }
 
+/// Ce que l'OPUS dit du morceau quand il mène la lumière : la phase, l'avancement de la montée et
+/// les secondes avant son drop, et la couleur de la trame (waveform), portée à son plein.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Guide {
+    pub phase: Phase,
+    pub build: f32,
+    pub drop_in: Option<f32>,
+    pub color: Option<[f32; 3]>,
+}
+
 /// Position sur la grille des temps : temps écoulés (un multiple de 16 tombe en tête de phrase
 /// quand la structure est reconnue) et durée d'un temps (s).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -399,6 +409,9 @@ pub struct ReactiveLook {
     director: Director,
     /// Dispositions que la place des lampes rend possibles.
     possible: Vec<Spread>,
+    /// L'OPUS mène la lumière ; et la couleur de la trame atteinte en fondu.
+    guide: Option<Guide>,
+    trame: Option<Color>,
 }
 
 impl Default for ReactiveLook {
@@ -438,6 +451,8 @@ impl Default for ReactiveLook {
             dropped: false,
             director: Director::default(),
             possible: vec![Spread::Auto, Spread::Together],
+            guide: None,
+            trame: None,
         }
     }
 }
@@ -628,6 +643,12 @@ impl ReactiveLook {
         self.director.enabled = on;
     }
 
+    /// L'OPUS mène la lumière (`Some`) : la phase suit ce qu'il dit du morceau au lieu de
+    /// l'écoute, et sa couleur de trame, s'il y en a une, remplace la palette.
+    pub fn set_guide(&mut self, guide: Option<Guide>) {
+        self.guide = guide;
+    }
+
     /// Avance des lampes (s), dont le drop prévu d'une montée s'allume d'autant plus tôt.
     pub fn set_drop_advance(&mut self, advance: f32) {
         self.drop_advance = advance;
@@ -679,7 +700,10 @@ impl ReactiveLook {
             self.drop_shown = true;
         }
         let before = self.phases.phase;
-        let dropped = self.phases.update(dt, levels, pulse);
+        let dropped = match self.guide {
+            Some(guide) => self.phases.follow(dt, guide.phase, guide.build, guide.drop_in),
+            None => self.phases.update(dt, levels, pulse),
+        };
         self.dropped |= dropped;
         // Le régisseur ouvre une nouvelle section au drop et au retour du groove.
         if dropped || (before != Phase::Groove && self.phases.phase == Phase::Groove) {
@@ -715,14 +739,23 @@ impl ReactiveLook {
         let filtered = self.filter_amount(levels.tilt, dt);
         self.calm = approach(self.calm, calm, dt, SCENE_FADE);
         self.filtered = approach(self.filtered, filtered, dt, SCENE_FADE);
-        let scene = rotate_hue(
-            self.director.tint(blend(
-                blend(color(self.palette.primary), color(self.palette.calm), self.calm),
-                color(self.palette.filtered),
-                self.filtered,
-            )),
-            self.hue,
+        let chosen = blend(
+            blend(color(self.palette.primary), color(self.palette.calm), self.calm),
+            color(self.palette.filtered),
+            self.filtered,
         );
+        // Couleur de la trame : celle de la waveform sur le temps en cours, en fondu d'un temps à
+        // l'autre ; sans elle, retour en fondu à la palette.
+        self.trame = match (self.guide.and_then(|g| g.color), self.trame) {
+            (Some(target), Some(current)) => Some(blend(current, target, 1.0 - (-dt / SCENE_FADE).exp())),
+            (Some(target), None) => Some(blend(chosen, target, 1.0 - (-dt / SCENE_FADE).exp())),
+            (None, Some(current)) if dt > 0.0 => {
+                let back = blend(current, chosen, 1.0 - (-dt / SCENE_FADE).exp());
+                (back.iter().zip(&chosen).any(|(a, b)| (a - b).abs() > 0.01)).then_some(back)
+            }
+            (None, current) => current,
+        };
+        let scene = rotate_hue(self.director.tint(self.trame.unwrap_or(chosen)), self.hue);
         let base = self.note_color.unwrap_or(scene);
         let floor = self.dynamics.floor.clamp(0.0, 1.0);
         let intensity = self.dynamics.flash.clamp(0.0, 1.0);

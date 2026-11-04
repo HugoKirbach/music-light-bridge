@@ -283,6 +283,34 @@ impl PhaseTracker {
         dropped
     }
 
+    /// L'OPUS dicte la phase (`phase`, avancement de la montée `build`, secondes avant son drop
+    /// `drop_in`) : elle est suivie telle quelle. `true` au drop qui conclut une montée.
+    pub(super) fn follow(&mut self, dt: f32, phase: Phase, build: f32, drop_in: Option<f32>) -> bool {
+        self.time += dt;
+        self.phase_time += dt;
+        let dropped = self.phase == Phase::BuildUp && phase == Phase::Groove;
+        if dropped {
+            self.anticipated = None;
+        } else if self.anticipated.is_some_and(|at| self.time > at + DROP_CONFIRM) {
+            // Le drop montré d'avance n'est pas venu (montée bouclée, morceau changé).
+            self.anticipated = None;
+            self.anticipation_missed = true;
+            self.false_drop = true;
+        }
+        if phase != self.phase {
+            if phase == Phase::BuildUp {
+                self.build_start = self.time;
+                self.anticipation_missed = false;
+            }
+            self.phase = phase;
+            self.phase_time = 0.0;
+        }
+        self.grooving = phase == Phase::Groove;
+        self.drop_at = drop_in.filter(|_| phase == Phase::BuildUp).map(|seconds| self.time + seconds);
+        self.build = if phase == Phase::BuildUp { build.clamp(0.0, 1.0) } else { approach(self.build, 0.0, dt, MOTION_FADE) };
+        dropped
+    }
+
     /// Prévoit le drop de la montée : la première tête de phrase au moins `BUILD_MIN_BEATS` après
     /// son début, puis la suivante chaque fois qu'il ne vient pas.
     fn aim_drop(&mut self) {

@@ -8,7 +8,7 @@
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,6 +19,7 @@ use tokio::runtime::Runtime;
 
 use crate::audio::analysis::{KICK_DETECTION_DELAY, Levels};
 use crate::audio::capture::Capture;
+use crate::opus::{LinkState, Playing};
 use crate::audio::{AudioInput, Backend, CAPTURE_SECONDS, Features, Grid};
 use crate::config::{Config, Preset};
 use crate::flash::{Action, CONFIRM_MARGIN, FlashMode, FlashPlanner};
@@ -38,12 +39,18 @@ mod loops;
 mod remote;
 
 use captures::{auto_capture_loop, write_capture};
-use loops::{light_loop, link_loop, tempo_loop, unpack};
+use loops::{light_loop, link_loop, opus_loop, tempo_loop, unpack};
 pub use remote::new_token;
 
 const TEMPO_UPDATE: Duration = Duration::from_secs(1);
 /// Fréquence de lecture de la session Ableton Link (tempo et phase).
 const LINK_POLL: Duration = Duration::from_millis(20);
+/// Attente maximale d'un paquet de l'OPUS avant de publier la platine qui mène.
+const OPUS_POLL: Duration = Duration::from_millis(20);
+/// Décalage réglable des paquets de l'OPUS sur le son (ms).
+pub const OPUS_OFFSET_RANGE: (f64, f64) = (-150.0, 150.0);
+/// Ce que l'OPUS dit du morceau reste affiché 0,5 s après qu'il cesse de mener.
+const OPUS_SHOWN: Duration = Duration::from_millis(500);
 /// Bornes de l'attente du kick d'un flash anticipé (âge des blocs audio + marge).
 const CONFIRM_RANGE: (f64, f64) = (0.03, 0.1);
 /// Durée d'allumage des témoins de kick et de note.
@@ -60,6 +67,7 @@ pub const THRESHOLD_RANGE: (f32, f32) = (1.1, 4.0);
 /// Retard propre maximal d'une lampe (ms) : au-delà, c'est un réglage d'avance générale.
 pub const MAX_LAMP_DELAY_MS: f32 = 150.0;
 const LINK_TEMPO: &str = "tempo piloté par Ableton Link : change-le depuis la session";
+const OPUS_TEMPO: &str = "tempo piloté par l'OPUS-QUAD : change-le sur les platines";
 /// Captures automatiques : le groove doit avoir tenu 8 s, la capture part 8 s après sa perte si
 /// les basses sont restées à plus de 60 % de leur niveau pendant le groove (moyenne sur 4 s), au
 /// plus une toutes les 2 min et 20 par session.
@@ -81,6 +89,13 @@ pub struct Options {
     pub flash: FlashMode,
     /// Rejoindre la session Ableton Link.
     pub link: bool,
+    /// Suivre l'OPUS-QUAD par le réseau : tempo, temps, phrases et kicks de la platine maître. Le
+    /// son devient facultatif.
+    pub opus: bool,
+    /// Décalage des paquets de l'OPUS sur le son (ms) : positif s'ils arrivent après lui.
+    pub opus_offset_ms: f64,
+    /// Couleurs de la trame : avec l'OPUS, la waveform du morceau teinte les lampes.
+    pub trame: bool,
     /// Écouter une entrée MIDI : `Some(None)` pour la première, `Some(Some(nom))` pour une autre.
     pub midi: Option<Option<String>>,
     pub palette: Palette,
@@ -108,6 +123,9 @@ pub struct Info {
     pub lamps: Vec<String>,
     pub midi_port: Option<String>,
     pub link: bool,
+    pub opus: bool,
+    /// Avec l'OPUS, pourquoi aucune entrée audio n'est ouverte : la lumière le suit seul.
+    pub no_audio: Option<String>,
     pub advance: Duration,
     /// L'état des lampes à rétablir vient d'une session interrompue.
     pub resumed_snapshot: bool,
@@ -169,6 +187,36 @@ pub struct Status {
     pub phrase: Option<u8>,
     /// Captures enregistrées d'elles-mêmes, le groove ayant décroché dans un passage fort.
     pub auto_captures: u32,
+    /// Liaison OPUS, si elle est suivie.
+    pub opus: Option<OpusStatus>,
+}
+
+/// État de la liaison OPUS, pour l'affichage.
+#[derive(Debug, Clone)]
+pub struct OpusStatus {
+    pub link: LinkState,
+    /// Ce que l'OPUS dit du morceau, tant qu'il mène la lumière.
+    pub now: Option<OpusNow>,
+    /// La liaison n'a pas pu s'ouvrir.
+    pub error: Option<String>,
+}
+
+/// Où en est la platine qui mène, publié par la boucle d'éclairage.
+#[derive(Debug, Clone)]
+pub struct OpusNow {
+    pub deck: u8,
+    pub track: u32,
+    pub beat: u32,
+    /// Place dans la mesure (0 à 3) et dans la phrase de la lumière (0 à 15).
+    pub bar_beat: u8,
+    pub phrase_beat: u8,
+    /// Phrase rekordbox en cours, la suivante et les temps qui restent avant elle.
+    pub phrase: Option<String>,
+    pub next: Option<String>,
+    pub beats_left: Option<u32>,
+    /// La phase est assez sûre pour flasher.
+    pub settled: bool,
+    at: Instant,
 }
 
 /// Bilan affiché à l'arrêt.
@@ -217,6 +265,16 @@ struct Shared {
     /// Le tempo vient d'Ableton Link : il ne se règle pas ici.
     link: bool,
     link_peers: AtomicU64,
+    /// Liaison OPUS : platine qui mène (publiée par son fil), état de la liaison, échec à
+    /// l'ouverture, décalage des paquets sur le son (µs), couleurs de la trame, et ce que la boucle
+    /// d'éclairage en a tiré.
+    opus: bool,
+    opus_playing: Mutex<Option<Playing>>,
+    opus_link: Mutex<LinkState>,
+    opus_error: Mutex<Option<String>>,
+    opus_offset_us: AtomicI64,
+    trame: AtomicBool,
+    opus_now: Mutex<Option<OpusNow>>,
     flashes: AtomicU32,
     /// Le groove tient (publié par la boucle d'éclairage), et captures automatiques enregistrées.
     grooving: AtomicBool,
@@ -297,6 +355,22 @@ impl Shared {
 
     fn last_note(&self) -> f64 {
         f64::from_bits(self.last_note.load(Ordering::Relaxed))
+    }
+
+    /// Décalage des paquets de l'OPUS sur le son (s).
+    fn opus_offset(&self) -> f64 {
+        self.opus_offset_us.load(Ordering::Relaxed) as f64 * 1e-6
+    }
+
+    /// La platine qui mène et ce qu'elle dit du morceau à l'instant `now` (s), si l'OPUS est suivi
+    /// et la donne.
+    fn opus_guide(&self, now: f64) -> Option<(Playing, crate::opus::Guide)> {
+        if !self.opus {
+            return None;
+        }
+        let playing = lock(&self.opus_playing).clone()?;
+        let guide = playing.guide(now, self.opus_offset())?;
+        Some((playing, guide))
     }
 }
 
@@ -379,7 +453,16 @@ impl Engine {
 
         let features = Arc::new(Features::new(options.threshold));
         let notes = Arc::new(Notes::default());
-        let audio = AudioInput::start(options.input.as_deref(), options.audio, features.clone())?;
+        // Avec l'OPUS, la lumière se passe du son : une entrée absente n'empêche pas le live.
+        let (audio, no_audio) = match AudioInput::start(options.input.as_deref(), options.audio, features.clone()) {
+            Ok(audio) => (Some(audio), None),
+            Err(e) if options.opus => (None, Some(format!("{e:#}"))),
+            Err(e) => return Err(e),
+        };
+        let capture = audio.as_ref().map_or_else(
+            || Arc::new(Mutex::new(Capture::new(48_000, CAPTURE_SECONDS))),
+            |audio| audio.capture.clone(),
+        );
         let midi = match &options.midi {
             Some(wanted) => Some(MidiListener::start(wanted.as_deref(), notes.clone())?),
             None => None,
@@ -391,6 +474,7 @@ impl Engine {
         let mut tracker = Tracker::new(options.bpm_range);
         if let Some(bpm) = options.bpm
             && !options.link
+            && !options.opus
         {
             tracker.set_manual(bpm, features.seconds(Instant::now()));
         }
@@ -414,6 +498,13 @@ impl Engine {
             dynamics: Mutex::new(options.dynamics),
             link: options.link,
             link_peers: AtomicU64::new(0),
+            opus: options.opus,
+            opus_playing: Mutex::new(None),
+            opus_link: Mutex::new(LinkState::default()),
+            opus_error: Mutex::new(None),
+            opus_offset_us: AtomicI64::new(offset_us(options.opus_offset_ms)),
+            trame: AtomicBool::new(options.trame),
+            opus_now: Mutex::new(None),
             flashes: AtomicU32::new(0),
             grooving: AtomicBool::new(false),
             auto_captures: AtomicU32::new(0),
@@ -456,8 +547,9 @@ impl Engine {
             let (features, shared) = (features.clone(), shared.clone());
             helpers.push(thread::Builder::new().name("tempo".into()).spawn(move || tempo_loop(&shared, &features))?);
         }
-        {
-            let (features, shared, capture) = (features.clone(), shared.clone(), audio.capture.clone());
+        // Les captures automatiques guettent la détection des kicks à l'écoute ; l'OPUS s'en passe.
+        if audio.is_some() && !options.opus {
+            let (features, shared, capture) = (features.clone(), shared.clone(), capture.clone());
             helpers.push(
                 thread::Builder::new()
                     .name("captures auto".into())
@@ -468,17 +560,23 @@ impl Engine {
             let (features, shared, bpm) = (features.clone(), shared.clone(), options.bpm);
             helpers.push(thread::Builder::new().name("link".into()).spawn(move || link_loop(&shared, &features, bpm))?);
         }
+        if options.opus {
+            let (features, shared) = (features.clone(), shared.clone());
+            helpers.push(thread::Builder::new().name("opus".into()).spawn(move || opus_loop(&shared, &features))?);
+        }
 
         let info = Info {
-            device: audio.device.clone(),
-            backend: audio.backend,
-            fallback: audio.fallback.clone(),
-            sample_rate: audio.sample_rate,
-            channels: audio.channels,
+            device: audio.as_ref().map_or_else(|| "sans son".to_owned(), |audio| audio.device.clone()),
+            backend: audio.as_ref().map_or("aucun", |audio| audio.backend),
+            fallback: audio.as_ref().and_then(|audio| audio.fallback.clone()),
+            sample_rate: audio.as_ref().map_or(0, |audio| audio.sample_rate),
+            channels: audio.as_ref().map_or(0, |audio| audio.channels),
             area: area.metadata.name.clone(),
             lamps: piloted,
             midi_port: midi.as_ref().map(|m| m.port.clone()),
             link: options.link,
+            opus: options.opus,
+            no_audio,
             advance,
             resumed_snapshot,
             remote_url,
@@ -488,13 +586,13 @@ impl Engine {
         };
         Ok(Self {
             info,
-            capture: audio.capture.clone(),
+            capture,
             shared,
             features,
             rt,
             light: Some(light),
             helpers,
-            audio: Some(audio),
+            audio,
             midi,
             lamp_map,
             input: (options.input.clone(), options.audio),
@@ -519,6 +617,12 @@ impl Engine {
                 clock.anchor() + ((features.seconds(now) - clock.anchor()) / period).floor() * period
             });
             (clock, tracker.source(), tracker.mean_offset(), started.and_then(|t| tracker.position(t)))
+        };
+        // Quand l'OPUS mène, la mesure et la phrase sont les siennes.
+        let opus_now = lock(&self.shared.opus_now).clone().filter(|n| now.saturating_duration_since(n.at) < OPUS_SHOWN);
+        let position = match &opus_now {
+            Some(n) => Some(crate::phrase::Position { beat: n.bar_beat, phrase: n.phrase_beat }),
+            None => position,
         };
         // Sans structure reconnue, la mesure affichée commence à un temps quelconque.
         let beat = position.map(|p| p.beat).or_else(|| {
@@ -557,7 +661,22 @@ impl Engine {
             beat,
             phrase: position.map(|p| p.phrase),
             auto_captures: self.shared.auto_captures.load(Ordering::Relaxed),
+            opus: self.shared.opus.then(|| OpusStatus {
+                link: lock(&self.shared.opus_link).clone(),
+                now: opus_now,
+                error: lock(&self.shared.opus_error).clone(),
+            }),
         }
+    }
+
+    /// Décalage des paquets de l'OPUS sur le son (ms) : positif s'ils arrivent après lui.
+    pub fn set_opus_offset(&self, ms: f64) {
+        self.shared.opus_offset_us.store(offset_us(ms), Ordering::Relaxed);
+    }
+
+    /// Couleurs de la trame : avec l'OPUS, la waveform du morceau teinte les lampes.
+    pub fn set_trame(&self, on: bool) {
+        self.shared.trame.store(on, Ordering::Relaxed);
     }
 
     pub fn set_motion(&self, motion: Motion) {
@@ -693,15 +812,18 @@ impl Engine {
         Ok(())
     }
 
-    /// Le tempo se règle ici, et non depuis une session Ableton Link.
+    /// Le tempo se règle ici, et non depuis une session Ableton Link ou l'OPUS.
     pub fn controls_tempo(&self) -> bool {
-        !self.shared.link
+        !self.shared.link && !self.shared.opus
     }
 
-    /// Erreur explicite si le tempo est piloté par Ableton Link.
+    /// Erreur explicite si le tempo est piloté par Ableton Link ou l'OPUS.
     pub fn check_tempo_control(&self) -> Result<()> {
-        if !self.controls_tempo() {
+        if self.shared.link {
             bail!(LINK_TEMPO);
+        }
+        if self.shared.opus {
+            bail!(OPUS_TEMPO);
         }
         Ok(())
     }
@@ -788,6 +910,12 @@ impl fmt::Display for Info {
         if self.link {
             write!(f, "\nAbleton Link : tempo et phase suivent la session (autorise l'accès réseau si Windows le demande).")?;
         }
+        if self.opus {
+            write!(f, "\nOPUS-QUAD : tempo, temps, phrases et kicks suivent la platine maître par le réseau (autorise l'accès réseau si Windows le demande).")?;
+        }
+        if let Some(reason) = &self.no_audio {
+            write!(f, "\nPas d'entrée audio ({reason}) : la lumière suit l'OPUS seul.")?;
+        }
         if self.resumed_snapshot {
             write!(f, "\nLampes : l'état d'avant une session interrompue sera rétabli à la fermeture.")?;
         } else {
@@ -841,6 +969,11 @@ impl fmt::Display for Summary {
     }
 }
 
+
+/// Décalage de l'OPUS en µs, borné à la plage réglable.
+fn offset_us(ms: f64) -> i64 {
+    (ms.clamp(OPUS_OFFSET_RANGE.0, OPUS_OFFSET_RANGE.1) * 1e3).round() as i64
+}
 
 /// Verrou qui survit à un fil qui a paniqué en le tenant.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

@@ -527,6 +527,27 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
 
   Chaque cas vérifie que la lumière tape sur les kicks en groove et flotte en break.
 
+## OPUS-QUAD : la lumière menée par les platines
+
+Dans la fenêtre, tempo « OPUS-QUAD » (ou `dj-bridge live --opus` dans le terminal) : DJ-Bridge suit
+la platine maître de l'OPUS par le réseau, sans avoir besoin du son.
+- **Tempo et temps :** ceux de la platine maître. L'OPUS donne le numéro du temps en cours cinq à six
+  fois par seconde ; chaque changement situe le début d'un temps, et l'estimation se resserre à
+  ±15 ms en quelques temps (mesuré sur le Wi-Fi). Les boucles gardent la phase ; après un saut, un
+  scratch ou une lecture à l'envers, la lumière attend d'être recalée (« CALAGE »).
+- **Flashs :** sur les temps où la waveform du morceau montre un kick, en avance de la latence des
+  lampes. Pas de kick, pas de flash.
+- **Phases :** une phrase rekordbox « Up » est une montée, dont le drop tombe au début de la phrase
+  suivante ; ailleurs, groove s'il y a des kicks, break qui flotte sinon. Le régisseur change de
+  mise en scène aux têtes de phrase.
+- **Couleurs de la trame :** la couleur de la waveform sur le temps en cours (rouge pour les graves,
+  vert pour les médiums, bleu pour les aigus) teinte les lampes. Case « Couleurs de la trame » de
+  l'onglet Couleurs, ou `--palette-only`, pour garder la palette.
+- **Retard de l'OPUS :** onglet Tempo du live. Si les flashs tombent toujours un peu après les kicks,
+  monte-le ; il s'ajoute à l'avance des lampes et reste enregistré.
+- Limites : la waveform est celle du morceau, pas du mix (faders, EQ et filtres n'y changent rien) ;
+  pendant une transition, c'est la platine maître qui mène.
+
 ## OPUS-QUAD sur le réseau (sonde)
 
 L'OPUS-QUAD parle au PC par le réseau : par sa carte réseau USB intégrée (« AlphaTheta Network

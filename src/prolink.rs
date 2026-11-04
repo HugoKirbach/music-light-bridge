@@ -25,7 +25,7 @@ pub const OPUS_NAME: &str = "OPUS-QUAD";
 /// Nom de l'ordinateur dans la demande d'état.
 const HOST_NAME: &str = "DJ-Bridge";
 /// L'OPUS numérote ses platines 9 à 12 dans ses paquets.
-const OPUS_FIRST_DEVICE: u8 = 9;
+pub const OPUS_FIRST_DEVICE: u8 = 9;
 
 /// Types des blocs de métadonnées que l'OPUS envoie d'un morceau quand il est chargé.
 pub mod block {
@@ -67,13 +67,15 @@ pub fn lighting_request() -> Vec<u8> {
     packet
 }
 
-/// Demande la structure (PSSI) du morceau `track_id` chargé sur la platine désignée par `deck_byte`.
-pub fn pssi_request(track_id: u32, deck_byte: u8) -> Vec<u8> {
+/// Demande le bloc de type `kind` (voir `block`) du morceau `track_id` chargé sur la platine
+/// désignée par `deck_byte` (9 à 12). Vérifié pour la structure ; l'OPUS envoie de lui-même les
+/// autres blocs au chargement.
+pub fn metadata_request(track_id: u32, kind: u8, deck_byte: u8) -> Vec<u8> {
     let mut packet = header(0x55);
     packet.extend(name(REKORDBOX));
     packet.extend([0x01, 0x00, DEVICE_NUMBER, 0x00, 0x08]);
     packet.extend(track_id.to_le_bytes());
-    packet.extend([0x0a, deck_byte, 0x03, 0x01]);
+    packet.extend([kind, deck_byte, 0x03, 0x01]);
     packet
 }
 
@@ -477,11 +479,11 @@ mod tests {
         assert_eq!(lighting[0x0a], 0x11);
         assert_eq!(&lighting[0x29..0x2e], b"D\0J\0-");
 
-        let pssi = pssi_request(0x0102_0304, 10);
+        let pssi = metadata_request(0x0102_0304, block::SONG_STRUCTURE, 10);
         assert_eq!(pssi.len(), 44);
         assert_eq!(pssi[0x0a], 0x55);
         assert_eq!(pssi[0x24..0x28], [0x04, 0x03, 0x02, 0x01]);
-        assert_eq!(pssi[0x29], 10);
+        assert_eq!((pssi[0x28], pssi[0x29]), (0x0a, 10));
     }
 
     #[test]
