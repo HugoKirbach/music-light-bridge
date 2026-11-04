@@ -283,9 +283,10 @@ fn publish_opus(shared: &Shared, playing: &Playing, guide: &opus::Guide, now: In
     });
 }
 
-/// Suit l'OPUS-QUAD par le réseau : se présente comme rekordbox, digère ses paquets, et publie la
-/// platine qui mène à chaque paquet (au moins toutes les 20 ms).
-pub(super) fn opus_loop(shared: &Shared, features: &Features) {
+/// Suit l'OPUS-QUAD par le réseau : se présente comme rekordbox (dès le départ sur `interface`, la
+/// carte réseau choisie d'avance), digère ses paquets, et publie la platine qui mène à chaque
+/// paquet (au moins toutes les 20 ms).
+pub(super) fn opus_loop(shared: &Shared, features: &Features, interface: Option<&str>) {
     let sockets = [prolink::STATUS_PORT, prolink::ANNOUNCE_PORT].map(bind_opus_port);
     let [Ok(status), Ok(announce)] = sockets else {
         let reason = sockets.into_iter().find_map(Result::err).unwrap_or_default();
@@ -300,6 +301,9 @@ pub(super) fn opus_loop(shared: &Shared, features: &Features) {
         }
         drop(tx);
         let mut client = Client::new(opus::interfaces());
+        if let Some(label) = interface {
+            client.prefer(label);
+        }
         let mut out = Vec::new();
         while !shared.stopped() {
             match rx.recv_timeout(OPUS_POLL) {

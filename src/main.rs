@@ -178,6 +178,13 @@ struct LiveArgs {
     /// Avec `--opus`, garde la palette au lieu des couleurs de la trame (waveform)
     #[arg(long)]
     palette_only: bool,
+    /// Avec `--opus` : aucune entrée audio, la lumière suit l'OPUS seul
+    #[arg(long = "sans-son")]
+    no_sound: bool,
+    /// Avec `--opus` : morceau du nom de la carte réseau de l'OPUS (« Wi-Fi »), pour s'y annoncer dès
+    /// le départ
+    #[arg(long = "reseau", value_name = "NOM")]
+    network: Option<String>,
     /// Écoute une entrée MIDI (morceau de son nom, voir `devices` ; la première si vide) :
     /// chaque note flashe à sa couleur
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "NOM")]
@@ -187,7 +194,14 @@ struct LiveArgs {
 impl LiveArgs {
     fn into_options(self, cfg: &Config, remote: Option<String>) -> engine::Options {
         let (palette, dynamics) = (cfg.palette, cfg.dynamics);
+        // La carte réseau se donne par un morceau de son nom.
+        let opus_interface = self.network.and_then(|part| {
+            let part = part.to_lowercase();
+            opus::interfaces().into_iter().map(|i| i.label).find(|label| label.to_lowercase().contains(&part))
+        });
         engine::Options {
+            listen: !self.no_sound,
+            opus_interface,
             input: self.input,
             audio: self.audio,
             threshold: self.threshold,

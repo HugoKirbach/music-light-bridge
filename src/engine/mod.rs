@@ -80,6 +80,8 @@ const AUTO_SPACING: Duration = Duration::from_secs(120);
 const AUTO_MAX: u32 = 20;
 
 pub struct Options {
+    /// Ouvrir une entrée audio ; sans elle (avec l'OPUS seul), le son ne joue aucun rôle.
+    pub listen: bool,
     pub input: Option<String>,
     pub audio: Backend,
     pub threshold: f32,
@@ -94,6 +96,8 @@ pub struct Options {
     pub opus: bool,
     /// Décalage des paquets de l'OPUS sur le son (ms) : positif s'ils arrivent après lui.
     pub opus_offset_ms: f64,
+    /// Carte réseau de l'OPUS (son nom), choisie d'avance ; sinon celle où il s'annonce.
+    pub opus_interface: Option<String>,
     /// Couleurs de la trame : avec l'OPUS, la waveform du morceau teinte les lampes.
     pub trame: bool,
     /// Écouter une entrée MIDI : `Some(None)` pour la première, `Some(Some(nom))` pour une autre.
@@ -454,10 +458,17 @@ impl Engine {
         let features = Arc::new(Features::new(options.threshold));
         let notes = Arc::new(Notes::default());
         // Avec l'OPUS, la lumière se passe du son : une entrée absente n'empêche pas le live.
-        let (audio, no_audio) = match AudioInput::start(options.input.as_deref(), options.audio, features.clone()) {
-            Ok(audio) => (Some(audio), None),
-            Err(e) if options.opus => (None, Some(format!("{e:#}"))),
-            Err(e) => return Err(e),
+        if !options.listen && !options.opus {
+            bail!("sans son, la lumière ne peut suivre que l'OPUS : choisis-le comme source");
+        }
+        let (audio, no_audio) = if options.listen {
+            match AudioInput::start(options.input.as_deref(), options.audio, features.clone()) {
+                Ok(audio) => (Some(audio), None),
+                Err(e) if options.opus => (None, Some(format!("{e:#}"))),
+                Err(e) => return Err(e),
+            }
+        } else {
+            (None, None)
         };
         let capture = audio.as_ref().map_or_else(
             || Arc::new(Mutex::new(Capture::new(48_000, CAPTURE_SECONDS))),
@@ -561,12 +572,17 @@ impl Engine {
             helpers.push(thread::Builder::new().name("link".into()).spawn(move || link_loop(&shared, &features, bpm))?);
         }
         if options.opus {
-            let (features, shared) = (features.clone(), shared.clone());
-            helpers.push(thread::Builder::new().name("opus".into()).spawn(move || opus_loop(&shared, &features))?);
+            let (features, shared, interface) = (features.clone(), shared.clone(), options.opus_interface.clone());
+            helpers.push(
+                thread::Builder::new()
+                    .name("opus".into())
+                    .spawn(move || opus_loop(&shared, &features, interface.as_deref()))?,
+            );
         }
 
+        let silent_source = if options.listen { "sans son" } else { "OPUS-QUAD par le réseau" };
         let info = Info {
-            device: audio.as_ref().map_or_else(|| "sans son".to_owned(), |audio| audio.device.clone()),
+            device: audio.as_ref().map_or_else(|| silent_source.to_owned(), |audio| audio.device.clone()),
             backend: audio.as_ref().map_or("aucun", |audio| audio.backend),
             fallback: audio.as_ref().and_then(|audio| audio.fallback.clone()),
             sample_rate: audio.as_ref().map_or(0, |audio| audio.sample_rate),
@@ -888,11 +904,15 @@ impl Drop for Engine {
 
 impl fmt::Display for Info {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Mode live : « {} » en {} ({} Hz, {} canaux) → zone « {} ».",
-            self.device, self.backend, self.sample_rate, self.channels, self.area
-        )?;
+        if self.sample_rate == 0 {
+            write!(f, "Mode live : « {} » → zone « {} ».", self.device, self.area)?;
+        } else {
+            write!(
+                f,
+                "Mode live : « {} » en {} ({} Hz, {} canaux) → zone « {} ».",
+                self.device, self.backend, self.sample_rate, self.channels, self.area
+            )?;
+        }
         if let Some(reason) = &self.fallback {
             write!(f, "\n{reason}.")?;
         }

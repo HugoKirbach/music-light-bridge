@@ -24,6 +24,7 @@ use crate::flash::FlashMode;
 use crate::hue::api;
 use crate::look::{Dynamics, Motion, Palette, Rotation, Spread};
 use crate::midi;
+use crate::opus;
 use crate::tempo::{DEFAULT_BPM_RANGE, TempoSource};
 
 /// Le tempo affiché ne change qu'une fois par seconde, pour rester lisible.
@@ -108,6 +109,8 @@ struct App {
     inputs: Vec<String>,
     outputs: Vec<String>,
     midi_ports: Vec<String>,
+    /// Cartes réseau du PC qui ont une adresse : nom et adresse.
+    networks: Vec<(String, std::net::Ipv4Addr)>,
     /// BPM saisi : tempo imposé au lancement, puis pendant le live.
     bpm_input: String,
     shown_bpm: Option<f64>,
@@ -162,6 +165,7 @@ impl App {
             inputs: Vec::new(),
             outputs: Vec::new(),
             midi_ports: Vec::new(),
+            networks: Vec::new(),
             shown_bpm: None,
             shown_source: TempoSource::Auto,
             next_refresh: Instant::now(),
@@ -186,6 +190,7 @@ impl App {
         self.inputs = audio::list_inputs().map(|list| list.into_iter().map(|i| i.name).collect()).unwrap_or_default();
         self.outputs = audio::list_outputs().unwrap_or_default();
         self.midi_ports = midi::list_inputs().unwrap_or_default();
+        self.networks = opus::interfaces().into_iter().map(|i| (i.label, i.ip)).collect();
     }
 
     /// Redemande au bridge la zone et ses lampes, par exemple après un changement dans l'app Hue.
@@ -242,12 +247,14 @@ impl App {
             Ok(bpm) => bpm,
             Err(e) => return self.show(e.to_string()),
         };
-        if self.tempo == TempoChoice::Manual && bpm.is_none() {
+        // Avec la source OPUS, le tempo est le sien.
+        let tempo = if self.settings.opus_only { TempoChoice::Opus } else { self.tempo };
+        if tempo == TempoChoice::Manual && bpm.is_none() {
             return self.show("Indique le BPM à imposer, ou choisis la détection auto.");
         }
-        self.settings.link = self.tempo == TempoChoice::Link;
-        self.settings.opus = self.tempo == TempoChoice::Opus;
-        self.settings.bpm = match self.tempo {
+        self.settings.link = tempo == TempoChoice::Link;
+        self.settings.opus = tempo == TempoChoice::Opus;
+        self.settings.bpm = match tempo {
             TempoChoice::Auto => None,
             // L'OPUS donne le tempo : le BPM saisi reste pour une autre fois.
             TempoChoice::Opus => self.settings.bpm,
@@ -262,6 +269,8 @@ impl App {
             false => None,
         };
         let options = engine::Options {
+            listen: !self.settings.opus_only,
+            opus_interface: self.settings.opus_interface.clone(),
             input: self.settings.input.clone(),
             audio: self.settings.audio,
             threshold: self.settings.threshold,
@@ -349,6 +358,11 @@ impl App {
         if let Some(engine) = &self.engine {
             engine.set_rotation(rotation);
         }
+    }
+
+    /// La lumière suivra l'OPUS : source « OPUS-QUAD en Wi-Fi », ou tempo « OPUS-QUAD ».
+    fn follows_opus(&self) -> bool {
+        self.settings.opus_only || self.tempo == TempoChoice::Opus
     }
 
     fn set_trame(&mut self, on: bool) {

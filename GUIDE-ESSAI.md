@@ -286,6 +286,22 @@ avoir besoin du son.
   recharge le morceau.
 - Fin de boucle : un ou deux flashs peuvent tomber jusqu'à 80 ms à côté.
 
+## [28] Source « OPUS-QUAD en Wi-Fi »
+
+Dans « 1 · Source », une troisième carte, « OPUS-QUAD en Wi-Fi », à côté de « Carte son » et de
+« Sortie du PC ».
+- **Aucune entrée audio :** la Focusrite n'est pas ouverte, et l'appli n'attend ni n'alerte sur le son.
+- **Tempo :** le choix du tempo disparaît, puisque c'est celui de l'OPUS.
+- **Réseau de l'OPUS :** la carte réseau est choisie d'avance (le Wi-Fi, par défaut). La liaison s'y
+  annonce dès le lancement, au lieu d'attendre que l'OPUS se montre. « Automatique » revient à
+  l'ancienne façon.
+
+**À essayer :** choisis « OPUS-QUAD en Wi-Fi », vérifie que la carte affichée est bien ton Wi-Fi,
+puis lance le live. La ligne sous le BPM doit passer à la platine en lecture en une ou deux secondes.
+Le choix est gardé pour la fois suivante.
+
+Dans le terminal : `dj-bridge live --opus --sans-son --reseau "Wi-Fi"`.
+
 ---
 
 ## Ce qui a été vérifié de mon côté

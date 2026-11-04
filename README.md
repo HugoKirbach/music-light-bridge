@@ -529,8 +529,10 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
 
 ## OPUS-QUAD : la lumière menée par les platines
 
-Dans la fenêtre, tempo « OPUS-QUAD » (ou `dj-bridge live --opus` dans le terminal) : DJ-Bridge suit
-la platine maître de l'OPUS par le réseau, sans avoir besoin du son.
+Dans la fenêtre, source « OPUS-QUAD en Wi-Fi » (aucune entrée audio, carte réseau choisie d'avance)
+ou tempo « OPUS-QUAD » avec une source audio ; dans le terminal, `dj-bridge live --opus` (et
+`--sans-son`, `--reseau "Wi-Fi"`). DJ-Bridge suit la platine maître de l'OPUS par le réseau, sans
+avoir besoin du son.
 - **Tempo et temps :** ceux de la platine maître. L'OPUS donne le numéro du temps en cours cinq à six
   fois par seconde ; chaque changement situe le début d'un temps, et l'estimation se resserre à
   ±15 ms en quelques temps (mesuré sur le Wi-Fi). Les boucles gardent la phase ; après un saut, un

@@ -208,6 +208,7 @@ pub enum Icon {
     Stop,
     Record,
     Refresh,
+    Wifi,
 }
 
 pub fn icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32) {
@@ -253,6 +254,19 @@ pub fn icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32) {
             painter.add(Shape::line(arc, stroke));
             let head = vec![end + vec2(-1.0, -4.5) * s, end + vec2(4.5, 1.0) * s, end + vec2(-1.5, 2.5) * s];
             painter.add(Shape::convex_polygon(head, color, Stroke::NONE));
+        }
+        Icon::Wifi => {
+            // Trois ondes au-dessus d'un point.
+            for radius in [4.0, 8.0, 12.0] {
+                let arc: Vec<Pos2> = (0..=12)
+                    .map(|i| {
+                        let a = -2.4 + 1.65 * i as f32 / 12.0;
+                        p(11.0 + radius * a.cos(), 17.0 + radius * a.sin())
+                    })
+                    .collect();
+                painter.add(Shape::line(arc, stroke));
+            }
+            painter.circle_filled(p(11.0, 17.0), 1.6 * s, color);
         }
     }
 }

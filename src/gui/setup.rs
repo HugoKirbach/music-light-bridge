@@ -98,23 +98,27 @@ impl App {
         let width = ui.available_width();
 
         ui.add_space(12.0);
-        theme::section(ui, "1 · SOURCE AUDIO");
-        let output = self.settings.audio == Backend::Output;
+        theme::section(ui, "1 · SOURCE");
+        let opus = self.settings.opus_only;
+        let output = !opus && self.settings.audio == Backend::Output;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
-            let size = vec2((width - 12.0) / 2.0, 100.0);
+            let size = vec2((width - 24.0) / 3.0, 100.0);
             let card = theme::card(
                 ui,
                 size,
                 &theme::SETUP_CARD,
-                !output,
+                !output && !opus,
                 Some(Icon::SoundCard),
                 "Carte son",
                 "Platines ou synthé branchés sur la Focusrite",
             );
-            if card.clicked() && output {
-                self.settings.audio = self.card_backend;
-                self.settings.input = None;
+            if card.clicked() && (output || opus) {
+                self.settings.opus_only = false;
+                if output {
+                    self.settings.audio = self.card_backend;
+                    self.settings.input = None;
+                }
             }
             let card = theme::card(
                 ui,
@@ -126,13 +130,37 @@ impl App {
                 "Ce que joue le PC : Spotify, Ableton…",
             );
             if card.clicked() && !output {
-                self.card_backend = self.settings.audio;
+                self.settings.opus_only = false;
+                if self.settings.audio != Backend::Output {
+                    self.card_backend = self.settings.audio;
+                }
                 self.settings.audio = Backend::Output;
                 self.settings.input = None;
             }
+            let card = theme::card(
+                ui,
+                size,
+                &theme::SETUP_CARD,
+                opus,
+                Some(Icon::Wifi),
+                "OPUS-QUAD en Wi-Fi",
+                "Les platines mènent la lumière par le réseau, sans son",
+            );
+            if card.clicked() && !opus {
+                self.settings.opus_only = true;
+                // Faute de choix, la carte Wi-Fi du PC.
+                if self.settings.opus_interface.is_none() {
+                    self.settings.opus_interface =
+                        self.networks.iter().map(|(label, _)| label.clone()).find(|label| label.to_lowercase().contains("wi-fi"));
+                }
+            }
         });
         ui.add_space(4.0);
-        self.device_row(ui, width);
+        if opus {
+            self.network_row(ui, width);
+        } else {
+            self.device_row(ui, width);
+        }
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -152,7 +180,15 @@ impl App {
 
         ui.add_space(12.0);
         theme::section(ui, "3 · TEMPO");
-        self.tempo_row(ui, width);
+        if opus {
+            ui.label(theme::text(
+                "Tempo, temps, phrases et kicks : ceux de la platine maître de l'OPUS. Ferme rekordbox pendant le live.",
+                theme::regular(13.0),
+                LABEL,
+            ));
+        } else {
+            self.tempo_row(ui, width);
+        }
 
         ui.add_space(16.0);
         ui.horizontal(|ui| {
@@ -241,10 +277,43 @@ impl App {
         }
     }
 
+    /// Carte réseau par laquelle l'OPUS parle : la liaison s'y annonce dès le lancement.
+    fn network_row(&mut self, ui: &mut Ui, width: f32) {
+        ui.horizontal(|ui| {
+            ui.set_width(width);
+            ui.label(theme::text("Réseau de l'OPUS", theme::regular(13.0), MUTED));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let refresh = ui.add(egui::Label::new(theme::text("Actualiser", theme::regular(13.0), ACCENT)).sense(Sense::click()));
+                if refresh.on_hover_text("Relire les cartes réseau du PC, les entrées audio et MIDI, et les lampes").clicked() {
+                    self.refresh_devices();
+                }
+            });
+        });
+        let automatic = "Automatique (là où l'OPUS s'annonce)";
+        let shown = |label: &str, networks: &[(String, std::net::Ipv4Addr)]| {
+            networks.iter().find(|(l, _)| l == label).map_or_else(|| format!("{label} (absente)"), |(l, ip)| format!("{l} · {ip}"))
+        };
+        let selected = self.settings.opus_interface.as_deref().map_or_else(|| automatic.to_owned(), |label| shown(label, &self.networks));
+        egui::ComboBox::from_id_salt("réseau")
+            .width(width)
+            .selected_text(theme::text(selected, theme::regular(14.0), TEXT))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.settings.opus_interface, None, automatic);
+                for (label, ip) in &self.networks {
+                    ui.selectable_value(&mut self.settings.opus_interface, Some(label.clone()), format!("{label} · {ip}"));
+                }
+            });
+        ui.label(theme::text(
+            "L'OPUS et le PC sur le même Wi-Fi (ou l'OPUS branché en USB). Aucun son n'est capté : la lumière suit les platines.",
+            theme::regular(12.0),
+            LABEL,
+        ));
+    }
+
     /// Résumé des options repliées, pour voir d'un coup d'œil ce qui sort de l'ordinaire.
     fn options_summary(&self) -> String {
         let mut parts = Vec::new();
-        if self.settings.audio != Backend::Output {
+        if self.settings.audio != Backend::Output && !self.settings.opus_only {
             let driver = match self.settings.audio {
                 Backend::Asio => "pilote ASIO",
                 Backend::Wasapi => "pilote WASAPI",

@@ -118,7 +118,7 @@ impl App {
                 (TempoSource::Link, Some(peers)) => format!("BPM · ABLETON LINK · {peers} PARTICIPANT(S)"),
                 (TempoSource::Link, None) => "BPM · ABLETON LINK".to_owned(),
                 (TempoSource::Opus, _) => opus_line(status),
-                (_, _) if status.opus.is_some() => format!("BPM · DÉTECTION AUTO · {}", opus_line(status)),
+                (_, _) if status.opus.is_some() => opus_line(status),
                 (TempoSource::Manual, _) => "BPM · TEMPO IMPOSÉ".to_owned(),
                 (TempoSource::Auto, _) => "BPM · DÉTECTION AUTO".to_owned(),
             };

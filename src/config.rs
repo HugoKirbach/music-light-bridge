@@ -92,6 +92,10 @@ pub struct LiveSettings {
     pub opus: bool,
     /// Avec l'OPUS, les couleurs de la trame (waveform) teintent les lampes.
     pub trame: bool,
+    /// Source « OPUS-QUAD en Wi-Fi » : la lumière suit l'OPUS seul, aucune entrée audio n'est ouverte.
+    pub opus_only: bool,
+    /// Carte réseau de l'OPUS, choisie d'avance (son nom) ; `None` : celle où il s'annonce.
+    pub opus_interface: Option<String>,
     /// Port MIDI écouté ; `None` : pas de MIDI.
     pub midi: Option<String>,
     pub flash: FlashMode,
@@ -114,6 +118,8 @@ impl Default for LiveSettings {
             link: false,
             opus: false,
             trame: true,
+            opus_only: false,
+            opus_interface: None,
             midi: None,
             flash: FlashMode::Kicks,
             motion: Motion::Auto,

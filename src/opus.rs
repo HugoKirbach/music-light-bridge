@@ -490,6 +490,15 @@ impl Client {
         Self { interfaces, ..Self::default() }
     }
 
+    /// Carte réseau choisie d'avance (son nom complet) : on s'y annonce dès le départ, sans
+    /// attendre que l'OPUS s'y montre. S'il parle par une autre, la liaison le suit.
+    pub fn prefer(&mut self, label: &str) {
+        if let Some(iface) = self.interfaces.iter().find(|i| i.label == label) {
+            self.chosen = Some(iface.clone());
+            self.next_announce = f64::NEG_INFINITY;
+        }
+    }
+
     pub fn state(&self, now: f64) -> LinkState {
         LinkState {
             opus: self.opus,
