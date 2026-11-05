@@ -570,8 +570,11 @@ avoir besoin du son.
 - **Appels des montées :** dans une phrase Up, les doubles croches qui attaquent (roll, charleston,
   son acid) flashent aussi, sans blanc et plus légèrement qu'un kick, de plus en plus fort jusqu'au
   drop. Un riser continu ne flashe pas.
-- **Bande du morceau** (écran du live) : phrases rekordbox en couleur, waveform autour de la tête
-  de lecture, et tout le morceau en miniature.
+- **Bandes des platines** (écran du live) : une par platine chargée, la 1 au-dessus de la 2, même
+  volume coupé. On y voit les phrases rekordbox en couleur, la waveform autour de la tête de
+  lecture et tout le morceau en miniature. La platine qui mène la lumière est en pleine lumière.
+- **Lueur des breaks** (30 % par défaut) : dans un break, la lumière ne descend jamais sous ce
+  niveau, elle flotte au-dessus.
 - **Couleurs de la trame :** la couleur de la waveform sur le temps en cours (rouge pour les graves,
   vert pour les médiums, bleu pour les aigus) teinte les lampes. Case « Couleurs de la trame » de
   l'onglet Couleurs, ou `--palette-only`, pour garder la palette.

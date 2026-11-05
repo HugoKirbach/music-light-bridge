@@ -10,12 +10,10 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 
 use eframe::egui;
 
-use crate::engine::OpusNow;
-use crate::opus::Client;
+use crate::opus::{Client, DeckView};
 
 /// Images rendues avant la photo : le temps que la mise en page se pose.
 const SETTLE_FRAMES: u32 = 12;
@@ -28,12 +26,12 @@ pub(super) struct Capture {
     requested: bool,
     /// La photo est écrite : la fenêtre peut se fermer.
     written: Arc<AtomicBool>,
-    /// Bande du morceau rejoué depuis un journal, à montrer à la place de l'écran.
-    pub preview: Option<OpusNow>,
+    /// Platines d'un journal rejoué (et celle qui menait), à montrer à la place de l'écran.
+    pub preview: Option<(Vec<DeckView>, Option<u8>)>,
 }
 
-/// Rejoue un journal de la sonde jusqu'à `at` (s) : où en était la platine qui menait.
-fn replay(journal: &str, at: f64) -> Option<OpusNow> {
+/// Rejoue un journal de la sonde jusqu'à `at` (s) : les platines chargées, et celle qui menait.
+fn replay(journal: &str, at: f64) -> Option<(Vec<DeckView>, Option<u8>)> {
     let text = std::fs::read_to_string(journal).ok()?;
     let mut client = Client::new(Vec::new());
     let mut out = Vec::new();
@@ -45,23 +43,8 @@ fn replay(journal: &str, at: f64) -> Option<OpusNow> {
             client.on_packet(t, f[2].parse().ok()?, from, &hex::decode(f[4]).ok()?, &mut out);
         }
     }
-    let playing = client.playing(at)?;
-    let guide = playing.guide(at, 0.0)?;
-    let phrase = guide.phrase.as_ref();
-    Some(OpusNow {
-        deck: playing.deck,
-        track: playing.track.id,
-        data: playing.track.clone(),
-        position_ms: guide.position_ms,
-        beat: guide.beat,
-        bar_beat: guide.bar_beat,
-        phrase_beat: guide.phrase_beat,
-        phrase: phrase.map(|p| p.label.clone()),
-        next: phrase.and_then(|p| p.next.clone()),
-        beats_left: phrase.map(|p| p.end.saturating_sub(guide.beat)),
-        settled: playing.settled,
-        at: Instant::now(),
-    })
+    let decks = client.decks(at);
+    (!decks.is_empty()).then(|| (decks, client.playing(at).map(|playing| playing.deck)))
 }
 
 impl Capture {

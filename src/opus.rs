@@ -53,6 +53,8 @@ const GROOVE_KICKS: usize = 2;
 const CALL_PEAK_MS: (f64, f64) = (-7.0, 40.0);
 const CALL_ATTACK: f32 = 0.3;
 const CALL_PEAK: f32 = 0.35;
+/// Plancher de la hauteur de référence d'un morceau, pour qu'un morceau très calme ne sature pas.
+const LOUDNESS_MIN: f32 = 0.2;
 /// Têtes de phrase de la lumière : tous les 16 temps depuis le début de la phrase rekordbox.
 const PHRASE_BEATS: u32 = 16;
 /// Kicks cherchés au plus 8 temps devant.
@@ -193,6 +195,9 @@ pub struct Track {
     pub kicks: Vec<bool>,
     /// Attaque des appels de chaque double croche (0 : pas d'appel), temps par temps.
     pub calls: Vec<[f32; 4]>,
+    /// Hauteur des passages forts du morceau (95e centile de la waveform) : les niveaux s'y
+    /// rapportent, comme le gain automatique du son.
+    pub loudness: f32,
 }
 
 impl Track {
@@ -203,6 +208,9 @@ impl Track {
             self.calls.clear();
             return;
         };
+        let mut heights: Vec<f32> = waveform.points.iter().map(|p| p.height).collect();
+        heights.sort_by(f32::total_cmp);
+        self.loudness = heights.get(heights.len() * 95 / 100).copied().unwrap_or(1.0).max(LOUDNESS_MIN);
         self.calls = grid
             .beats
             .iter()
@@ -238,6 +246,15 @@ impl Track {
         }
         let in_grid = self.grid.as_ref().is_some_and(|grid| index < grid.beats.len());
         in_grid && !self.phrase_at(beat as u32).is_some_and(|p| p.is_down)
+    }
+
+    /// Position dans le morceau (ms, à vitesse normale) à la fraction `fraction` du temps `beat`.
+    pub fn ms_at(&self, beat: u32, fraction: f64) -> Option<f64> {
+        let grid = self.grid.as_ref()?;
+        let entry = grid.beats.get((beat as usize).checked_sub(1)?)?;
+        let start = f64::from(entry.time_ms);
+        let next = grid.beats.get(beat as usize).map_or(start + 60_000.0 / entry.bpm.max(1.0), |b| f64::from(b.time_ms));
+        Some(start + fraction.clamp(0.0, 1.0) * (next - start))
     }
 
     /// Attaque de l'appel de la double croche `step` (0 à 3) du temps `beat` ; 0 s'il n'y en a pas.
@@ -421,8 +438,6 @@ pub struct Guide {
     pub next_kick: Option<(u32, f64, Accent)>,
     /// Pendant une montée, prochain appel (hors kick) : temps, double croche, instant et attaque.
     pub next_call: Option<(u32, u8, f64, f32)>,
-    /// Position dans le morceau, à vitesse normale (ms).
-    pub position_ms: f64,
 }
 
 impl Playing {
@@ -458,13 +473,16 @@ impl Playing {
         let (levels, color) = match &self.track.waveform {
             Some(waveform) => {
                 let p = waveform.at(ms);
+                // Rapportés aux passages forts du morceau, comme le gain automatique du son.
+                let gain = 1.0 / self.track.loudness.max(LOUDNESS_MIN);
+                let level = |value: f32| (value * gain).min(1.0);
                 let levels = Levels {
-                    bass: p.bass(),
-                    mid: p.green * p.height,
-                    high: p.blue * p.height,
+                    bass: level(p.bass()),
+                    mid: level(p.green * p.height),
+                    high: level(p.blue * p.height),
                     tilt: None,
                     presence: None,
-                    raw_bass: p.bass(),
+                    raw_bass: level(p.bass()),
                 };
                 (levels, waveform.color(f64::from(entry.time_ms), next_ms))
             }
@@ -510,9 +528,22 @@ impl Playing {
             color,
             next_kick,
             next_call,
-            position_ms: ms,
         })
     }
+}
+
+/// Une platine chargée, pour l'affichage : son morceau et où en est la lecture, même volume coupé.
+#[derive(Debug, Clone)]
+pub struct DeckView {
+    pub deck: u8,
+    pub track: Arc<Track>,
+    /// Position dans le morceau, à vitesse normale (ms).
+    pub position_ms: f64,
+    pub playing: bool,
+    pub master: bool,
+    pub on_air: bool,
+    /// Tempo réglé, pitch du fader compris.
+    pub bpm: Option<f64>,
 }
 
 /// État de la liaison, pour l'affichage.
@@ -692,6 +723,36 @@ impl Client {
         }
     }
 
+    /// Les platines chargées (dont la grille est arrivée), dans l'ordre, et où elles en sont à
+    /// l'instant `now` : en lecture, d'après l'estimation des temps ; à l'arrêt, au temps annoncé.
+    pub fn decks(&self, now: f64) -> Vec<DeckView> {
+        self.decks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, deck)| {
+                let status = deck.status.as_ref().filter(|s| s.track_id != 0 && now - deck.at < STALE)?;
+                let number = index as u8 + 1;
+                let track = self.tracks.get(&(number, status.track_id)).filter(|t| t.grid.is_some())?.clone();
+                let (beat, fraction) = match (deck.clock.anchor, status.played_bpm().filter(|&bpm| bpm > 1.0)) {
+                    (Some((anchor, at)), Some(bpm)) if status.playing() => {
+                        let beats = (f64::from(anchor) + (now - at) * bpm / 60.0).max(1.0);
+                        (beats.floor() as u32, beats.fract())
+                    }
+                    _ => (status.beat?.max(1), 0.0),
+                };
+                Some(DeckView {
+                    deck: number,
+                    position_ms: track.ms_at(beat, fraction)?,
+                    track,
+                    playing: status.playing(),
+                    master: status.master(),
+                    on_air: status.on_air(),
+                    bpm: status.effective_bpm(),
+                })
+            })
+            .collect()
+    }
+
     /// La platine qui mène à l'instant `now` : la maître si elle joue, sinon une platine à
     /// l'antenne qui joue ; il faut sa grille.
     pub fn playing(&self, now: f64) -> Option<Playing> {
@@ -758,6 +819,7 @@ mod tests {
             waveform: Some(Waveform { per_second, points }),
             kicks: Vec::new(),
             calls: Vec::new(),
+            loudness: 1.0,
         };
         track.analyze();
         track
@@ -835,6 +897,15 @@ mod tests {
         assert!((at - (10.0 + 69.5 * 0.4)).abs() < 1e-9);
         assert!(strength > 0.3);
         assert_eq!(playing.guide(10.0 + 39.0 * 0.4 + 0.05, 0.0).unwrap().next_call, None, "pas d'appel hors montée");
+    }
+
+    #[test]
+    fn positions_follow_the_grid() {
+        let track = track();
+        assert_eq!(track.ms_at(1, 0.0), Some(0.0));
+        assert_eq!(track.ms_at(3, 0.5), Some(1000.0));
+        assert_eq!(track.ms_at(0, 0.0), None);
+        assert_eq!(track.ms_at(161, 0.0), None);
     }
 
     #[test]

@@ -208,11 +208,13 @@ pub struct Dynamics {
     pub gradient: f32,
     /// Houle des breaks, calée sur le tempo : part de la respiration qui retombe entre les temps.
     pub swell: f32,
+    /// Lueur des breaks (0 à 1) : la lumière n'y descend jamais plus bas, elle flotte au-dessus.
+    pub break_glow: f32,
 }
 
 impl Default for Dynamics {
     fn default() -> Self {
-        Self { flash: 1.0, decay: 0.12, floor: 0.04, curve: 1.4, gradient: 20.0, swell: 0.35 }
+        Self { flash: 1.0, decay: 0.12, floor: 0.04, curve: 1.4, gradient: 20.0, swell: 0.35, break_glow: 0.3 }
     }
 }
 
@@ -772,7 +774,8 @@ impl ReactiveLook {
         };
         let scene = rotate_hue(self.director.tint(self.trame.unwrap_or(chosen)), self.hue);
         let base = self.note_color.unwrap_or(scene);
-        let floor = self.dynamics.floor.clamp(0.0, 1.0);
+        // Dans un break, la lumière ne descend pas sous sa lueur de break : elle flotte, jamais noire.
+        let floor = self.dynamics.floor.clamp(0.0, 1.0).max(self.dynamics.break_glow.clamp(0.0, 1.0) * self.calm);
         let intensity = self.dynamics.flash.clamp(0.0, 1.0);
         let curve = self.dynamics.curve.clamp(0.5, 4.0);
         let gradient = self.dynamics.gradient.clamp(0.0, 180.0) / 360.0;
@@ -903,6 +906,25 @@ mod tests {
             color = look.render(FRAME, levels);
         }
         color
+    }
+
+    #[test]
+    fn a_break_floats_above_its_glow_and_never_goes_black() {
+        let mut look = still(PALETTE);
+        let silence = Levels::default();
+        let render = |look: &mut ReactiveLook, phase: Phase| {
+            look.set_guide(Some(Guide { phase, build: 0.0, drop_in: None, color: None }));
+            let mut color = Rgb::OFF;
+            for _ in 0..3 * FRAMES_PER_SECOND {
+                color = look.render(FRAME, silence);
+            }
+            brightness(color)
+        };
+        let glow = (0.3 * f32::from(u16::MAX)) as u16;
+        assert!(render(&mut look, Phase::Calm) >= glow - 300, "break sans son : lueur de break");
+        assert!(render(&mut look, Phase::Groove) < glow / 2, "le groove sans kick redescend à la lueur de fond");
+        look.dynamics.break_glow = 0.0;
+        assert!(render(&mut look, Phase::Calm) < glow / 2, "lueur de break à zéro : comme avant");
     }
 
     #[test]

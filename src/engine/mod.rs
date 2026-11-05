@@ -212,6 +212,8 @@ pub struct OpusStatus {
     pub link: LinkState,
     /// Ce que l'OPUS dit du morceau, tant qu'il mène la lumière.
     pub now: Option<OpusNow>,
+    /// Les platines chargées et où en est leur lecture, pour leurs bandes.
+    pub decks: Vec<crate::opus::DeckView>,
     /// La liaison n'a pas pu s'ouvrir.
     pub error: Option<String>,
 }
@@ -221,10 +223,6 @@ pub struct OpusStatus {
 pub struct OpusNow {
     pub deck: u8,
     pub track: u32,
-    /// Ce que l'OPUS a envoyé du morceau (grille, structure, waveform), et la position de lecture
-    /// à vitesse normale (ms).
-    pub data: Arc<crate::opus::Track>,
-    pub position_ms: f64,
     pub beat: u32,
     /// Place dans la mesure (0 à 3) et dans la phrase de la lumière (0 à 15).
     pub bar_beat: u8,
@@ -235,7 +233,7 @@ pub struct OpusNow {
     pub beats_left: Option<u32>,
     /// La phase est assez sûre pour flasher.
     pub settled: bool,
-    pub(crate) at: Instant,
+    at: Instant,
 }
 
 /// Bilan affiché à l'arrêt.
@@ -292,6 +290,7 @@ struct Shared {
     /// d'éclairage en a tiré.
     opus: bool,
     opus_playing: Mutex<Option<Playing>>,
+    opus_decks: Mutex<Vec<crate::opus::DeckView>>,
     opus_link: Mutex<LinkState>,
     opus_error: Mutex<Option<String>>,
     opus_offset_us: AtomicI64,
@@ -537,6 +536,7 @@ impl Engine {
             link_peers: AtomicU64::new(0),
             opus: options.opus,
             opus_playing: Mutex::new(None),
+            opus_decks: Mutex::new(Vec::new()),
             opus_link: Mutex::new(LinkState::default()),
             opus_error: Mutex::new(None),
             opus_offset_us: AtomicI64::new(offset_us(options.opus_offset_ms)),
@@ -707,6 +707,7 @@ impl Engine {
             opus: self.shared.opus.then(|| OpusStatus {
                 link: lock(&self.shared.opus_link).clone(),
                 now: opus_now,
+                decks: lock(&self.shared.opus_decks).clone(),
                 error: lock(&self.shared.opus_error).clone(),
             }),
         }

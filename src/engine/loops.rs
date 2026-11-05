@@ -334,8 +334,6 @@ fn publish_opus(shared: &Shared, playing: &Playing, guide: &opus::Guide, now: In
     *lock(&shared.opus_now) = Some(OpusNow {
         deck: playing.deck,
         track: playing.track.id,
-        data: playing.track.clone(),
-        position_ms: guide.position_ms,
         beat: guide.beat,
         bar_beat: guide.bar_beat,
         phrase_beat: guide.phrase_beat,
@@ -381,6 +379,7 @@ pub(super) fn opus_loop(shared: &Shared, features: &Features, interface: Option<
                 let _ = status.send_to(&data, to);
             }
             *lock(&shared.opus_playing) = client.playing(now);
+            *lock(&shared.opus_decks) = client.decks(now);
             *lock(&shared.opus_link) = client.state(now);
         }
     });

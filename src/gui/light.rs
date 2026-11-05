@@ -46,6 +46,7 @@ enum Knob {
     Curve,
     Gradient,
     Swell,
+    BreakGlow,
 }
 
 impl App {
@@ -58,7 +59,7 @@ impl App {
             Page::Colors if !self.settings.expert => {
                 self.palette_block(ui, width, skin);
                 ui.add_space(6.0);
-                knobs(ui, width, &[Knob::Intensity], |ui, knob| self.knob(ui, knob, skin.label));
+                knobs(ui, width, &[Knob::Intensity, Knob::BreakGlow], |ui, knob| self.knob(ui, knob, skin.label));
             }
             Page::Colors => self.colors_page(ui, width, skin),
             Page::Flashes => self.flashes_page(ui, width, skin),
@@ -74,8 +75,8 @@ impl App {
         ui.add_space(6.0);
         self.palette_block(ui, width, skin);
         ui.add_space(6.0);
-        theme::section(ui, "FLASHS");
-        knobs(ui, width, &[Knob::Intensity], |ui, knob| self.knob(ui, knob, skin.label));
+        theme::section(ui, "FLASHS ET BREAKS");
+        knobs(ui, width, &[Knob::Intensity, Knob::BreakGlow], |ui, knob| self.knob(ui, knob, skin.label));
     }
 
     fn motion_page(&mut self, ui: &mut Ui, width: f32, skin: &Skin, status: Option<&Status>) {
@@ -109,7 +110,7 @@ impl App {
         });
         self.director_chip(ui);
         ui.add_space(6.0);
-        knobs(ui, width, &[Knob::Swell], |ui, knob| self.knob(ui, knob, skin.label));
+        knobs(ui, width, &[Knob::Swell, Knob::BreakGlow], |ui, knob| self.knob(ui, knob, skin.label));
     }
 
     /// Dispositions que la pièce permet (et celle choisie, même si elle ne l'est plus).
@@ -229,6 +230,13 @@ impl App {
                 let changed = theme::slider_row(ui, "Houle des breaks", shown, egui::Slider::new(&mut v, 0.0..=100.0), label);
                 d.swell = v / 100.0;
                 (changed, "Pendant les respirations, la lumière se creuse entre les temps et remonte sur chaque demi-mesure")
+            }
+            Knob::BreakGlow => {
+                let mut v = d.break_glow * 100.0;
+                let shown = if v < 0.5 { "noir permis".to_owned() } else { format!("{v:.0} %") };
+                let changed = theme::slider_row(ui, "Lueur des breaks", shown, egui::Slider::new(&mut v, 0.0..=80.0), label);
+                d.break_glow = v / 100.0;
+                (changed, "Pendant un break, la lumière ne descend jamais sous ce niveau : elle flotte au-dessus, jamais noire")
             }
         });
         let (changed, hint) = response.inner;

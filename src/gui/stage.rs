@@ -135,8 +135,14 @@ impl App {
     fn stage_center(&self, ui: &mut Ui, status: &Status) {
         let height = ui.available_height();
         let warning = self.warning(status);
-        let track = status.opus.as_ref().and_then(|opus| opus.now.as_ref()).filter(|now| now.data.grid.is_some());
-        let strip = if track.is_some() { STRIP_GAP + waveform::HEIGHT } else { 0.0 };
+        let decks = status.opus.as_ref().map_or(&[][..], |opus| &opus.decks[..]);
+        // La platine qui mène : celle que suit la lumière, sinon la maître.
+        let lead = status
+            .opus
+            .as_ref()
+            .and_then(|opus| opus.now.as_ref().map(|now| now.deck))
+            .or_else(|| decks.iter().find(|deck| deck.master).map(|deck| deck.deck));
+        let strip = if decks.is_empty() { 0.0 } else { STRIP_GAP + waveform::height(decks.len()) };
         let others = 36.0 + 20.0 + 14.0 + 22.0 + 26.0 + 16.0 + HINT + strip + if warning.is_some() { 52.0 } else { 0.0 };
         let bpm_size = ((height - others - 24.0) / 0.95).clamp(40.0, 200.0);
         let content = others + bpm_size * 0.95;
@@ -192,10 +198,10 @@ impl App {
                 "Temps de la mesure (le premier temps n'est pas encore repéré)"
             });
 
-            if let Some(now) = track {
+            if !decks.is_empty() {
                 ui.add_space(STRIP_GAP);
                 let width = (ui.available_width() * 0.84).min(1000.0);
-                waveform::strip(ui, now, width);
+                waveform::decks(ui, decks, lead, width);
             }
             ui.add_space(12.0);
             ui.label(theme::spaced("ESPACE : DROP · 1 À 9 : SCÈNES", theme::font(11.0, SEMIBOLD), theme::white(0.5), 2.0));

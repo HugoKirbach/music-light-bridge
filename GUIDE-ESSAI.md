@@ -366,6 +366,24 @@ entendu.
 **Limite :** les appels ne fonctionnent qu'avec l'OPUS. Avec une source audio, la montée ne
 flashe que sur les rolls de kicks, comme avant.
 
+## [32] Des breaks jamais noirs, et une bande par platine
+
+- **Lueur des breaks** (30 % par défaut) : pendant un break, la lumière ne descend jamais sous ce
+  niveau. Elle flotte au-dessus, dans la couleur de la trame ou la couleur « Creux ». Le réglage
+  est en mode simple (« Flashs et breaks ») et dans le dock du live (Couleurs). À 0, on retrouve le
+  noir permis d'avant.
+- **Niveaux de la waveform** : ils se rapportent maintenant aux passages forts de chaque morceau,
+  comme le gain automatique du son. La respiration d'un break suit mieux sa mélodie.
+- **Une bande par platine chargée**, la 1 au-dessus de la 2, comme sur une CDJ, même volume coupé.
+  À gauche, le numéro de la platine, son état (MAÎTRE, LECTURE ou PAUSE) et son tempo. La platine
+  qui mène la lumière est en pleine lumière, les autres en retrait. La lumière suit toujours la
+  maître.
+
+**À essayer :**
+1. Un Down : la lumière flotte, sans jamais s'éteindre. Règle « Lueur des breaks » à ton goût.
+2. Charge un morceau sur l'autre platine, fader baissé : sa bande apparaît en retrait. Passe-la en
+   maître : elle passe en pleine lumière, et la lumière la suit.
+
 ---
 
 ## Ce qui a été vérifié de mon côté

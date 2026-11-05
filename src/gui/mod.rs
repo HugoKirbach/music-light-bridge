@@ -491,13 +491,13 @@ impl eframe::App for App {
         if let Some(capture) = &mut self.capture {
             capture.frame(ui.ctx());
             // Aperçu de la bande d'un morceau rejoué : rien d'autre à l'écran.
-            if let Some(now) = capture.preview.clone() {
+            if let Some((decks, lead)) = capture.preview.clone() {
                 let frame = egui::Frame::new().fill(theme::STAGE_BG).inner_margin(egui::Margin::same(40));
                 egui::CentralPanel::default().frame(frame).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(60.0);
                         let width = (ui.available_width() * 0.84).min(1000.0);
-                        waveform::strip(ui, &now, width);
+                        waveform::decks(ui, &decks, lead, width);
                     });
                 });
                 return;
