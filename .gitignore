@@ -1,1 +1,3 @@
 /target
+# Copie de la fenêtre à la racine, pour le double-clic : elle se refait à chaque compilation.
+/DJ-Bridge.exe

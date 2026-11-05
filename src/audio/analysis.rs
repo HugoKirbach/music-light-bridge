@@ -562,7 +562,7 @@ mod tests {
                     Some((start, amplitude)) if t >= start => amplitude * (TAU * 55.0 * (t - start)).sin(),
                     _ => 0.0,
                 };
-                k + h * hat_filter.process(noise.next()) + b
+                k + h * hat_filter.process(noise.sample()) + b
             })
             .collect()
     }

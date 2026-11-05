@@ -31,7 +31,7 @@ pub fn bass_note(t: f32) -> f32 {
 pub struct Noise(pub u32);
 
 impl Noise {
-    pub fn next(&mut self) -> f32 {
+    pub fn sample(&mut self) -> f32 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 17;
         self.0 ^= self.0 << 5;

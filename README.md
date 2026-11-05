@@ -101,9 +101,23 @@ Dans le dossier du projet :
 cargo build --release
 ```
 
-L'exécutable est `target\release\dj-bridge.exe`. Les exemples qui suivent l'appellent
-`dj-bridge` : lancez-le depuis le dossier du projet avec `.\target\release\dj-bridge.exe …`, ou
-copiez-le où vous voulez (il est autonome).
+La compilation donne deux exécutables, autonomes :
+- `target\release\dj-bridge.exe`, la ligne de commande. Les exemples qui suivent l'appellent
+  `dj-bridge` : lancez-le depuis le dossier du projet avec `.\target\release\dj-bridge.exe …`.
+  Sans commande, il ouvre la fenêtre.
+- `target\release\dj-bridge-gui.exe`, la fenêtre seule, sans console. Pour l'ouvrir d'un
+  double-clic, copiez-le à la racine du dossier sous le nom `DJ-Bridge.exe`, puis créez le
+  raccourci du Bureau :
+
+  ```bash
+  copy target\release\dj-bridge-gui.exe DJ-Bridge.exe
+  ```
+
+  ```bash
+  .\target\release\dj-bridge.exe raccourci
+  ```
+
+Si la fenêtre ne s'ouvre pas, la raison est écrite dans `%APPDATA%\dj-bridge\erreur-fenetre.txt`.
 
 ## Premier réglage : bridge, zone, latence
 

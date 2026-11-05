@@ -1,40 +1,20 @@
-//! DJ-Bridge : lumières Philips Hue pilotées par le son et le tempo,
-//! avec la latence la plus faible possible.
-
-mod audio;
-mod cmd;
-mod config;
-mod engine;
-mod flash;
-mod gui;
-mod hue;
-mod link;
-mod look;
-mod metronome;
-mod opus;
-mod phrase;
-mod prolink;
-mod rhythm;
-mod room;
-mod midi;
-mod tempo;
-mod timing;
-mod wav;
+//! Ligne de commande de DJ-Bridge ; sans commande, elle ouvre la fenêtre.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
-use config::Config;
+use dj_bridge::config::Config;
+use dj_bridge::{audio, cmd, engine, flash, gui, look, opus, tempo};
 
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
+    /// Sans commande : la fenêtre
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -124,6 +104,14 @@ enum Command {
         /// Écoute seulement, sans se présenter comme rekordbox
         #[arg(long = "passif")]
         passive: bool,
+    },
+    /// Crée sur le Bureau un raccourci qui ouvre la fenêtre de DJ-Bridge
+    #[command(name = "raccourci")]
+    Shortcut {
+        /// Exécutable visé ; par défaut DJ-Bridge.exe du dossier courant, sinon dj-bridge-gui.exe
+        /// à côté de cette commande
+        #[arg(long = "cible")]
+        target: Option<PathBuf>,
     },
 }
 
@@ -226,14 +214,9 @@ impl LiveArgs {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let rt = Arc::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()?,
-    );
+    let rt = dj_bridge::runtime()?;
     let mut cfg = Config::load()?;
-    match cli.command {
+    match cli.command.unwrap_or(Command::Gui) {
         Command::Discover => cmd::setup::discover(&rt),
         Command::Pair { ip } => cmd::setup::pair(&rt, &mut cfg, ip),
         Command::Areas { select } => cmd::setup::areas(&rt, &mut cfg, select),
@@ -258,5 +241,6 @@ fn main() -> Result<()> {
         Command::Probe { seconds, interface, passive } => {
             cmd::probe::run(cmd::probe::Options { seconds, interface, passive })
         }
+        Command::Shortcut { target } => cmd::shortcut::run(target),
     }
 }

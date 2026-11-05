@@ -8,5 +8,6 @@ pub mod latency;
 pub mod live;
 pub mod probe;
 pub mod setup;
+pub mod shortcut;
 pub mod test;
 mod tui;

@@ -183,7 +183,7 @@ fn pluck(t: f32, frequency: f32) -> f32 {
 
 /// Souffle filtré dans les aigus, `seconds` s de bruit.
 fn hiss(noise: &mut Noise, seconds: f32, cutoff: f32) -> Vec<f32> {
-    let mut hiss: Vec<f32> = (0..(seconds * RATE) as usize).map(|_| noise.next()).collect();
+    let mut hiss: Vec<f32> = (0..(seconds * RATE) as usize).map(|_| noise.sample()).collect();
     high_pass(&mut hiss, cutoff);
     high_pass(&mut hiss, cutoff);
     hiss

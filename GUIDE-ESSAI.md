@@ -327,6 +327,19 @@ Dans le terminal : `dj-bridge live --opus --sans-son --reseau "Wi-Fi"`.
 flux ne parle qu'en RGB, donc cette couleur est approchée (un blanc chaud peut sortir un peu
 différent). À l'arrêt du live, elle retrouve son état exact.
 
+## [30] Lancement d'un double-clic
+
+- **`DJ-Bridge.exe`**, à la racine du dossier du projet, ouvre directement la fenêtre, sans console
+  noire. Il porte l'icône de DJ-Bridge (l'anneau orange de l'en-tête), comme la fenêtre.
+- **Raccourci « DJ-Bridge » sur le Bureau**, qui ouvre ce même `DJ-Bridge.exe`.
+- `dj-bridge.exe` sans commande ouvre aussi la fenêtre.
+- Si la fenêtre ne s'ouvre pas, la raison est écrite dans
+  `%APPDATA%\dj-bridge\erreur-fenetre.txt`.
+
+**À essayer :** double-clique sur le raccourci du Bureau. Windows peut redemander d'autoriser
+DJ-Bridge sur le réseau, parce que c'est un nouvel exécutable : accepte, sinon l'OPUS ne sera pas
+entendu.
+
 ---
 
 ## Ce qui a été vérifié de mon côté

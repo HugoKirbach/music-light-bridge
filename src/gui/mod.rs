@@ -4,6 +4,7 @@
 //! tempo en très grand, et un dock replié en bas qui rouvre ces mêmes pages.
 
 mod capture;
+pub mod icon;
 mod light;
 mod plan;
 mod presets;
@@ -43,7 +44,8 @@ pub fn run(rt: Arc<Runtime>, cfg: Config) -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("DJ-Bridge")
             .with_inner_size(capture.as_ref().map_or([1180.0, 780.0], |c| c.size))
-            .with_min_inner_size([940.0, 640.0]),
+            .with_min_inner_size([940.0, 640.0])
+            .with_icon(egui::IconData { rgba: icon::rgba(64), width: 64, height: 64 }),
         ..Default::default()
     };
     let mut app = App::new(rt, cfg);
