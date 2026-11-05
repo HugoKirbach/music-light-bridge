@@ -145,6 +145,10 @@ struct App {
     capture: Option<capture::Capture>,
     /// L'écran de préparation tient sur deux colonnes (sinon la lumière passe dessous).
     two_columns: bool,
+    /// Bandes des platines : 2 ou 4 pistes ; et morceaux vus sur les platines 3 et 4 (0 : aucun),
+    /// dont l'arrivée fait passer en 4 pistes.
+    deck_layout: waveform::Layout,
+    outer_tracks: [u32; 2],
 }
 
 impl App {
@@ -194,6 +198,8 @@ impl App {
             renaming: None,
             capture: None,
             two_columns: true,
+            deck_layout: waveform::Layout::Two,
+            outer_tracks: [0; 2],
         };
         app.refresh_devices();
         app
@@ -492,12 +498,13 @@ impl eframe::App for App {
             capture.frame(ui.ctx());
             // Aperçu de la bande d'un morceau rejoué : rien d'autre à l'écran.
             if let Some((decks, lead)) = capture.preview.clone() {
+                let layout = if capture.four_decks { waveform::Layout::Four } else { waveform::Layout::Two };
                 let frame = egui::Frame::new().fill(theme::STAGE_BG).inner_margin(egui::Margin::same(40));
                 egui::CentralPanel::default().frame(frame).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(60.0);
                         let width = (ui.available_width() * 0.84).min(1000.0);
-                        waveform::decks(ui, &decks, lead, width);
+                        waveform::decks(ui, &decks, lead, width, layout);
                     });
                 });
                 return;

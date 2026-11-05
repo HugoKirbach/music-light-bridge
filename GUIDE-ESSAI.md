@@ -384,6 +384,21 @@ flashe que sur les rolls de kicks, comme avant.
 2. Charge un morceau sur l'autre platine, fader baissé : sa bande apparaît en retrait. Passe-la en
    maître : elle passe en pleine lumière, et la lumière la suit.
 
+## [33] Bandes en 2 ou 4 pistes
+
+- **Sélecteur « 2 / 4 »**, à gauche des bandes.
+  - **2 pistes** : les platines centrales, 1 au-dessus de 2, avec le détail des phrases.
+  - **4 pistes** : les quatre, dans l'ordre de l'OPUS (3, 1, 2, 4), en bandes plus basses, sans le
+    détail des phrases (seulement la miniature sous chaque bande). Une platine sans morceau est
+    marquée « VIDE ».
+- **Bascule automatique** en 4 pistes quand un morceau arrive sur la platine 3 ou 4. Rien n'est
+  imposé : tu peux revenir en 2 pistes, même si la 3 ou la 4 joue, et ça ne rebascule qu'au
+  prochain chargement sur l'une d'elles.
+- La lumière suit toujours la platine maître, même si sa bande est cachée en 2 pistes.
+
+**À essayer :** charge un morceau sur la platine 3 : les bandes passent en 4 pistes. Repasse en 2
+avec le bouton : elles y restent jusqu'au prochain chargement sur 3 ou 4.
+
 ---
 
 ## Ce qui a été vérifié de mon côté

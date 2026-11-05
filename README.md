@@ -570,9 +570,12 @@ avoir besoin du son.
 - **Appels des montées :** dans une phrase Up, les doubles croches qui attaquent (roll, charleston,
   son acid) flashent aussi, sans blanc et plus légèrement qu'un kick, de plus en plus fort jusqu'au
   drop. Un riser continu ne flashe pas.
-- **Bandes des platines** (écran du live) : une par platine chargée, la 1 au-dessus de la 2, même
-  volume coupé. On y voit les phrases rekordbox en couleur, la waveform autour de la tête de
-  lecture et tout le morceau en miniature. La platine qui mène la lumière est en pleine lumière.
+- **Bandes des platines** (écran du live), même volume coupé : les phrases rekordbox en couleur, la
+  waveform autour de la tête de lecture et tout le morceau en miniature. La platine qui mène la
+  lumière est en pleine lumière. Le sélecteur « 2 / 4 » à gauche choisit entre les platines
+  centrales (1 au-dessus de 2, avec le détail des phrases) et les quatre dans l'ordre de l'OPUS
+  (3, 1, 2, 4, plus compactes). Un morceau chargé sur la 3 ou la 4 fait passer en 4 pistes, sans
+  l'imposer.
 - **Lueur des breaks** (30 % par défaut) : dans un break, la lumière ne descend jamais sous ce
   niveau, elle flotte au-dessus.
 - **Couleurs de la trame :** la couleur de la waveform sur le temps en cours (rouge pour les graves,

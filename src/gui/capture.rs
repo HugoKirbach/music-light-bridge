@@ -26,8 +26,10 @@ pub(super) struct Capture {
     requested: bool,
     /// La photo est écrite : la fenêtre peut se fermer.
     written: Arc<AtomicBool>,
-    /// Platines d'un journal rejoué (et celle qui menait), à montrer à la place de l'écran.
+    /// Platines d'un journal rejoué (et celle qui menait), à montrer à la place de l'écran, en
+    /// 4 pistes si `DJB_CAPTURE_DECKS` vaut 4.
     pub preview: Option<(Vec<DeckView>, Option<u8>)>,
+    pub four_decks: bool,
 }
 
 /// Rejoue un journal de la sonde jusqu'à `at` (s) : les platines chargées, et celle qui menait.
@@ -62,7 +64,9 @@ impl Capture {
             let at = std::env::var("DJB_CAPTURE_AT").ok()?.parse().ok()?;
             replay(&journal, at)
         });
-        Some(Self { path, size, expert, frames: 0, requested: false, written: Arc::new(AtomicBool::new(false)), preview })
+        let four_decks = std::env::var("DJB_CAPTURE_DECKS").is_ok_and(|decks| decks == "4");
+        let written = Arc::new(AtomicBool::new(false));
+        Some(Self { path, size, expert, frames: 0, requested: false, written, preview, four_decks })
     }
 
     /// À chaque image : demande la photo une fois la fenêtre posée ; une fois écrite, ferme.

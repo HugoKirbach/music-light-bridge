@@ -1,7 +1,10 @@
-//! Bandes des platines chargées, quand l'OPUS est suivi, l'une sous l'autre comme sur une CDJ :
-//! les phrases rekordbox en couleur, la waveform autour de la tête de lecture (le passé assombri,
+//! Bandes des platines, quand l'OPUS est suivi, l'une sous l'autre comme sur une CDJ : les
+//! phrases rekordbox en couleur, la waveform autour de la tête de lecture (le passé assombri,
 //! l'avenir à droite), les mesures, et tout le morceau en miniature. La platine qui mène la lumière
 //! est en pleine lumière, les autres en retrait ; on les voit même volume coupé.
+//!
+//! Deux dispositions : les platines centrales 1 et 2, ou les quatre dans l'ordre de l'OPUS
+//! (3, 1, 2, 4), en bandes plus basses sans le détail des phrases.
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 
@@ -14,17 +17,63 @@ const AHEAD_MS: f64 = 18_000.0;
 const LABEL_WIDTH: f32 = 54.0;
 const PHRASES_HEIGHT: f32 = 14.0;
 const WAVE_HEIGHT: f32 = 44.0;
+const COMPACT_WAVE_HEIGHT: f32 = 28.0;
 const OVERVIEW_HEIGHT: f32 = 5.0;
 const GAP: f32 = 3.0;
-/// Hauteur d'une bande, et écart entre deux bandes.
-pub(super) const HEIGHT: f32 = PHRASES_HEIGHT + GAP + WAVE_HEIGHT + 2.0 * GAP + OVERVIEW_HEIGHT;
-pub(super) const ROW_GAP: f32 = 10.0;
+/// Écart entre deux bandes, et colonne du sélecteur 2 / 4 pistes.
+const ROW_GAP: f32 = 8.0;
+const SWITCH_WIDTH: f32 = 30.0;
 /// Une platine qui ne mène pas la lumière est montrée en retrait.
 const BACKGROUND_DECK: f32 = 0.5;
 
-/// Hauteur des bandes de `count` platines.
-pub(super) fn height(count: usize) -> f32 {
-    if count == 0 { 0.0 } else { count as f32 * HEIGHT + (count - 1) as f32 * ROW_GAP }
+/// Disposition des bandes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Layout {
+    /// Les platines centrales, 1 au-dessus de 2, avec le détail des phrases.
+    Two,
+    /// Les quatre, dans l'ordre de l'OPUS (3, 1, 2, 4), sans le détail des phrases.
+    Four,
+}
+
+impl Layout {
+    fn decks(self) -> &'static [u8] {
+        match self {
+            Self::Two => &[1, 2],
+            Self::Four => &[3, 1, 2, 4],
+        }
+    }
+
+    fn row_height(self) -> f32 {
+        match self {
+            Self::Two => PHRASES_HEIGHT + GAP + WAVE_HEIGHT + 2.0 * GAP + OVERVIEW_HEIGHT,
+            Self::Four => COMPACT_WAVE_HEIGHT + 2.0 * GAP + OVERVIEW_HEIGHT,
+        }
+    }
+
+    fn wave_height(self) -> f32 {
+        match self {
+            Self::Two => WAVE_HEIGHT,
+            Self::Four => COMPACT_WAVE_HEIGHT,
+        }
+    }
+}
+
+/// Un morceau vient d'arriver sur la platine 3 ou 4 : `seen` garde ceux qu'on y a déjà vus
+/// (0 : aucun), et la réponse ne vaut vrai qu'au chargement, pour qu'on puisse revenir en 2 pistes.
+pub(super) fn loaded_outside(seen: &mut [u32; 2], decks: &[DeckView]) -> bool {
+    let mut loaded = false;
+    for (seen, number) in seen.iter_mut().zip([3u8, 4]) {
+        let track = decks.iter().find(|deck| deck.deck == number).map_or(0, |deck| deck.track.id);
+        loaded |= track != 0 && track != *seen;
+        *seen = track;
+    }
+    loaded
+}
+
+/// Hauteur des bandes dans la disposition `layout`.
+pub(super) fn height(layout: Layout) -> f32 {
+    let rows = layout.decks().len() as f32;
+    rows * layout.row_height() + (rows - 1.0) * ROW_GAP
 }
 
 /// Couleur d'une phrase rekordbox, d'après son nom.
@@ -55,45 +104,80 @@ fn phrases(track: &Track) -> Vec<(String, f64, f64)> {
         .collect()
 }
 
-/// Les bandes des platines `decks`, l'une sous l'autre ; `lead` : la platine qui mène la lumière.
-pub(super) fn decks(ui: &mut Ui, decks: &[DeckView], lead: Option<u8>, width: f32) {
-    for (i, deck) in decks.iter().enumerate() {
-        if i > 0 {
-            ui.add_space(ROW_GAP);
-        }
-        strip(ui, deck, lead == Some(deck.deck), width);
-    }
+/// Les bandes de la disposition `layout`, l'une sous l'autre, avec à gauche le sélecteur 2 / 4
+/// pistes ; `lead` : la platine qui mène la lumière. Rend la disposition demandée d'un clic.
+pub(super) fn decks(ui: &mut Ui, decks: &[DeckView], lead: Option<u8>, width: f32, layout: Layout) -> Option<Layout> {
+    let mut picked = None;
+    ui.allocate_ui_with_layout(vec2(width, height(layout)), egui::Layout::left_to_right(egui::Align::Min), |ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+        picked = switch(ui, layout);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = ROW_GAP;
+            let width = width - SWITCH_WIDTH - 8.0;
+            for &number in layout.decks() {
+                match decks.iter().find(|deck| deck.deck == number) {
+                    Some(deck) => strip(ui, deck, lead == Some(number), width, layout),
+                    None => empty(ui, number, width, layout),
+                }
+            }
+        });
+    });
+    picked
 }
 
-/// La bande d'une platine sur `width` points : son numéro et son état à gauche, le morceau à droite.
-fn strip(ui: &mut Ui, deck: &DeckView, lead: bool, width: f32) {
-    let (full, response) = ui.allocate_exact_size(vec2(width, HEIGHT), Sense::hover());
-    let painter = ui.painter_at(full.expand(2.0));
-    let fade = |color: Color32| if lead { color } else { color.gamma_multiply(BACKGROUND_DECK) };
+/// Sélecteur 2 / 4 pistes : deux petits boutons l'un sous l'autre.
+fn switch(ui: &mut Ui, layout: Layout) -> Option<Layout> {
+    let mut picked = None;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        for (choice, text, hint) in [
+            (Layout::Two, "2", "2 pistes : les platines centrales 1 et 2, avec le détail des phrases"),
+            (Layout::Four, "4", "4 pistes, dans l'ordre de l'OPUS : 3, 1, 2, 4"),
+        ] {
+            let selected = choice == layout;
+            let (rect, response) = ui.allocate_exact_size(vec2(SWITCH_WIDTH, 26.0), Sense::click());
+            let fill = if selected { theme::white(0.18) } else if response.hovered() { theme::white(0.08) } else { theme::black(0.3) };
+            ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
+            let color = if selected { Color32::WHITE } else { theme::white(0.55) };
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, theme::font(13.0, BOLD), color);
+            if response.on_hover_text(hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !selected {
+                picked = Some(choice);
+            }
+        }
+    });
+    picked
+}
 
-    // Numéro de la platine, et son état : maître, lecture ou pause.
-    let label = Rect::from_min_size(full.min, vec2(LABEL_WIDTH, HEIGHT));
-    painter.rect_filled(label.shrink2(vec2(0.0, 2.0)), CornerRadius::same(8), theme::black(if lead { 0.55 } else { 0.3 }));
+/// Ce que montre la colonne de gauche d'une bande : numéro de la platine, état (maître, lecture,
+/// pause ou vide) et tempo.
+struct DeckLabel<'a> {
+    number: u8,
+    state: &'a str,
+    master: bool,
+    bpm: Option<f64>,
+}
+
+/// La colonne de gauche d'une bande, dans `label`.
+fn deck_label(painter: &egui::Painter, label: Rect, deck: DeckLabel, lead: bool, compact: bool) {
+    let DeckLabel { number, state, master, bpm } = deck;
+    let fade = |color: Color32| if lead { color } else { color.gamma_multiply(BACKGROUND_DECK) };
+    painter.rect_filled(label.shrink2(vec2(0.0, 1.0)), CornerRadius::same(8), theme::black(if lead { 0.55 } else { 0.3 }));
+    let (size, number_y, state_y) = if compact { (17.0, 13.0, 30.0) } else { (24.0, 22.0, 44.0) };
     painter.text(
-        pos2(label.center().x, label.top() + 22.0),
+        pos2(label.center().x, label.top() + number_y),
         Align2::CENTER_CENTER,
-        deck.deck.to_string(),
-        theme::font(24.0, BOLD),
+        number.to_string(),
+        theme::font(size, BOLD),
         fade(Color32::WHITE),
     );
-    let state = match (deck.master, deck.playing) {
-        (true, _) => "MAÎTRE",
-        (false, true) => "LECTURE",
-        (false, false) => "PAUSE",
-    };
     painter.text(
-        pos2(label.center().x, label.top() + 44.0),
+        pos2(label.center().x, label.top() + state_y),
         Align2::CENTER_CENTER,
         state,
-        theme::font(9.0, SEMIBOLD),
-        if deck.master { ACCENT } else { fade(theme::white(0.7)) },
+        theme::font(if compact { 8.0 } else { 9.0 }, SEMIBOLD),
+        if master { ACCENT } else { fade(theme::white(0.7)) },
     );
-    if let Some(bpm) = deck.bpm {
+    if let (Some(bpm), false) = (bpm, compact) {
         painter.text(
             pos2(label.center().x, label.top() + 58.0),
             Align2::CENTER_CENTER,
@@ -102,6 +186,34 @@ fn strip(ui: &mut Ui, deck: &DeckView, lead: bool, width: f32) {
             fade(theme::white(0.6)),
         );
     }
+}
+
+/// Bande d'une platine sans morceau chargé.
+fn empty(ui: &mut Ui, number: u8, width: f32, layout: Layout) {
+    let (full, _) = ui.allocate_exact_size(vec2(width, layout.row_height()), Sense::hover());
+    let painter = ui.painter_at(full.expand(2.0));
+    let label = Rect::from_min_size(full.min, vec2(LABEL_WIDTH, full.height()));
+    let deck = DeckLabel { number, state: "VIDE", master: false, bpm: None };
+    deck_label(&painter, label, deck, false, layout == Layout::Four);
+    let rest = Rect::from_min_max(pos2(label.right() + 8.0, full.top()), full.max);
+    painter.rect_filled(rest, CornerRadius::same(6), theme::black(0.2));
+}
+
+/// La bande d'une platine sur `width` points : son numéro et son état à gauche, le morceau à droite.
+fn strip(ui: &mut Ui, deck: &DeckView, lead: bool, width: f32, layout: Layout) {
+    let (full, response) = ui.allocate_exact_size(vec2(width, layout.row_height()), Sense::hover());
+    let painter = ui.painter_at(full.expand(2.0));
+    let fade = |color: Color32| if lead { color } else { color.gamma_multiply(BACKGROUND_DECK) };
+    let compact = layout == Layout::Four;
+
+    let label = Rect::from_min_size(full.min, vec2(LABEL_WIDTH, full.height()));
+    let state = match (deck.master, deck.playing) {
+        (true, _) => "MAÎTRE",
+        (false, true) => "LECTURE",
+        (false, false) => "PAUSE",
+    };
+    let shown = DeckLabel { number: deck.deck, state, master: deck.master, bpm: deck.bpm };
+    deck_label(&painter, label, shown, lead, compact);
 
     let rect = Rect::from_min_max(pos2(label.right() + 8.0, full.top()), full.max);
     let track = &deck.track;
@@ -110,9 +222,10 @@ fn strip(ui: &mut Ui, deck: &DeckView, lead: bool, width: f32) {
     let x = |ms: f64| rect.left() + ((ms - start) / span) as f32 * rect.width();
     let phrases = phrases(track);
 
-    // Phrases : un bandeau de couleur, nommé quand il y a la place.
-    let band = Rect::from_min_size(rect.min, vec2(rect.width(), PHRASES_HEIGHT));
-    for (name, from, to) in &phrases {
+    // Phrases : un bandeau de couleur, nommé quand il y a la place ; pas en 4 pistes, où seule la
+    // miniature du morceau les montre.
+    let band = Rect::from_min_size(rect.min, vec2(rect.width(), if compact { 0.0 } else { PHRASES_HEIGHT }));
+    for (name, from, to) in phrases.iter().filter(|_| !compact) {
         let (left, right) = (x(*from).max(band.left()), x(*to).min(band.right()));
         if right <= left {
             continue;
@@ -132,7 +245,8 @@ fn strip(ui: &mut Ui, deck: &DeckView, lead: bool, width: f32) {
     }
 
     // Waveform : une colonne par point d'écran, le plus haut point et sa couleur ; le passé assombri.
-    let wave = Rect::from_min_size(pos2(rect.left(), band.bottom() + GAP), vec2(rect.width(), WAVE_HEIGHT));
+    let wave_top = if compact { rect.top() } else { band.bottom() + GAP };
+    let wave = Rect::from_min_size(pos2(rect.left(), wave_top), vec2(rect.width(), layout.wave_height()));
     painter.rect_filled(wave, CornerRadius::same(6), theme::black(0.35));
     if let Some(waveform) = &track.waveform {
         let columns = wave.width().floor() as usize;
@@ -156,7 +270,7 @@ fn strip(ui: &mut Ui, deck: &DeckView, lead: bool, width: f32) {
                 (top.blue / max * 255.0) as u8,
             );
             let color = fade(if from < deck.position_ms { color.gamma_multiply(0.4) } else { color });
-            let half = top.height * (WAVE_HEIGHT / 2.0 - 3.0);
+            let half = top.height * (wave.height() / 2.0 - 3.0);
             let cx = wave.left() + column as f32 + 0.5;
             painter.line_segment([pos2(cx, wave.center().y - half), pos2(cx, wave.center().y + half)], Stroke::new(1.0, color));
         }
@@ -172,7 +286,7 @@ fn strip(ui: &mut Ui, deck: &DeckView, lead: bool, width: f32) {
     }
     // Tête de lecture.
     let head = x(deck.position_ms);
-    painter.line_segment([pos2(head, band.top()), pos2(head, wave.bottom())], Stroke::new(2.0, fade(Color32::WHITE)));
+    painter.line_segment([pos2(head, rect.top()), pos2(head, wave.bottom())], Stroke::new(2.0, fade(Color32::WHITE)));
 
     // Tout le morceau en miniature, avec la position.
     let overview = Rect::from_min_size(pos2(rect.left(), wave.bottom() + 2.0 * GAP), vec2(rect.width(), OVERVIEW_HEIGHT));
@@ -195,4 +309,42 @@ fn strip(ui: &mut Ui, deck: &DeckView, lead: bool, width: f32) {
         "Autre platine chargée, montée même volume coupé ; la lumière suit la platine maître"
     };
     response.on_hover_text(hint);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn deck(number: u8, track: u32) -> DeckView {
+        DeckView {
+            deck: number,
+            track: Arc::new(Track { id: track, ..Track::default() }),
+            position_ms: 0.0,
+            playing: true,
+            master: false,
+            on_air: false,
+            bpm: None,
+        }
+    }
+
+    #[test]
+    fn a_track_loaded_on_deck_3_or_4_asks_for_four_tracks_once() {
+        let mut seen = [0; 2];
+        assert!(!loaded_outside(&mut seen, &[deck(1, 10), deck(2, 11)]), "platines centrales seules");
+        assert!(loaded_outside(&mut seen, &[deck(1, 10), deck(3, 12)]), "un morceau arrive sur la 3");
+        // Revenu en 2 pistes, on y reste tant que rien de nouveau n'arrive sur 3 ou 4…
+        assert!(!loaded_outside(&mut seen, &[deck(1, 10), deck(3, 12)]));
+        // … même quand la 3 joue ; un autre morceau sur la 4, si.
+        assert!(loaded_outside(&mut seen, &[deck(3, 12), deck(4, 13)]));
+        assert!(loaded_outside(&mut seen, &[deck(3, 14), deck(4, 13)]), "nouveau morceau sur la 3");
+    }
+
+    #[test]
+    fn four_tracks_follow_the_opus_order() {
+        assert_eq!(Layout::Two.decks(), &[1, 2]);
+        assert_eq!(Layout::Four.decks(), &[3, 1, 2, 4]);
+        assert!(height(Layout::Four) > height(Layout::Two));
+    }
 }

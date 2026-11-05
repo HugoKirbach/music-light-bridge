@@ -39,6 +39,7 @@ const DIM: Color32 = Color32::from_rgb(0xB4, 0xB9, 0xC1);
 impl App {
     pub(super) fn stage(&mut self, ui: &mut Ui, status: &Status) {
         self.shortcuts(ui);
+        self.follow_outer_decks(status);
         let full = ui.max_rect();
         let center = pos2(full.center().x, full.top() + full.height() * 0.38);
         let radii = vec2(full.width() * 0.44, full.height() * 0.54);
@@ -57,6 +58,15 @@ impl App {
         egui::CentralPanel::default().frame(Frame::NONE).show(ui, |ui| self.stage_center(ui, status));
         if stop {
             self.stop();
+        }
+    }
+
+    /// Un morceau qui arrive sur la platine 3 ou 4 fait passer les bandes en 4 pistes. Rien n'est
+    /// imposé : on peut revenir en 2 pistes, jusqu'au prochain chargement sur 3 ou 4.
+    fn follow_outer_decks(&mut self, status: &Status) {
+        let Some(opus) = &status.opus else { return };
+        if waveform::loaded_outside(&mut self.outer_tracks, &opus.decks) {
+            self.deck_layout = waveform::Layout::Four;
         }
     }
 
@@ -132,7 +142,7 @@ impl App {
     }
 
     /// Centre : phase du morceau, tempo, source du tempo et temps de la mesure.
-    fn stage_center(&self, ui: &mut Ui, status: &Status) {
+    fn stage_center(&mut self, ui: &mut Ui, status: &Status) {
         let height = ui.available_height();
         let warning = self.warning(status);
         let decks = status.opus.as_ref().map_or(&[][..], |opus| &opus.decks[..]);
@@ -142,7 +152,7 @@ impl App {
             .as_ref()
             .and_then(|opus| opus.now.as_ref().map(|now| now.deck))
             .or_else(|| decks.iter().find(|deck| deck.master).map(|deck| deck.deck));
-        let strip = if decks.is_empty() { 0.0 } else { STRIP_GAP + waveform::height(decks.len()) };
+        let strip = if decks.is_empty() { 0.0 } else { STRIP_GAP + waveform::height(self.deck_layout) };
         let others = 36.0 + 20.0 + 14.0 + 22.0 + 26.0 + 16.0 + HINT + strip + if warning.is_some() { 52.0 } else { 0.0 };
         let bpm_size = ((height - others - 24.0) / 0.95).clamp(40.0, 200.0);
         let content = others + bpm_size * 0.95;
@@ -201,7 +211,9 @@ impl App {
             if !decks.is_empty() {
                 ui.add_space(STRIP_GAP);
                 let width = (ui.available_width() * 0.84).min(1000.0);
-                waveform::decks(ui, decks, lead, width);
+                if let Some(layout) = waveform::decks(ui, decks, lead, width, self.deck_layout) {
+                    self.deck_layout = layout;
+                }
             }
             ui.add_space(12.0);
             ui.label(theme::spaced("ESPACE : DROP · 1 À 9 : SCÈNES", theme::font(11.0, SEMIBOLD), theme::white(0.5), 2.0));
