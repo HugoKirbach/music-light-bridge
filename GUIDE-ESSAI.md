@@ -340,6 +340,32 @@ différent). À l'arrêt du live, elle retrouve son état exact.
 DJ-Bridge sur le réseau, parce que c'est un nouvel exécutable : accepte, sinon l'OPUS ne sera pas
 entendu.
 
+## [31] Des montées qui réagissent, bande du morceau et raccourcis
+
+- **Appels des montées (avec l'OPUS) :** dans une phrase Up, chaque double croche qui attaque
+  (roll de caisse ou de kicks, charleston, son acid) flashe aussi.
+  - L'attaque se lit dans la waveform : le pic au début de la note, moins le creux juste avant. Un
+    riser continu n'en a pas, il ne flashe donc pas.
+  - Ce flash reste plus léger qu'un kick, sans blanc. La montée le dose : faible au début, plus fort
+    près du drop. Le drop, lui, reste l'éclat blanc à pleine puissance.
+  - Sur ton journal, par exemple : les charlestons à contretemps pendant les montées avec kick, puis
+    les rolls en doubles croches des huit derniers temps avant le Chorus.
+- **Bande du morceau**, sous les temps de la mesure, quand l'OPUS mène :
+  - les phrases rekordbox en couleur (Up en ambre, Down en bleu, Chorus en rose) ;
+  - la waveform aux couleurs rekordbox (6 s de passé assombri, 18 s à venir) et la tête de lecture ;
+  - en dessous, tout le morceau en miniature avec la position.
+- **Raccourcis du live :** Espace pour le drop (éclat blanc), 1 à 9 pour les scènes, Échap pour
+  replier le dock. Ils ne jouent pas pendant qu'on tape un texte.
+
+**À essayer :**
+1. Pendant une montée : les rolls et les charlestons flashent, de plus en plus fort, et le drop
+   reste nettement plus fort.
+2. Regarde la bande : la prochaine phrase arrive bien quand tu l'entends.
+3. Teste Espace et les chiffres pendant le live.
+
+**Limite :** les appels ne fonctionnent qu'avec l'OPUS. Avec une source audio, la montée ne
+flashe que sur les rolls de kicks, comme avant.
+
 ---
 
 ## Ce qui a été vérifié de mon côté

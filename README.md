@@ -158,6 +158,9 @@ fenêtre est étroite, la lumière passe sous la session, sur une seule colonne.
 **Lampes pendant le live** (onglet Lampes du dock) : un clic sur une lampe l'ajoute au live ou la
 rend à son état d'avant, sans arrêter le live. Le choix est gardé pour les sessions suivantes.
 
+**Raccourcis du live :** Espace pour le drop (éclat blanc), 1 à 9 pour rappeler les scènes, Échap
+pour replier le dock.
+
 **Au centre, l'essentiel :**
 
 1. **Source audio.**
@@ -564,6 +567,11 @@ avoir besoin du son.
 - **Phases :** une phrase rekordbox « Up » est une montée, dont le drop tombe au début de la phrase
   suivante ; ailleurs, groove s'il y a des kicks, break qui flotte sinon. Le régisseur change de
   mise en scène aux têtes de phrase.
+- **Appels des montées :** dans une phrase Up, les doubles croches qui attaquent (roll, charleston,
+  son acid) flashent aussi, sans blanc et plus légèrement qu'un kick, de plus en plus fort jusqu'au
+  drop. Un riser continu ne flashe pas.
+- **Bande du morceau** (écran du live) : phrases rekordbox en couleur, waveform autour de la tête
+  de lecture, et tout le morceau en miniature.
 - **Couleurs de la trame :** la couleur de la waveform sur le temps en cours (rouge pour les graves,
   vert pour les médiums, bleu pour les aigus) teinte les lampes. Case « Couleurs de la trame » de
   l'onglet Couleurs, ou `--palette-only`, pour garder la palette.

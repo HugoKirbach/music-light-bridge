@@ -221,6 +221,10 @@ pub struct OpusStatus {
 pub struct OpusNow {
     pub deck: u8,
     pub track: u32,
+    /// Ce que l'OPUS a envoyé du morceau (grille, structure, waveform), et la position de lecture
+    /// à vitesse normale (ms).
+    pub data: Arc<crate::opus::Track>,
+    pub position_ms: f64,
     pub beat: u32,
     /// Place dans la mesure (0 à 3) et dans la phrase de la lumière (0 à 15).
     pub bar_beat: u8,
@@ -231,7 +235,7 @@ pub struct OpusNow {
     pub beats_left: Option<u32>,
     /// La phase est assez sûre pour flasher.
     pub settled: bool,
-    at: Instant,
+    pub(crate) at: Instant,
 }
 
 /// Bilan affiché à l'arrêt.
@@ -711,6 +715,11 @@ impl Engine {
     /// Décalage des paquets de l'OPUS sur le son (ms) : positif s'ils arrivent après lui.
     pub fn set_opus_offset(&self, ms: f64) {
         self.shared.opus_offset_us.store(offset_us(ms), Ordering::Relaxed);
+    }
+
+    /// Drop à la main (barre d'espace, télécommande) : éclat blanc à pleine puissance, partout.
+    pub fn drop_now(&self) {
+        self.shared.drop_now.store(true, Ordering::Relaxed);
     }
 
     /// Couleurs de la trame : avec l'OPUS, la waveform du morceau teinte les lampes.

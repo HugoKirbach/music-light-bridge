@@ -10,7 +10,7 @@ use crate::engine::Status;
 
 impl App {
     /// Rappelle une scène : dans la fenêtre et, pendant le live, sur les lampes.
-    fn apply_preset(&mut self, preset: &Preset) {
+    pub(super) fn apply_preset(&mut self, preset: &Preset) {
         self.take_preset(preset);
         if let Some(engine) = &self.engine {
             engine.apply_preset(preset);

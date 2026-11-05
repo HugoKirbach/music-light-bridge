@@ -6,7 +6,7 @@ use eframe::egui::{self, Align, Color32, CornerRadius, Frame, Layout, Margin, Se
 
 use super::light::{Page, STAGE_SKIN};
 use super::theme::{self, BOLD, Icon, LIVE, MONO_BOLD, SEMIBOLD, STAGE_BG};
-use super::{App, MODES, Tab, flash_text, format_bpm};
+use super::{App, MODES, Tab, flash_text, format_bpm, waveform};
 use crate::audio::WINDOWS_LOOPBACK;
 use crate::engine::{MAX_LAMP_DELAY_MS, OPUS_OFFSET_RANGE, OpusStatus, Status};
 use crate::tempo::TempoSource;
@@ -30,11 +30,15 @@ const ASIO_HINT: &str = "Ableton en ASIO joue directement sur la carte, sans pas
      Ableton Link avec les flashs « Chaque temps ».";
 /// Bascule du mode expert, à droite des onglets.
 const MODE_CHIP: &str = "Expert";
+/// Écart au-dessus de la bande du morceau, et place de la ligne des raccourcis.
+const STRIP_GAP: f32 = 26.0;
+const HINT: f32 = 26.0;
 const SOFT: Color32 = Color32::from_rgb(0xD9, 0xDC, 0xE1);
 const DIM: Color32 = Color32::from_rgb(0xB4, 0xB9, 0xC1);
 
 impl App {
     pub(super) fn stage(&mut self, ui: &mut Ui, status: &Status) {
+        self.shortcuts(ui);
         let full = ui.max_rect();
         let center = pos2(full.center().x, full.top() + full.height() * 0.38);
         let radii = vec2(full.width() * 0.44, full.height() * 0.54);
@@ -53,6 +57,47 @@ impl App {
         egui::CentralPanel::default().frame(Frame::NONE).show(ui, |ui| self.stage_center(ui, status));
         if stop {
             self.stop();
+        }
+    }
+
+    /// Raccourcis du live, hors saisie de texte : Espace pour le drop, 1 à 9 pour les scènes, Échap
+    /// pour replier le dock.
+    fn shortcuts(&mut self, ui: &Ui) {
+        if ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        const DIGITS: [egui::Key; 9] = [
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+            egui::Key::Num6,
+            egui::Key::Num7,
+            egui::Key::Num8,
+            egui::Key::Num9,
+        ];
+        let (drop, scene, fold) = ui.input(|input| {
+            (
+                input.key_pressed(egui::Key::Space),
+                DIGITS.iter().position(|&key| input.key_pressed(key)),
+                input.key_pressed(egui::Key::Escape),
+            )
+        });
+        if drop && let Some(engine) = &self.engine {
+            engine.drop_now();
+        }
+        if let Some(index) = scene {
+            match self.cfg.presets.get(index).cloned() {
+                Some(preset) => {
+                    self.apply_preset(&preset);
+                    self.show(format!("Scène « {} »", preset.name));
+                }
+                None => self.show(format!("Pas de scène n° {}", index + 1)),
+            }
+        }
+        if fold {
+            self.dock_open = false;
         }
     }
 
@@ -90,7 +135,9 @@ impl App {
     fn stage_center(&self, ui: &mut Ui, status: &Status) {
         let height = ui.available_height();
         let warning = self.warning(status);
-        let others = 36.0 + 20.0 + 14.0 + 22.0 + 26.0 + 16.0 + if warning.is_some() { 52.0 } else { 0.0 };
+        let track = status.opus.as_ref().and_then(|opus| opus.now.as_ref()).filter(|now| now.data.grid.is_some());
+        let strip = if track.is_some() { STRIP_GAP + waveform::HEIGHT } else { 0.0 };
+        let others = 36.0 + 20.0 + 14.0 + 22.0 + 26.0 + 16.0 + HINT + strip + if warning.is_some() { 52.0 } else { 0.0 };
         let bpm_size = ((height - others - 24.0) / 0.95).clamp(40.0, 200.0);
         let content = others + bpm_size * 0.95;
         ui.add_space(((height - content) / 2.0).max(0.0));
@@ -144,6 +191,14 @@ impl App {
             } else {
                 "Temps de la mesure (le premier temps n'est pas encore repéré)"
             });
+
+            if let Some(now) = track {
+                ui.add_space(STRIP_GAP);
+                let width = (ui.available_width() * 0.84).min(1000.0);
+                waveform::strip(ui, now, width);
+            }
+            ui.add_space(12.0);
+            ui.label(theme::spaced("ESPACE : DROP · 1 À 9 : SCÈNES", theme::font(11.0, SEMIBOLD), theme::white(0.5), 2.0));
 
             if let Some(text) = warning {
                 ui.add_space(28.0);

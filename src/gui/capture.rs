@@ -2,12 +2,20 @@
 //! fenêtre s'ouvre à la taille `DJB_CAPTURE_SIZE` (« 1180x780 » par défaut), en mode expert si
 //! `DJB_CAPTURE_EXPERT` est défini, se photographie après quelques images, écrit un PNG et se ferme.
 //! Rien n'est enregistré dans la configuration.
+//!
+//! Avec `DJB_CAPTURE_JOURNAL` (un journal de la sonde) et `DJB_CAPTURE_AT` (secondes), elle montre
+//! à la place la bande du morceau que l'OPUS jouait à cet instant, sans lancer de live.
 
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use eframe::egui;
+
+use crate::engine::OpusNow;
+use crate::opus::Client;
 
 /// Images rendues avant la photo : le temps que la mise en page se pose.
 const SETTLE_FRAMES: u32 = 12;
@@ -20,6 +28,40 @@ pub(super) struct Capture {
     requested: bool,
     /// La photo est écrite : la fenêtre peut se fermer.
     written: Arc<AtomicBool>,
+    /// Bande du morceau rejoué depuis un journal, à montrer à la place de l'écran.
+    pub preview: Option<OpusNow>,
+}
+
+/// Rejoue un journal de la sonde jusqu'à `at` (s) : où en était la platine qui menait.
+fn replay(journal: &str, at: f64) -> Option<OpusNow> {
+    let text = std::fs::read_to_string(journal).ok()?;
+    let mut client = Client::new(Vec::new());
+    let mut out = Vec::new();
+    for line in text.lines().filter(|l| !l.starts_with('#')) {
+        let f: Vec<&str> = line.split(' ').collect();
+        let Some(t) = f.first().and_then(|t| t.parse::<f64>().ok()).filter(|&t| t <= at) else { continue };
+        if f.len() >= 5 && f[1] == "<" {
+            let from: Ipv4Addr = f[3].split(':').next()?.parse().ok()?;
+            client.on_packet(t, f[2].parse().ok()?, from, &hex::decode(f[4]).ok()?, &mut out);
+        }
+    }
+    let playing = client.playing(at)?;
+    let guide = playing.guide(at, 0.0)?;
+    let phrase = guide.phrase.as_ref();
+    Some(OpusNow {
+        deck: playing.deck,
+        track: playing.track.id,
+        data: playing.track.clone(),
+        position_ms: guide.position_ms,
+        beat: guide.beat,
+        bar_beat: guide.bar_beat,
+        phrase_beat: guide.phrase_beat,
+        phrase: phrase.map(|p| p.label.clone()),
+        next: phrase.and_then(|p| p.next.clone()),
+        beats_left: phrase.map(|p| p.end.saturating_sub(guide.beat)),
+        settled: playing.settled,
+        at: Instant::now(),
+    })
 }
 
 impl Capture {
@@ -33,7 +75,11 @@ impl Capture {
             })
             .unwrap_or([1180.0, 780.0]);
         let expert = std::env::var_os("DJB_CAPTURE_EXPERT").is_some();
-        Some(Self { path, size, expert, frames: 0, requested: false, written: Arc::new(AtomicBool::new(false)) })
+        let preview = std::env::var("DJB_CAPTURE_JOURNAL").ok().and_then(|journal| {
+            let at = std::env::var("DJB_CAPTURE_AT").ok()?.parse().ok()?;
+            replay(&journal, at)
+        });
+        Some(Self { path, size, expert, frames: 0, requested: false, written: Arc::new(AtomicBool::new(false)), preview })
     }
 
     /// À chaque image : demande la photo une fois la fenêtre posée ; une fois écrite, ferme.

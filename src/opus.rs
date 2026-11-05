@@ -47,6 +47,12 @@ const KICK_PERCENTILE: f32 = 0.8;
 /// son premier temps.
 const GROOVE_WINDOW: (i64, i64) = (-1, 2);
 const GROOVE_KICKS: usize = 2;
+/// Appels d'une montée (roll, charleston, son acid) : une double croche dont l'attaque, le pic de
+/// présence à son début (de 7 ms avant à 40 ms après) moins le creux d'avant, dépasse 0,3, avec un
+/// pic d'au moins 0,35. Un riser continu n'a pas d'attaque : il ne flashe pas.
+const CALL_PEAK_MS: (f64, f64) = (-7.0, 40.0);
+const CALL_ATTACK: f32 = 0.3;
+const CALL_PEAK: f32 = 0.35;
 /// Têtes de phrase de la lumière : tous les 16 temps depuis le début de la phrase rekordbox.
 const PHRASE_BEATS: u32 = 16;
 /// Kicks cherchés au plus 8 temps devant.
@@ -105,6 +111,11 @@ impl Point {
     fn bass(self) -> f32 {
         self.red * self.height
     }
+
+    /// Présence d'un coup, aigu (charleston, son acid) ou grave (roll de kicks).
+    fn presence(self) -> f32 {
+        self.height * (0.4 * self.green + 0.6 * self.blue).max(self.red)
+    }
 }
 
 /// Waveform détaillée en couleur d'un morceau, à vitesse normale.
@@ -143,6 +154,19 @@ impl Waveform {
         self.points.get(start..=end).map_or(0.0, |points| points.iter().map(|p| p.bass()).fold(0.0, f32::max))
     }
 
+    /// Attaque d'une double croche qui commence à `at` (ms) et dure `step` : le pic de présence à
+    /// son début moins le creux qui le précède ; 0 sous les seuils d'un appel.
+    fn attack(&self, at: f64, step: f64) -> f32 {
+        let range = |from: f64, to: f64| {
+            let (start, end) = (self.index(from), self.index(to));
+            self.points.get(start..=end).unwrap_or_default()
+        };
+        let peak = range(at + CALL_PEAK_MS.0, at + CALL_PEAK_MS.1).iter().map(|p| p.presence()).fold(0.0, f32::max);
+        let valley = range(at - step / 2.0, at + CALL_PEAK_MS.0).iter().map(|p| p.presence()).fold(peak, f32::min);
+        let attack = peak - valley;
+        if attack >= CALL_ATTACK && peak >= CALL_PEAK { attack } else { 0.0 }
+    }
+
     /// Couleur moyenne entre `from` et `to` (ms), pondérée par la hauteur et portée à son plein.
     fn color(&self, from: f64, to: f64) -> Option<[f32; 3]> {
         let (start, end) = (self.index(from), self.index(to));
@@ -167,15 +191,29 @@ pub struct Track {
     pub waveform: Option<Waveform>,
     /// Temps de la grille (rang 0 : temps 1) qui portent un kick, une fois grille et waveform reçues.
     pub kicks: Vec<bool>,
+    /// Attaque des appels de chaque double croche (0 : pas d'appel), temps par temps.
+    pub calls: Vec<[f32; 4]>,
 }
 
 impl Track {
-    /// Repère les kicks de la grille dans la waveform.
+    /// Repère les kicks et les appels de la grille dans la waveform.
     fn analyze(&mut self) {
         let (Some(grid), Some(waveform)) = (&self.grid, &self.waveform) else {
             self.kicks.clear();
+            self.calls.clear();
             return;
         };
+        self.calls = grid
+            .beats
+            .iter()
+            .enumerate()
+            .map(|(i, beat)| {
+                let start = f64::from(beat.time_ms);
+                let next = grid.beats.get(i + 1).map_or(start + 60_000.0 / beat.bpm.max(1.0), |b| f64::from(b.time_ms));
+                let step = (next - start) / 4.0;
+                std::array::from_fn(|s| waveform.attack(start + s as f64 * step, step))
+            })
+            .collect();
         let peaks: Vec<f32> = grid
             .beats
             .iter()
@@ -200,6 +238,11 @@ impl Track {
         }
         let in_grid = self.grid.as_ref().is_some_and(|grid| index < grid.beats.len());
         in_grid && !self.phrase_at(beat as u32).is_some_and(|p| p.is_down)
+    }
+
+    /// Attaque de l'appel de la double croche `step` (0 à 3) du temps `beat` ; 0 s'il n'y en a pas.
+    pub fn call(&self, beat: u32, step: u8) -> f32 {
+        usize::try_from(beat).ok().and_then(|b| b.checked_sub(1)).and_then(|i| self.calls.get(i)).map_or(0.0, |c| c[usize::from(step.min(3))])
     }
 
     /// Le groove tient autour du temps `beat`.
@@ -376,6 +419,10 @@ pub struct Guide {
     pub color: Option<[f32; 3]>,
     /// Prochain kick à partir de `now` : son numéro, son instant et sa place.
     pub next_kick: Option<(u32, f64, Accent)>,
+    /// Pendant une montée, prochain appel (hors kick) : temps, double croche, instant et attaque.
+    pub next_call: Option<(u32, u8, f64, f32)>,
+    /// Position dans le morceau, à vitesse normale (ms).
+    pub position_ms: f64,
 }
 
 impl Playing {
@@ -437,6 +484,18 @@ impl Playing {
         let next_kick = (first..first + KICK_LOOKAHEAD)
             .find(|&k| self.track.kick(i64::from(k)))
             .map(|k| (k, origin + (elapsed + f64::from(k - beat)) * period, accent(k)));
+        // Pendant une montée, la prochaine double croche à venir qui porte un appel (celle d'un kick
+        // est déjà flashée par lui).
+        let next_call = (phase == Phase::BuildUp)
+            .then(|| {
+                (beat..beat + 2)
+                    .flat_map(|k| (0..4u8).map(move |s| (k, s)))
+                    .map(|(k, s)| (k, s, beat_time + (f64::from(k - beat) + f64::from(s) / 4.0) * period))
+                    .filter(|&(_, _, at)| at > now)
+                    .find(|&(k, s, _)| self.track.call(k, s) > 0.0 && !(s == 0 && self.track.kick(i64::from(k))))
+                    .map(|(k, s, at)| (k, s, at, self.track.call(k, s)))
+            })
+            .flatten();
         Some(Guide {
             period,
             beat,
@@ -450,6 +509,8 @@ impl Playing {
             levels,
             color,
             next_kick,
+            next_call,
+            position_ms: ms,
         })
     }
 }
@@ -683,7 +744,21 @@ mod tests {
                 *p = Point { red: 1.0, green: 0.3, blue: 0.1, height: 1.0 };
             }
         }
-        let mut track = Track { id: 1, grid: Some(BeatGrid { beats }), song: Some(song), waveform: Some(Waveform { per_second, points }), kicks: Vec::new() };
+        // Montée (65 à 96) : un charleston bref sur la troisième double croche de chaque temps.
+        for beat in 65..=96 {
+            let at = (((beat - 1) as f64 + 0.5) * 0.4 * per_second) as usize;
+            for p in &mut points[at..at + 3] {
+                *p = Point { red: 0.0, green: 0.6, blue: 1.0, height: 0.8 };
+            }
+        }
+        let mut track = Track {
+            id: 1,
+            grid: Some(BeatGrid { beats }),
+            song: Some(song),
+            waveform: Some(Waveform { per_second, points }),
+            kicks: Vec::new(),
+            calls: Vec::new(),
+        };
         track.analyze();
         track
     }
@@ -744,6 +819,22 @@ mod tests {
         let (beat, at, _) = shifted.next_kick.unwrap();
         assert_eq!(beat, 5);
         assert!((at - (10.0 + 4.0 * 0.4 - 0.02)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_build_up_calls_on_its_hats_but_not_on_a_steady_pad() {
+        let track = track();
+        assert!(track.call(70, 2) > 0.3, "le charleston de la montée");
+        assert_eq!(track.call(70, 1), 0.0);
+        assert_eq!(track.call(40, 2), 0.0, "la nappe continue du break n'a pas d'attaque");
+        let playing = playing(track);
+        let build = playing.guide(10.0 + 69.0 * 0.4 + 0.05, 0.0).unwrap();
+        assert_eq!(build.phase, Phase::BuildUp);
+        let (beat, step, at, strength) = build.next_call.unwrap();
+        assert_eq!((beat, step), (70, 2));
+        assert!((at - (10.0 + 69.5 * 0.4)).abs() < 1e-9);
+        assert!(strength > 0.3);
+        assert_eq!(playing.guide(10.0 + 39.0 * 0.4 + 0.05, 0.0).unwrap().next_call, None, "pas d'appel hors montée");
     }
 
     #[test]
@@ -835,6 +926,52 @@ mod tests {
                     })
                     .collect();
                 println!("platine {deck}, en-tête {header} : {}", profile.join(" "));
+            }
+        }
+    }
+
+    /// Pour chaque morceau d'un journal (`DJB_OPUS_JOURNAL`), la présence (médiums et aigus) de la
+    /// waveform double croche par double croche dans les phrases Up, et son attaque.
+    #[test]
+    #[ignore]
+    fn build_presence() {
+        let path = std::env::var("DJB_OPUS_JOURNAL").expect("DJB_OPUS_JOURNAL");
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut client = Client::new(Vec::new());
+        let mut out = Vec::new();
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let f: Vec<&str> = line.split(' ').collect();
+            if f.len() >= 5 && f[1] == "<" {
+                let from: Ipv4Addr = f[3].split(':').next().unwrap().parse().unwrap();
+                client.on_packet(f[0].parse().unwrap(), f[2].parse().unwrap(), from, &hex::decode(f[4]).unwrap(), &mut out);
+            }
+        }
+        for track in client.tracks.values() {
+            let (Some(grid), Some(waveform), Some(song)) = (&track.grid, &track.waveform, &track.song) else { continue };
+            println!("morceau {}", track.id);
+            for (index, phrase) in song.phrases.iter().enumerate() {
+                let end = song.phrases.get(index + 1).map_or(u32::from(song.end_beat), |p| u32::from(p.beat));
+                println!("  {} {}–{}", song.label(phrase.kind), phrase.beat, end - 1);
+                if song.label(phrase.kind) != "Up" {
+                    continue;
+                }
+                // Une mesure par ligne : K kick, x appel, · rien, double croche par double croche.
+                let _ = (grid, waveform);
+                for bar in (u32::from(phrase.beat)..end).step_by(4) {
+                    let cells: String = (bar..(bar + 4).min(end))
+                        .map(|beat| {
+                            (0..4u8)
+                                .map(|s| match (s == 0 && track.kick(i64::from(beat)), track.call(beat, s) > 0.0) {
+                                    (true, _) => 'K',
+                                    (false, true) => 'x',
+                                    _ => '·',
+                                })
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    println!("    {bar:4} {cells}");
+                }
             }
         }
     }

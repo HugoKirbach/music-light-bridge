@@ -11,6 +11,7 @@ mod presets;
 mod setup;
 mod stage;
 mod theme;
+mod waveform;
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -489,6 +490,18 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let Some(capture) = &mut self.capture {
             capture.frame(ui.ctx());
+            // Aperçu de la bande d'un morceau rejoué : rien d'autre à l'écran.
+            if let Some(now) = capture.preview.clone() {
+                let frame = egui::Frame::new().fill(theme::STAGE_BG).inner_margin(egui::Margin::same(40));
+                egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(60.0);
+                        let width = (ui.available_width() * 0.84).min(1000.0);
+                        waveform::strip(ui, &now, width);
+                    });
+                });
+                return;
+            }
         }
         // Le moteur s'arrête seul si le bridge ne répond plus.
         if self.engine.as_ref().is_some_and(|engine| !engine.is_running()) {

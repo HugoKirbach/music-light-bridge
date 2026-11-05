@@ -33,6 +33,11 @@ const GLOW: f32 = 0.25;
 const WHITE_PUNCH: f32 = 0.5;
 /// En tête de phrase, toutes les lampes flashent, avec plus de blanc.
 const PHRASE_PUNCH: f32 = 0.85;
+/// Appel d'une montée : un flash sans blanc, de 20 % plus 60 % de son attaque, au plus 70 %
+/// (un kick monte à 100 %, le drop à 100 % et tout blanc).
+const CALL_BASE: f32 = 0.2;
+const CALL_GAIN: f32 = 0.6;
+const CALL_MAX: f32 = 0.7;
 /// Intensité d'un flash de note : de 35 % (vélocité minimale) à 100 %.
 const NOTE_MIN_STRENGTH: f32 = 0.35;
 /// Sans kick depuis 1,5 s, la musique est dans un temps creux.
@@ -537,6 +542,16 @@ impl ReactiveLook {
                 Spread::Split if !at.odd => lamp.fire(1.0, WHITE_PUNCH),
                 _ => {}
             }
+        }
+    }
+
+    /// Appel d'une montée (roll, charleston, son acid), d'attaque `attack` (0 à 1) : un flash plus
+    /// léger qu'un kick, sans blanc, sur toutes les lampes. La montée le dose encore : faible au
+    /// début, il gagne en force jusqu'au drop.
+    pub fn call(&mut self, attack: f32) {
+        let strength = (CALL_BASE + CALL_GAIN * attack).min(CALL_MAX);
+        for lamp in &mut self.lamps {
+            lamp.fire(strength, 0.0);
         }
     }
 

@@ -53,6 +53,8 @@ pub(super) fn light_loop(
     // morceau, temps).
     let mut guided = false;
     let mut opus_flashed: Option<(u8, u32, u32)> = None;
+    // Dernier appel de montée flashé : platine, morceau, temps, double croche.
+    let mut opus_called: Option<(u8, u32, u32, u8)> = None;
     while !shared.stopped() {
         let changes = shared.lamps_changed.load(Ordering::Acquire);
         if lamps_seen != Some(changes) {
@@ -74,11 +76,13 @@ pub(super) fn light_loop(
             .clamp(CONFIRM_RANGE.0, CONFIRM_RANGE.1);
         let rhythm = shared.tracker().rhythm();
         let before = features.seconds(Instant::now());
-        // Réveil au prochain flash : anticipé par le planificateur, ou kick prévu par l'OPUS.
-        let opus_flash = shared
-            .opus_guide(before)
-            .and_then(|(_, guide)| guide.next_kick)
-            .map(|(_, at, _)| at - total_advance.as_secs_f64());
+        // Réveil au prochain flash : anticipé par le planificateur, ou kick (ou appel de montée)
+        // prévu par l'OPUS.
+        let opus_flash = shared.opus_guide(before).and_then(|(_, guide)| {
+            let kick = guide.next_kick.map(|(_, at, _)| at);
+            let call = guide.next_call.map(|(_, _, at, _)| at);
+            kick.into_iter().chain(call).reduce(f64::min).map(|at| at - total_advance.as_secs_f64())
+        });
         let event = match (planner.next_event(rhythm.as_ref(), before), opus_flash) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -133,6 +137,9 @@ pub(super) fn light_loop(
                 let (action, accent) = opus_action(playing, guide, features.seconds(now), total_advance.as_secs_f64(), &mut opus_flashed);
                 if let Some(accent) = accent {
                     look.kick_at(accent);
+                }
+                if let Some(attack) = opus_call(playing, guide, features.seconds(now), total_advance.as_secs_f64(), &mut opus_called) {
+                    look.call(attack);
                 }
                 // Les mouvements lents se calent sur la phrase rekordbox : un multiple de 16 en tête.
                 let start = guide.phrase.as_ref().map_or(1, |p| p.start);
@@ -303,12 +310,32 @@ fn opus_action(
     (Action::Flash { reactive: false }, Some(accent))
 }
 
+/// Appel de montée prévu par l'OPUS (roll, charleston, son acid) dont l'heure moins l'avance des
+/// lampes est venue : son attaque, une seule fois par double croche, phase calée.
+fn opus_call(
+    playing: &Playing,
+    guide: &opus::Guide,
+    now: f64,
+    advance: f64,
+    called: &mut Option<(u8, u32, u32, u8)>,
+) -> Option<f32> {
+    let (beat, step, at, attack) = guide.next_call?;
+    let key = (playing.deck, playing.track.id, beat, step);
+    if !playing.settled || *called == Some(key) || now < at - advance || now > at + OPUS_LATE {
+        return None;
+    }
+    *called = Some(key);
+    Some(attack)
+}
+
 /// Publie, pour l'affichage, où en est la platine qui mène.
 fn publish_opus(shared: &Shared, playing: &Playing, guide: &opus::Guide, now: Instant) {
     let phrase = guide.phrase.as_ref();
     *lock(&shared.opus_now) = Some(OpusNow {
         deck: playing.deck,
         track: playing.track.id,
+        data: playing.track.clone(),
+        position_ms: guide.position_ms,
         beat: guide.beat,
         bar_beat: guide.bar_beat,
         phrase_beat: guide.phrase_beat,
