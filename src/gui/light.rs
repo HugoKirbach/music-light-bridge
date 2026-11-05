@@ -54,10 +54,28 @@ impl App {
         ui.spacing_mut().item_spacing.y = 8.0;
         match page {
             Page::Motion => self.motion_page(ui, width, skin, status),
+            // Mode simple : les couleurs et l'intensité des flashs, rien d'autre.
+            Page::Colors if !self.settings.expert => {
+                self.palette_block(ui, width, skin);
+                ui.add_space(6.0);
+                knobs(ui, width, &[Knob::Intensity], |ui, knob| self.knob(ui, knob, skin.label));
+            }
             Page::Colors => self.colors_page(ui, width, skin),
             Page::Flashes => self.flashes_page(ui, width, skin),
             Page::Presets => self.presets_panel(ui, width, if skin.subtitles { 5 } else { 2 }, skin.card, skin.label),
         }
+    }
+
+    /// Mode simple, avant le lancement : les scènes, les trois couleurs et l'intensité des flashs.
+    pub(super) fn simple_light(&mut self, ui: &mut Ui, width: f32, skin: &Skin) {
+        ui.spacing_mut().item_spacing.y = 8.0;
+        theme::section(ui, "SCÈNES");
+        self.presets_panel(ui, width, 2, skin.card, skin.label);
+        ui.add_space(6.0);
+        self.palette_block(ui, width, skin);
+        ui.add_space(6.0);
+        theme::section(ui, "FLASHS");
+        knobs(ui, width, &[Knob::Intensity], |ui, knob| self.knob(ui, knob, skin.label));
     }
 
     fn motion_page(&mut self, ui: &mut Ui, width: f32, skin: &Skin, status: Option<&Status>) {
@@ -110,6 +128,24 @@ impl App {
     }
 
     fn colors_page(&mut self, ui: &mut Ui, width: f32, skin: &Skin) {
+        self.palette_block(ui, width, skin);
+        ui.add_space(6.0);
+        theme::section(ui, "ROTATION DES COULEURS");
+        if !skin.subtitles {
+            // Colonne étroite : un sélecteur à segments, où « 16 mesures » tient sur une ligne.
+            let current = Rotation::ALL.iter().position(|&r| r == self.settings.rotation).unwrap_or(0);
+            if let Some(i) = theme::segmented(ui, width, &Rotation::ALL.map(rotation_text), current) {
+                self.set_rotation(Rotation::ALL[i]);
+            }
+        } else {
+            self.rotation_cards(ui, width.min(560.0), skin);
+        }
+        ui.add_space(6.0);
+        knobs(ui, width, &[Knob::Gradient], |ui, knob| self.knob(ui, knob, skin.label));
+    }
+
+    /// Les trois couleurs et leur nuancier, et, avec l'OPUS, les couleurs de la trame.
+    fn palette_block(&mut self, ui: &mut Ui, width: f32, skin: &Skin) {
         let wide = width > 700.0;
         let swatch = if wide { vec2(120.0, 64.0) } else { vec2((width - 16.0) / 3.0, 64.0) };
         ui.horizontal_top(|ui| {
@@ -132,19 +168,6 @@ impl App {
                 self.set_trame(!self.settings.trame);
             }
         }
-        ui.add_space(6.0);
-        theme::section(ui, "ROTATION DES COULEURS");
-        if !skin.subtitles {
-            // Colonne étroite : un sélecteur à segments, où « 16 mesures » tient sur une ligne.
-            let current = Rotation::ALL.iter().position(|&r| r == self.settings.rotation).unwrap_or(0);
-            if let Some(i) = theme::segmented(ui, width, &Rotation::ALL.map(rotation_text), current) {
-                self.set_rotation(Rotation::ALL[i]);
-            }
-        } else {
-            self.rotation_cards(ui, width.min(560.0), skin);
-        }
-        ui.add_space(6.0);
-        knobs(ui, width, &[Knob::Gradient], |ui, knob| self.knob(ui, knob, skin.label));
     }
 
     fn rotation_cards(&mut self, ui: &mut Ui, width: f32, skin: &Skin) {

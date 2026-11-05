@@ -12,7 +12,10 @@ use crate::engine::{MAX_LAMP_DELAY_MS, OPUS_OFFSET_RANGE, OpusStatus, Status};
 use crate::tempo::TempoSource;
 
 const DOCK_WIDTH: f32 = 1040.0;
-const TABS: [(Tab, &str); 7] = [
+/// Onglets du mode simple : de quoi changer d'ambiance et de lampes en plein morceau.
+pub(super) const SIMPLE_TABS: [(Tab, &str); 3] =
+    [(Tab::Light(Page::Presets), "Scènes"), (Tab::Light(Page::Colors), "Couleurs"), (Tab::Lamps, "Lampes")];
+const EXPERT_TABS: [(Tab, &str); 7] = [
     (Tab::Light(Page::Motion), "Mouvement"),
     (Tab::Light(Page::Colors), "Couleurs"),
     (Tab::Light(Page::Flashes), "Flashs"),
@@ -25,6 +28,8 @@ const TABS: [(Tab, &str); 7] = [
 const ASIO_HINT: &str = "Ableton en ASIO joue directement sur la carte, sans passer par Windows. Une carte avec \
      entrée Loopback (Scarlett 4e génération…) est écoutée d'office ; sinon, choisis MME/DirectX dans Ableton, ou \
      Ableton Link avec les flashs « Chaque temps ».";
+/// Bascule du mode expert, à droite des onglets.
+const MODE_CHIP: &str = "Expert";
 const SOFT: Color32 = Color32::from_rgb(0xD9, 0xDC, 0xE1);
 const DIM: Color32 = Color32::from_rgb(0xB4, 0xB9, 0xC1);
 
@@ -176,16 +181,18 @@ impl App {
         self.engine.as_ref().is_some_and(|engine| engine.info.backend == WINDOWS_LOOPBACK)
     }
 
-    /// Dock des réglages modifiables pendant le live, en onglets.
+    /// Dock des réglages modifiables pendant le live, en onglets (moins nombreux en mode simple).
     fn dock(&mut self, ui: &mut Ui, status: &Status) {
+        let tabs: &[(Tab, &str)] = if self.settings.expert { &EXPERT_TABS } else { &SIMPLE_TABS };
         let available = ui.available_width();
         // Replié, le dock se resserre autour de ses onglets.
         let width = if self.dock_open {
             available.min(DOCK_WIDTH)
         } else {
-            let tabs: f32 = TABS.iter().map(|(_, label)| tab_width(ui, label) + 4.0).sum();
-            (tabs + 12.0).min(available)
+            let tabs: f32 = tabs.iter().map(|(_, label)| tab_width(ui, label) + 4.0).sum();
+            (tabs + tab_width(ui, MODE_CHIP) + 16.0).min(available)
         };
+        let mut expert = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(((available - width) / 2.0).floor());
@@ -201,20 +208,28 @@ impl App {
                     Frame::new().inner_margin(Margin { left: 8, right: 8, top: 8, bottom }).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
-                            for (tab, label) in TABS {
+                            for &(tab, label) in tabs {
                                 let selected = self.dock_open && self.tab == tab;
                                 if tab_button(ui, label, selected, self.dock_open) {
                                     (self.tab, self.dock_open) = (tab, !selected);
                                 }
                             }
-                            if self.dock_open {
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if self.dock_open {
                                     let hide = ui.add(egui::Label::new(theme::text("Replier", theme::regular(13.0), DIM)).sense(Sense::click()));
                                     if hide.on_hover_text("Replier le dock : la scène reste dégagée").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                         self.dock_open = false;
                                     }
-                                });
-                            }
+                                }
+                                let hint = if self.settings.expert {
+                                    "Mode expert : tous les réglages. Clic : revenir à l'essentiel"
+                                } else {
+                                    "Mode simple : l'essentiel. Clic : tous les réglages"
+                                };
+                                if theme::chip(ui, MODE_CHIP, self.settings.expert).on_hover_text(hint).clicked() {
+                                    expert = Some(!self.settings.expert);
+                                }
+                            });
                         });
                     });
                     if !self.dock_open {
@@ -233,6 +248,9 @@ impl App {
                     });
                 }));
         });
+        if let Some(on) = expert {
+            self.set_expert(on);
+        }
     }
 
     fn tempo_tab(&mut self, ui: &mut Ui, status: &Status) {
@@ -310,10 +328,48 @@ impl App {
         self.engine = Some(engine);
     }
 
-    /// Synchro des lampes : le test fait flasher toutes les lampes en blanc sur chaque temps, et
-    /// chaque lampe en retard sur les autres reçoit le sien.
+    /// Lampes du live : chacune s'allume ou retrouve son état d'avant d'un clic, sans arrêter le
+    /// live. En mode expert, la synchro : le test fait flasher toutes les lampes en blanc sur chaque
+    /// temps, et chaque lampe en retard sur les autres reçoit le sien.
     fn lamps_tab(&mut self, ui: &mut Ui, width: f32) {
         let Some(engine) = self.engine.take() else { return };
+        let lamps = engine.lamps();
+        let mut toggled = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            for lamp in &lamps {
+                let chip = theme::chip(ui, &lamp.name, lamp.enabled)
+                    .on_hover_text(if lamp.enabled { "Allumée par le live : clic pour lui rendre son état d'avant" } else { "Clic pour l'allumer dans le live" });
+                if chip.clicked() {
+                    toggled = Some((lamp.id.clone(), !lamp.enabled));
+                }
+            }
+        });
+        ui.label(theme::text(
+            "Une lampe décochée retrouve son état d'avant le live ; le choix est gardé pour les prochaines fois.",
+            theme::regular(12.0),
+            DIM,
+        ));
+        match toggled {
+            Some((_, false)) if lamps.iter().filter(|lamp| lamp.enabled).count() == 1 => {
+                self.show("Garde au moins une lampe pour le live.");
+            }
+            Some((id, on)) => {
+                engine.set_lamp_enabled(&id, on);
+                let excluded = &mut self.cfg.layout_mut().excluded;
+                excluded.retain(|lamp| *lamp != id);
+                if !on {
+                    excluded.push(id);
+                }
+                self.save_config();
+            }
+            None => {}
+        }
+        if !self.settings.expert {
+            self.engine = Some(engine);
+            return;
+        }
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             let testing = engine.sync_test();
             if theme::chip(ui, "Test de synchro", testing)
@@ -328,20 +384,19 @@ impl App {
                 DIM,
             ));
         });
-        let lamps = engine.lamps();
         let shown = lamps.len().clamp(1, if width < 700.0 { 2 } else { 3 });
         ui.columns(shown, |columns| {
-            for (i, (id, name, lag)) in lamps.iter().enumerate() {
+            for (i, lamp) in lamps.iter().enumerate() {
                 let ui = &mut columns[i % shown];
-                let mut ms = *lag;
+                let mut ms = lamp.lag_ms;
                 let shown_ms = format!("{ms:.0} ms");
                 let slider = egui::Slider::new(&mut ms, 0.0..=MAX_LAMP_DELAY_MS).step_by(5.0);
-                if theme::slider_row(ui, name, shown_ms, slider, DIM) {
-                    engine.set_lamp_delay(id, ms);
+                if theme::slider_row(ui, &lamp.name, shown_ms, slider, DIM) {
+                    engine.set_lamp_delay(&lamp.id, ms);
                     if ms > 0.0 {
-                        self.cfg.lamp_delays_ms.insert(id.clone(), ms);
+                        self.cfg.lamp_delays_ms.insert(lamp.id.clone(), ms);
                     } else {
-                        self.cfg.lamp_delays_ms.remove(id);
+                        self.cfg.lamp_delays_ms.remove(&lamp.id);
                     }
                 }
             }

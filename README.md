@@ -136,6 +136,14 @@ Les identifiants du bridge et tous les réglages sont enregistrés dans
 `dj-bridge gui` ouvre l'écran **Préparer la session**. L'en-tête indique si le bridge répond, la
 zone pilotée et le nombre de lampes.
 
+**Simple ou Expert** (en haut, et dans le dock du live) : le mode simple ne garde que l'essentiel
+(source, lampes, tempo, lancement, scènes, couleurs, intensité des flashs ; pendant le live, les
+onglets Scènes, Couleurs et Lampes). Le mode expert donne accès à tout ce qui suit. Quand la
+fenêtre est étroite, la lumière passe sous la session, sur une seule colonne.
+
+**Lampes pendant le live** (onglet Lampes du dock) : un clic sur une lampe l'ajoute au live ou la
+rend à son état d'avant, sans arrêter le live. Le choix est gardé pour les sessions suivantes.
+
 **Au centre, l'essentiel :**
 
 1. **Source audio.**

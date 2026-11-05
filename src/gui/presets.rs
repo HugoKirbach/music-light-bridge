@@ -138,17 +138,21 @@ impl App {
                 if !narrow {
                     name_field(ui, 260.0);
                 }
-                ui.add(field(&mut self.preset_note, NOTE_WIDTH, "Note MIDI"));
+                // La note MIDI qui rappelle une scène : un réglage d'expert.
+                if self.settings.expert {
+                    ui.add(field(&mut self.preset_note, NOTE_WIDTH, "Note MIDI"));
+                }
                 theme::small_button(ui, Icon::Record, "Enregistrer la scène").clicked()
             })
             .inner;
         if saved || entered {
             self.save_preset();
         }
-        let hint = if self.cfg.presets.is_empty() {
-            "Règle couleurs, flashs et animation, puis enregistre-les comme scène. Une note MIDI peut la rappeler."
-        } else {
-            "Même nom : la scène est remplacée. Une note MIDI liée rappelle la scène au lieu de flasher."
+        let hint = match (self.cfg.presets.is_empty(), self.settings.expert) {
+            (true, true) => "Règle couleurs, flashs et animation, puis enregistre-les comme scène. Une note MIDI peut la rappeler.",
+            (true, false) => "Règle couleurs et flashs, puis enregistre-les comme scène pour les rappeler d'un clic.",
+            (false, true) => "Même nom : la scène est remplacée. Une note MIDI liée rappelle la scène au lieu de flasher.",
+            (false, false) => "Clic : rappeler · clic droit : supprimer. Même nom : la scène est remplacée.",
         };
         ui.label(theme::text(hint, theme::regular(12.0), label));
     }

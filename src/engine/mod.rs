@@ -195,6 +195,17 @@ pub struct Status {
     pub opus: Option<OpusStatus>,
 }
 
+/// Une lampe de la zone, pendant le live.
+#[derive(Debug, Clone)]
+pub struct LampInfo {
+    pub id: String,
+    pub name: String,
+    /// Retard propre (ms) : ses flashs partent d'autant plus tôt que ceux des autres.
+    pub lag_ms: f32,
+    /// Le live l'allume ; sinon elle garde (ou retrouve) son état d'avant le live.
+    pub enabled: bool,
+}
+
 /// État de la liaison OPUS, pour l'affichage.
 #[derive(Debug, Clone)]
 pub struct OpusStatus {
@@ -256,6 +267,9 @@ struct Shared {
     lamp_colors: Vec<AtomicU32>,
     /// Retard propre de chaque canal (ms, bits de `f32`), et test de synchro des lampes.
     lamp_lags: Vec<AtomicU32>,
+    /// Canaux allumés par le live (les autres montrent l'état d'avant), et compte des changements.
+    lamp_enabled: Vec<AtomicBool>,
+    lamps_changed: AtomicU32,
     sync_test: AtomicBool,
     /// Publiés par la boucle d'éclairage.
     phase: AtomicU8,
@@ -414,10 +428,17 @@ impl Engine {
         let area = rt.block_on(api::select_area(bridge, cfg.area_id.as_deref()))?;
         // Sans la liste des lampes (bridge ancien), toute la zone est pilotée.
         let lamps = rt.block_on(api::area_lamps(bridge, &area)).unwrap_or_default();
-        let channels = api::piloted_channels(&area, &lamps, cfg.excluded());
-        if channels.is_empty() {
+        let piloted_channels = api::piloted_channels(&area, &lamps, cfg.excluded());
+        if piloted_channels.is_empty() {
             bail!("aucune lampe à piloter : coche au moins une lampe de la zone");
         }
+        // Tous les canaux de la zone : ceux d'une lampe décochée restent hors du flux tant qu'on ne
+        // l'active pas pendant le live.
+        let channels: Vec<u8> = area.channels.iter().map(|c| c.channel_id).collect();
+        let owners: Vec<Option<String>> = channels
+            .iter()
+            .map(|id| lamps.iter().find(|lamp| lamp.channels.contains(id)).map(|lamp| lamp.id.clone()))
+            .collect();
         // Place de chaque canal dans la pièce : celle de sa lampe dans la disposition active, sinon
         // sa place de gauche à droite dans la zone Hue.
         let space = Space::of_room(
@@ -433,10 +454,9 @@ impl Engine {
             }),
         );
         let movements = space.possible();
-        // Lampes pilotées et leurs canaux (rangs dans `channels`), et retard de chaque canal.
+        // Lampes de la zone et leurs canaux (rangs dans `channels`), et retard de chaque canal.
         let lamp_map: Vec<(String, String, Vec<usize>)> = lamps
             .iter()
-            .filter(|lamp| !cfg.excluded().contains(&lamp.id))
             .map(|lamp| {
                 let ranks = channels.iter().enumerate().filter(|(_, id)| lamp.channels.contains(id)).map(|(i, _)| i).collect();
                 (lamp.id.clone(), lamp.name.clone(), ranks)
@@ -499,6 +519,8 @@ impl Engine {
             rotation: AtomicU8::new(options.rotation.index()),
             lamp_colors: channels.iter().map(|_| AtomicU32::new(0)).collect(),
             lamp_lags: channel_lags.iter().map(|lag| AtomicU32::new(lag.to_bits())).collect(),
+            lamp_enabled: channels.iter().map(|id| AtomicBool::new(piloted_channels.contains(id))).collect(),
+            lamps_changed: AtomicU32::new(0),
             sync_test: AtomicBool::new(false),
             phase: AtomicU8::new(Phase::default().index()),
             build: AtomicU8::new(NO_BUILD),
@@ -538,8 +560,9 @@ impl Engine {
         let light = {
             let (rt, features, notes, shared) = (rt.clone(), features.clone(), notes.clone(), shared.clone());
             let mut stream = stream;
+            let rig = loops::Rig { channels, owners, space };
             thread::Builder::new().name("lumière".into()).spawn(move || {
-                let result = light_loop(&rt, &mut stream, (&channels, &space), &features, &notes, &shared, advance);
+                let result = light_loop(&rt, &mut stream, &rig, &features, &notes, &shared, advance);
                 shared.stop.store(true, Ordering::Relaxed);
                 (stream, result)
             })?
@@ -732,15 +755,30 @@ impl Engine {
         }))
     }
 
-    /// Lampes pilotées : identifiant, nom et retard propre (ms).
-    pub fn lamps(&self) -> Vec<(String, String, f32)> {
+    /// Lampes de la zone : identifiant, nom, retard propre (ms), et si le live les allume.
+    pub fn lamps(&self) -> Vec<LampInfo> {
         self.lamp_map
             .iter()
             .map(|(id, name, ranks)| {
-                let lag = ranks.first().map_or(0.0, |&rank| f32::from_bits(self.shared.lamp_lags[rank].load(Ordering::Relaxed)));
-                (id.clone(), name.clone(), lag)
+                let first = ranks.first().copied();
+                LampInfo {
+                    id: id.clone(),
+                    name: name.clone(),
+                    lag_ms: first.map_or(0.0, |rank| f32::from_bits(self.shared.lamp_lags[rank].load(Ordering::Relaxed))),
+                    enabled: first.is_some_and(|rank| self.shared.lamp_enabled[rank].load(Ordering::Relaxed)),
+                }
             })
             .collect()
+    }
+
+    /// Allume une lampe dans le live, ou la rend à son état d'avant le live, sans l'arrêter.
+    pub fn set_lamp_enabled(&self, id: &str, on: bool) {
+        for (_, _, ranks) in self.lamp_map.iter().filter(|(lamp, _, _)| lamp == id) {
+            for &rank in ranks {
+                self.shared.lamp_enabled[rank].store(on, Ordering::Relaxed);
+            }
+        }
+        self.shared.lamps_changed.fetch_add(1, Ordering::Release);
     }
 
     /// Retard propre d'une lampe : ses flashs partent d'autant plus tôt que les autres.

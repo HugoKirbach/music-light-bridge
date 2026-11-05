@@ -3,6 +3,7 @@
 //! trois pages ; pendant le live, une scène plein écran qui prend la couleur de la lampe, le
 //! tempo en très grand, et un dock replié en bas qui rouvre ces mêmes pages.
 
+mod capture;
 mod light;
 mod plan;
 mod presets;
@@ -37,14 +38,19 @@ const MESSAGE_DURATION: Duration = Duration::from_secs(8);
 const MODES: [FlashMode; 3] = [FlashMode::Kicks, FlashMode::Reactive, FlashMode::EveryBeat];
 
 pub fn run(rt: Arc<Runtime>, cfg: Config) -> Result<()> {
+    let capture = capture::Capture::from_env();
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("DJ-Bridge")
-            .with_inner_size([1180.0, 780.0])
+            .with_inner_size(capture.as_ref().map_or([1180.0, 780.0], |c| c.size))
             .with_min_inner_size([940.0, 640.0]),
         ..Default::default()
     };
-    let app = App::new(rt, cfg);
+    let mut app = App::new(rt, cfg);
+    if let Some(capture) = capture {
+        app.settings.expert = capture.expert;
+        app.capture = Some(capture);
+    }
     eframe::run_native(
         "DJ-Bridge",
         native,
@@ -132,6 +138,10 @@ struct App {
     show_room: bool,
     selected_lamp: Option<String>,
     renaming: Option<(plan::Renaming, String)>,
+    /// Capture d'écran de développement en cours : rien n'est enregistré.
+    capture: Option<capture::Capture>,
+    /// L'écran de préparation tient sur deux colonnes (sinon la lumière passe dessous).
+    two_columns: bool,
 }
 
 impl App {
@@ -179,6 +189,8 @@ impl App {
             show_room: false,
             selected_lamp: None,
             renaming: None,
+            capture: None,
+            two_columns: true,
         };
         app.refresh_devices();
         app
@@ -226,6 +238,9 @@ impl App {
     }
 
     fn save_config(&mut self) {
+        if self.capture.is_some() {
+            return;
+        }
         self.cfg.live = self.settings.clone();
         self.cfg.palette = self.palette;
         self.cfg.dynamics = self.dynamics;
@@ -360,6 +375,16 @@ impl App {
         }
     }
 
+    /// Mode expert : tous les réglages ; sinon l'essentiel. Le dock du live revient sur un onglet
+    /// du mode simple s'il était sur un autre.
+    fn set_expert(&mut self, on: bool) {
+        self.settings.expert = on;
+        if !on && !stage::SIMPLE_TABS.iter().any(|(tab, _)| *tab == self.tab) {
+            self.tab = Tab::Light(light::Page::Presets);
+        }
+        self.save_config();
+    }
+
     /// La lumière suivra l'OPUS : source « OPUS-QUAD en Wi-Fi », ou tempo « OPUS-QUAD ».
     fn follows_opus(&self) -> bool {
         self.settings.opus_only || self.tempo == TempoChoice::Opus
@@ -460,6 +485,9 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if let Some(capture) = &mut self.capture {
+            capture.frame(ui.ctx());
+        }
         // Le moteur s'arrête seul si le bridge ne répond plus.
         if self.engine.as_ref().is_some_and(|engine| !engine.is_running()) {
             self.stop();

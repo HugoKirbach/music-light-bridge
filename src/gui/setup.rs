@@ -13,6 +13,9 @@ use crate::audio::{self, Backend};
 use crate::tempo::DEFAULT_BPM_RANGE;
 
 const ASIDE_WIDTH: f32 = 360.0;
+/// En dessous de cette largeur de fenêtre, la lumière passe sous la session, en une colonne.
+const TWO_COLUMNS: f32 = 1120.0;
+const WINDOW_MODES: [&str; 2] = ["Simple", "Expert"];
 const DRIVERS: [(Backend, &str); 3] =
     [(Backend::Auto, "Auto (ASIO si libre)"), (Backend::Asio, "ASIO"), (Backend::Wasapi, "WASAPI")];
 const OPTION_GAP: f32 = 12.0;
@@ -25,30 +28,42 @@ const TEMPOS: [(TempoChoice, &str); 4] = [
 
 impl App {
     pub(super) fn setup(&mut self, ui: &mut Ui) {
+        let two_columns = ui.max_rect().width() >= TWO_COLUMNS;
+        self.two_columns = two_columns;
         egui::Panel::top("en-tête")
             .exact_size(60.0)
             .frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(24, 0)))
             .show(ui, |ui| self.header(ui));
-        egui::Panel::right("allure")
-            .exact_size(ASIDE_WIDTH)
-            .resizable(false)
-            .frame(Frame::new().fill(PANEL).inner_margin(Margin::same(24)))
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.aside(ui));
-            });
-        egui::CentralPanel::default().frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(40, 24))).show(
-            ui,
-            |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.set_max_width(780.0);
-                    self.session(ui);
+        if two_columns {
+            egui::Panel::right("allure")
+                .exact_size(ASIDE_WIDTH)
+                .resizable(false)
+                .frame(Frame::new().fill(PANEL).inner_margin(Margin::same(24)))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.aside(ui));
                 });
-            },
-        );
+        }
+        let margin = if two_columns { Margin::symmetric(40, 24) } else { Margin::symmetric(24, 20) };
+        egui::CentralPanel::default().frame(Frame::new().fill(BG).inner_margin(margin)).show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.set_max_width(780.0);
+                self.session(ui);
+                if !two_columns {
+                    // Fenêtre étroite : la lumière sous la session, sur la même colonne.
+                    ui.add_space(20.0);
+                    Frame::new().fill(PANEL).corner_radius(14).inner_margin(Margin::same(20)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        self.aside(ui);
+                    });
+                }
+            });
+        });
     }
 
     fn header(&mut self, ui: &mut Ui) {
-        let bridge = self.bridge.lock().unwrap_or_else(PoisonError::into_inner);
+        let bridge = self.bridge.clone();
+        let bridge = bridge.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut picked = None;
         ui.horizontal_centered(|ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
             ui.painter().circle_stroke(rect.center(), 11.0, Stroke::new(2.0, ACCENT));
@@ -62,7 +77,12 @@ impl App {
                 Bridge::Unpaired => ("NON ASSOCIÉ", DANGER),
             };
             theme::pill(ui, theme::spaced(state, theme::font(12.0, BOLD), MUTED, 1.0), RAISED, Some(dot));
+            ui.add_space(12.0);
+            let current = usize::from(self.settings.expert);
+            picked = ui.scope(|ui| theme::segmented(ui, 170.0, &WINDOW_MODES, current)).inner;
+            let wide = ui.available_width() > 520.0;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &*bridge {
+                _ if !wide => {}
                 Bridge::Ready { area, lamps } => {
                     let piloted = lamps.iter().filter(|lamp| !self.cfg.excluded().contains(&lamp.id)).count();
                     let lamps = match (lamps.len(), piloted) {
@@ -84,14 +104,19 @@ impl App {
                 }
             });
         });
+        drop(bridge);
+        if let Some(i) = picked {
+            self.set_expert(i == 1);
+        }
     }
 
     /// Colonne centrale : source, tempo, MIDI et lancement.
     fn session(&mut self, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.y = 10.0;
         ui.label(theme::text("Préparer la session", theme::font(28.0, BOLD), TEXT));
+        let side = if self.two_columns { "à droite" } else { "plus bas" };
         ui.label(theme::text(
-            "Choisis la source et le tempo, puis lance. La lumière se règle à droite, et reste réglable pendant le live.",
+            format!("Choisis la source et le tempo, puis lance. La lumière se règle {side}, et reste réglable pendant le live."),
             theme::regular(15.0),
             MUTED,
         ));
@@ -111,7 +136,7 @@ impl App {
                 !output && !opus,
                 Some(Icon::SoundCard),
                 "Carte son",
-                "Platines ou synthé branchés sur la Focusrite",
+                "Platines ou synthé sur la Focusrite",
             );
             if card.clicked() && (output || opus) {
                 self.settings.opus_only = false;
@@ -127,7 +152,7 @@ impl App {
                 output,
                 Some(Icon::Speaker),
                 "Sortie du PC",
-                "Ce que joue le PC : Spotify, Ableton…",
+                "Spotify, Ableton…",
             );
             if card.clicked() && !output {
                 self.settings.opus_only = false;
@@ -144,7 +169,7 @@ impl App {
                 opus,
                 Some(Icon::Wifi),
                 "OPUS-QUAD en Wi-Fi",
-                "Les platines mènent la lumière par le réseau, sans son",
+                "Par le réseau, sans son",
             );
             if card.clicked() && !opus {
                 self.settings.opus_only = true;
@@ -199,17 +224,19 @@ impl App {
             ui.label(theme::text("L'état actuel des lampes sera rétabli à l'arrêt.", theme::regular(13.0), MUTED));
         });
 
-        // Le reste, replié sous le lancement pour qu'il reste à portée de main.
-        ui.add_space(8.0);
-        let toggled = disclosure(ui, width, self.more_options, "Plus d'options", &self.options_summary());
-        if toggled {
-            self.more_options = !self.more_options;
-        }
-        if self.more_options {
-            let options = ui.scope(|ui| self.options(ui, width)).response;
+        // Le reste, en mode expert, replié sous le lancement pour qu'il reste à portée de main.
+        if self.settings.expert {
+            ui.add_space(8.0);
+            let toggled = disclosure(ui, width, self.more_options, "Plus d'options", &self.options_summary());
             if toggled {
-                // Les options s'ouvrent sous le bouton de lancement : on les amène à l'écran.
-                options.scroll_to_me(Some(Align::Max));
+                self.more_options = !self.more_options;
+            }
+            if self.more_options {
+                let options = ui.scope(|ui| self.options(ui, width)).response;
+                if toggled {
+                    // Les options s'ouvrent sous le bouton de lancement : on les amène à l'écran.
+                    options.scroll_to_me(Some(Align::Max));
+                }
             }
         }
 
@@ -427,7 +454,11 @@ impl App {
             LABEL,
         ));
 
-        // Le plan de la pièce, replié : il sert à la mise en place, pas à chaque session.
+        // Le plan de la pièce, replié et réservé au mode expert : il sert à la mise en place, pas à
+        // chaque session.
+        if !self.settings.expert {
+            return;
+        }
         let summary = format!("« {} » · configuration « {} »", self.cfg.room().name, self.cfg.layout().name);
         if disclosure(ui, ui.available_width(), self.show_room, "Pièce et plan des lampes", &summary) {
             self.show_room = !self.show_room;
@@ -573,6 +604,11 @@ impl App {
         );
 
         ui.add_space(4.0);
+        if !self.settings.expert {
+            // Mode simple : les scènes, les couleurs et l'intensité des flashs, d'un seul tenant.
+            self.simple_light(ui, width, &SETUP_SKIN);
+            return;
+        }
         let current = PAGES.iter().position(|(page, _)| *page == self.page).unwrap_or(0);
         if let Some(i) = theme::segmented(ui, width, &PAGES.map(|(_, label)| label), current) {
             self.page = PAGES[i].0;

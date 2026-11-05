@@ -23,8 +23,7 @@ const OPUS_LATE: f64 = 0.1;
 pub(super) fn light_loop(
     rt: &Runtime,
     stream: &mut HueStream,
-    // Canaux pilotés, et leur place dans la pièce (dans le même ordre).
-    (channels, space): (&[u8], &Space),
+    rig: &Rig,
     features: &Features,
     notes: &Notes,
     shared: &Shared,
@@ -32,8 +31,18 @@ pub(super) fn light_loop(
 ) -> Result<()> {
     let mut planner = FlashPlanner::new(shared.mode(), advance.as_secs_f64(), CONFIRM_RANGE.1);
     let mut look = ReactiveLook::new(shared.palette());
-    look.set_space(space);
-    let mut frame: Vec<(u8, Rgb)> = channels.iter().map(|&id| (id, Rgb::OFF)).collect();
+    let mut frame: Vec<(u8, Rgb)> = Vec::with_capacity(rig.channels.len());
+    // Couleur de chaque canal sur la photo d'avant le live : celle d'une lampe qu'on désactive en
+    // cours de route. Une lampe décochée dès le départ n'est pas touchée du tout.
+    let before_live: Vec<Rgb> = rig
+        .owners
+        .iter()
+        .map(|owner| owner.as_deref().and_then(|id| stream.before_color(id)).unwrap_or(Rgb::OFF))
+        .collect();
+    let mut streamed = vec![false; rig.channels.len()];
+    // Canaux que le live allume (rangs), relus quand on en active ou désactive un.
+    let mut active: Vec<usize> = Vec::new();
+    let mut lamps_seen = None;
     let mut seen = features.kicks();
     let mut seen_notes = notes.count();
     let mut last = Instant::now();
@@ -45,11 +54,18 @@ pub(super) fn light_loop(
     let mut guided = false;
     let mut opus_flashed: Option<(u8, u32, u32)> = None;
     while !shared.stopped() {
+        let changes = shared.lamps_changed.load(Ordering::Acquire);
+        if lamps_seen != Some(changes) {
+            lamps_seen = Some(changes);
+            active = (0..rig.channels.len()).filter(|&i| shared.lamp_enabled[i].load(Ordering::Relaxed)).collect();
+            // Les mouvements se répartissent entre les seules lampes allumées.
+            look.set_space(&rig.space.subset(&active));
+        }
         planner.mode = shared.mode();
         planner.hold_off_pattern = look.phase() != Phase::BuildUp;
         // La lampe la plus lente reçoit ses flashs d'autant plus tôt ; les autres l'attendent.
         lags.clear();
-        lags.extend(shared.lamp_lags.iter().map(|lag| f32::from_bits(lag.load(Ordering::Relaxed))));
+        lags.extend(active.iter().map(|&i| f32::from_bits(shared.lamp_lags[i].load(Ordering::Relaxed))));
         let head_start = Duration::from_secs_f32(lags.iter().copied().fold(0.0, f32::max) / 1000.0);
         let total_advance = advance + head_start;
         planner.advance = total_advance.as_secs_f64();
@@ -190,9 +206,22 @@ pub(super) fn light_loop(
             colors.iter_mut().for_each(|c| *c = if lit { WHITE } else { Rgb::OFF });
         }
         let colors = delays.delay(now, colors, &lags);
-        for ((_, c), (color, published)) in frame.iter_mut().zip(colors.iter().zip(&shared.lamp_colors)) {
-            *c = *color;
-            published.store(pack(*color), Ordering::Relaxed);
+        frame.clear();
+        let mut lit = active.iter().zip(&colors).peekable();
+        for (i, &channel) in rig.channels.iter().enumerate() {
+            let shown = match lit.next_if(|&(&rank, _)| rank == i) {
+                Some((_, &color)) => {
+                    streamed[i] = true;
+                    Some(color)
+                }
+                // Lampe désactivée après avoir été allumée : elle retrouve son état d'avant le live.
+                None if streamed[i] => Some(before_live[i]),
+                None => None,
+            };
+            if let Some(color) = shown {
+                frame.push((channel, color));
+            }
+            shared.lamp_colors[i].store(pack(shown.unwrap_or(before_live[i])), Ordering::Relaxed);
         }
         // Couleur résumée (aperçu, fond de la scène) : la plus lumineuse des lampes.
         let brightest = colors.iter().copied().max_by_key(|c| c.r.max(c.g).max(c.b)).unwrap_or(Rgb::OFF);
@@ -246,6 +275,14 @@ pub(super) fn link_loop(shared: &Shared, features: &Features, bpm: Option<f64>) 
         shared.link_peers.store(beat.peers, Ordering::Relaxed);
         thread::sleep(LINK_POLL);
     }
+}
+
+/// Les lampes du live : tous les canaux de la zone, la lampe de chacun, et leur place dans la pièce
+/// (dans le même ordre).
+pub(super) struct Rig {
+    pub(super) channels: Vec<u8>,
+    pub(super) owners: Vec<Option<String>>,
+    pub(super) space: Space,
 }
 
 /// Flash du prochain kick prévu par l'OPUS, quand son heure moins l'avance des lampes est venue :

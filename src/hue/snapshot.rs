@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::api::{self, EntertainmentArea, Light, Scene};
+use super::stream::Rgb;
 use crate::config::{BridgeCredentials, Config};
 
 const FILE_NAME: &str = "lampes-avant-flux.json";
@@ -82,6 +83,66 @@ impl From<Light> for LightState {
             color,
         }
     }
+}
+
+impl LightState {
+    /// Couleur à envoyer dans le flux pour montrer la lampe comme avant lui (approchée : le flux
+    /// ne parle qu'en RGB) ; noir si elle était éteinte.
+    pub fn rgb(&self) -> Rgb {
+        if !self.on {
+            return Rgb::OFF;
+        }
+        let linear = match self.color {
+            Some(LightColor::Xy { x, y }) => xy_linear(x, y),
+            Some(LightColor::White { mirek }) => kelvin_linear(1e6 / f64::from(mirek.max(1))),
+            // Lampe sans couleur : un blanc chaud.
+            None => kelvin_linear(2700.0),
+        };
+        let max = linear.iter().copied().fold(0.0f64, f64::max).max(1e-9);
+        let level = self.brightness.map_or(1.0, |b| (b / 100.0).clamp(0.0, 1.0));
+        let [r, g, b] = linear.map(|c| (encode_srgb(c / max) * level * f64::from(u16::MAX)).round() as u16);
+        Rgb { r, g, b }
+    }
+}
+
+/// Chromaticité CIE xy vers RGB linéaire (sRGB, D65), à luminance 1.
+fn xy_linear(x: f64, y: f64) -> [f64; 3] {
+    let y = y.max(1e-4);
+    let (big_x, big_z) = (x / y, (1.0 - x - y) / y);
+    [
+        3.2406 * big_x - 1.5372 - 0.4986 * big_z,
+        -0.9689 * big_x + 1.8758 + 0.0415 * big_z,
+        0.0557 * big_x - 0.2040 + 1.0570 * big_z,
+    ]
+    .map(|c| c.max(0.0))
+}
+
+/// Blanc de température `kelvin` en RGB linéaire (approximation de Tanner Helland, en sRGB).
+fn kelvin_linear(kelvin: f64) -> [f64; 3] {
+    let t = (kelvin / 100.0).clamp(10.0, 400.0);
+    let red = if t <= 66.0 { 255.0 } else { 329.698_727_446 * (t - 60.0).powf(-0.133_204_759_2) };
+    let green = if t <= 66.0 {
+        99.470_802_586_1 * t.ln() - 161.119_568_166_1
+    } else {
+        288.122_169_528_3 * (t - 60.0).powf(-0.075_514_849_2)
+    };
+    let blue = if t >= 66.0 {
+        255.0
+    } else if t <= 19.0 {
+        0.0
+    } else {
+        138.517_731_223_1 * (t - 10.0).ln() - 305.044_792_730_7
+    };
+    [red, green, blue].map(|c| decode_srgb((c / 255.0).clamp(0.0, 1.0)))
+}
+
+fn encode_srgb(u: f64) -> f64 {
+    let u = u.clamp(0.0, 1.0);
+    if u <= 0.003_130_8 { 12.92 * u } else { 1.055 * u.powf(1.0 / 2.4) - 0.055 }
+}
+
+fn decode_srgb(u: f64) -> f64 {
+    if u <= 0.040_45 { u / 12.92 } else { ((u + 0.055) / 1.055).powf(2.4) }
 }
 
 /// Scènes actives qui touchent l'une des lampes `ids`.
@@ -283,6 +344,22 @@ mod tests {
         let body = restore_body(&off);
         assert_eq!(body["on"], json!({ "on": false }));
         assert_eq!(body["color"], json!({ "xy": { "x": 0.3, "y": 0.3 } }));
+    }
+
+    #[test]
+    fn shows_the_photographed_state_in_the_stream() {
+        let state = |on, brightness, color| LightState { id: "a".into(), name: "a".into(), on, brightness, color };
+        assert_eq!(state(false, Some(80.0), None).rgb(), Rgb::OFF);
+        // Rouge vif (gamut Hue) : le rouge domine nettement.
+        let red = state(true, Some(100.0), Some(LightColor::Xy { x: 0.6915, y: 0.3083 })).rgb();
+        assert!(red.r > 60_000 && red.g < 10_000 && red.b < 10_000, "{red:?}");
+        // Blanc chaud à moitié : orangé, moins lumineux.
+        let warm = state(true, Some(50.0), Some(LightColor::White { mirek: 454 })).rgb();
+        assert!(warm.r > warm.g && warm.g > warm.b, "{warm:?}");
+        assert!((f64::from(warm.r) - 0.5 * f64::from(u16::MAX)).abs() < 600.0, "{warm:?}");
+        // Blanc froid : presque neutre.
+        let cool = state(true, Some(100.0), Some(LightColor::White { mirek: 153 })).rgb();
+        assert!(cool.b > 55_000 && cool.r > 55_000, "{cool:?}");
     }
 
     #[test]

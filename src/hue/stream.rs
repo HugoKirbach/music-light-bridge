@@ -91,6 +91,11 @@ impl HueStream {
         Ok(Self { conn, bridge: bridge.clone(), area_id: area.id.clone(), packet: header(&area.id), snapshot, resumed })
     }
 
+    /// Couleur qui montre la lampe `light_id` comme sur la photo prise avant le flux.
+    pub fn before_color(&self, light_id: &str) -> Option<Rgb> {
+        self.snapshot.lights.iter().find(|light| light.id == light_id).map(|light| light.rgb())
+    }
+
     pub async fn send(&mut self, channels: &[(u8, Rgb)]) -> Result<()> {
         encode(&mut self.packet, channels);
         self.conn.write(&self.packet, None).await.context("envoi DTLS")?;

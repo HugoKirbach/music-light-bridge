@@ -302,6 +302,31 @@ Le choix est gardé pour la fois suivante.
 
 Dans le terminal : `dj-bridge live --opus --sans-son --reseau "Wi-Fi"`.
 
+## [29] Fenêtre plus simple, et lampes à la volée
+
+- **Simple / Expert**, en haut de l'écran de préparation et à droite des onglets du live.
+  - Le mode simple garde la source, les lampes, le tempo, le lancement, les scènes, les trois
+    couleurs et l'intensité des flashs. Pendant le live, il garde les onglets Scènes, Couleurs et
+    Lampes.
+  - Le mode expert rend tout : les pages Mouvement, Couleurs, Flashs et Scènes, le plan de la
+    pièce, « Plus d'options », la note MIDI des scènes, et tous les onglets du live.
+- **Fenêtre étroite** (moins de 1 120 points de large) : une seule colonne, la lumière sous la
+  session. Elle ne passe plus par-dessus.
+- **Lampes pendant le live**, onglet Lampes : un clic sur une lampe l'ajoute au live ou la rend à
+  son état d'avant, sans arrêter. Les mouvements se répartissent alors entre les lampes restantes.
+  Le choix est gardé pour la fois suivante. En mode expert, le test de synchro et les retards par
+  lampe sont en dessous.
+
+**À essayer :**
+1. Réduis la fenêtre : la lumière passe sous la session.
+2. Passe de Simple à Expert et inversement, avant le lancement puis dans le dock du live.
+3. En plein live, décoche une lampe : elle retrouve sa couleur d'avant. Recoche-la : elle reprend
+   le live.
+
+**Limite :** une lampe décochée en cours de live reste dans le flux, avec sa couleur d'avant. Le
+flux ne parle qu'en RGB, donc cette couleur est approchée (un blanc chaud peut sortir un peu
+différent). À l'arrêt du live, elle retrouve son état exact.
+
 ---
 
 ## Ce qui a été vérifié de mon côté

@@ -96,6 +96,8 @@ pub struct LiveSettings {
     pub opus_only: bool,
     /// Carte réseau de l'OPUS, choisie d'avance (son nom) ; `None` : celle où il s'annonce.
     pub opus_interface: Option<String>,
+    /// Mode expert de la fenêtre : tous les réglages ; sinon l'essentiel seulement.
+    pub expert: bool,
     /// Port MIDI écouté ; `None` : pas de MIDI.
     pub midi: Option<String>,
     pub flash: FlashMode,
@@ -120,6 +122,7 @@ impl Default for LiveSettings {
             trame: true,
             opus_only: false,
             opus_interface: None,
+            expert: false,
             midi: None,
             flash: FlashMode::Kicks,
             motion: Motion::Auto,

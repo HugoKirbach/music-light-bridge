@@ -58,6 +58,11 @@ impl Space {
         Self { spots, dj: [2.5, 0.4] }
     }
 
+    /// Les seules lampes de rangs `indices`, dans cet ordre (lampes actives du live).
+    pub fn subset(&self, indices: &[usize]) -> Self {
+        Self { spots: indices.iter().filter_map(|&i| self.spots.get(i).copied()).collect(), dj: self.dj }
+    }
+
     /// Lampes d'une pièce, dans l'ordre de `ids` (une lampe pas placée prend la place par défaut
     /// donnée par `fallback`, de -1 à 1 de gauche à droite).
     pub fn of_room<'a>(room: &Room, layout: usize, ids: impl IntoIterator<Item = (&'a str, f32)>) -> Self {
