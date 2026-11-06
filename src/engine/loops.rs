@@ -182,6 +182,7 @@ pub(super) fn light_loop(
             phase: guide.phase,
             build: guide.build.unwrap_or(0.0),
             drop_in: guide.drop_in,
+            drops: guide.phrase.as_ref().is_none_or(|p| p.drops),
             color: guide.color.filter(|_| trame),
         }));
         if shared.drop_now.swap(false, Ordering::Relaxed) {

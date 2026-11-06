@@ -298,12 +298,11 @@ impl Track {
         let end = song.phrases.get(index + 1).map_or(u32::from(song.end_beat) + 1, |next| u32::from(next.beat));
         let is_up = |kind: u16| song.mood == 1 && kind == 2;
         // Une montée court sur les phrases Up qui se suivent ; son drop tombe au début de la suivante.
-        let build_end = is_up(phrase.kind).then(|| {
-            song.phrases[index..]
-                .iter()
-                .find(|p| !is_up(p.kind))
-                .map_or(u32::from(song.end_beat) + 1, |p| u32::from(p.beat))
-        });
+        let after = song.phrases[index..].iter().find(|p| !is_up(p.kind));
+        let build_end =
+            is_up(phrase.kind).then(|| after.map_or(u32::from(song.end_beat) + 1, |p| u32::from(p.beat)));
+        // Une montée qui retombe sur une phrase Down n'a pas de drop : la lumière y redescend.
+        let drops = after.is_some_and(|p| !(song.mood == 1 && p.kind == 3));
         let build_start = song.phrases[..=index]
             .iter()
             .rev()
@@ -317,6 +316,7 @@ impl Track {
             next: song.phrases.get(index + 1).map(|next| song.label(next.kind)),
             is_down: song.mood == 1 && phrase.kind == 3,
             build: build_end.map(|end| (build_start, end)),
+            drops,
         })
     }
 }
@@ -332,6 +332,8 @@ pub struct PhraseSpan {
     pub is_down: bool,
     /// Phrase Up : début de la montée (première phrase Up de la suite) et temps du drop.
     pub build: Option<(u32, u32)>,
+    /// Pour une phrase Up : la montée débouche sur un drop (et non sur une phrase Down).
+    pub drops: bool,
 }
 
 /// Instant des temps d'une platine, estimé à partir des changements de numéro.
@@ -481,10 +483,12 @@ impl Playing {
             _ if self.track.grooving(beat) => Phase::Groove,
             _ => Phase::Calm,
         };
+        let drops = phrase.as_ref().is_some_and(|p| p.drops);
         let (build, drop_in) = match phrase.as_ref().and_then(|p| p.build) {
             Some((start, end)) => {
                 let progress = (f64::from(beat - start) + fraction) / f64::from((end - start).max(1));
-                let drop_in = self.track.kick(i64::from(end)).then(|| ((f64::from(end - beat) - fraction) * period) as f32);
+                let drop_in = (drops && self.track.kick(i64::from(end)))
+                    .then(|| ((f64::from(end - beat) - fraction) * period) as f32);
                 (Some(progress.clamp(0.0, 1.0) as f32), drop_in)
             }
             None => (None, None),
@@ -928,7 +932,20 @@ mod tests {
         assert_eq!(guide(97).phase, Phase::Groove, "le drop groove dès son premier temps");
         assert_eq!(guide(32).phase, Phase::Groove, "le dernier kick avant le break groove encore");
         let span = guide(73).phrase.unwrap();
-        assert_eq!((span.label.as_str(), span.start, span.build), ("Up", 65, Some((65, 97))));
+        assert_eq!((span.label.as_str(), span.start, span.build, span.drops), ("Up", 65, Some((65, 97)), true));
+    }
+
+    /// Une montée qui retombe sur une phrase Down n'a pas de drop, même si le Down a des kicks.
+    #[test]
+    fn an_up_that_falls_into_a_down_has_no_drop() {
+        let mut track = track();
+        let song = track.song.as_mut().unwrap();
+        song.phrases = [(1, 1), (33, 3), (65, 2), (81, 2), (97, 3), (129, 5)].map(|(beat, kind)| Phrase { beat, kind }).to_vec();
+        let playing = playing(track);
+        let build = playing.guide(10.0 + 72.0 * 0.4 + 0.01, 0.0).unwrap();
+        assert_eq!(build.phase, Phase::BuildUp);
+        assert!(!build.phrase.unwrap().drops);
+        assert_eq!(build.drop_in, None, "pas de drop prévu au Down 97");
     }
 
     #[test]

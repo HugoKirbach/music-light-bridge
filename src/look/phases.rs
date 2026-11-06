@@ -154,6 +154,9 @@ pub(super) struct PhaseTracker {
     pub(super) anticipation_missed: bool,
     /// Le drop anticipé n'est pas venu : l'éclat doit s'éteindre (lu une fois).
     pub(super) false_drop: bool,
+    /// Phase dictée par l'OPUS : la montée en cours ne débouche pas sur un drop (elle retombe sur
+    /// une phrase Down).
+    pub(super) no_drop: bool,
 }
 
 /// Ce que la phase sait des kicks : secondes depuis le dernier détecté, et si la grille de temps
@@ -284,11 +287,15 @@ impl PhaseTracker {
     }
 
     /// L'OPUS dicte la phase (`phase`, avancement de la montée `build`, secondes avant son drop
-    /// `drop_in`) : elle est suivie telle quelle. `true` au drop qui conclut une montée.
-    pub(super) fn follow(&mut self, dt: f32, phase: Phase, build: f32, drop_in: Option<f32>) -> bool {
+    /// `drop_in`, et si elle débouche sur un drop : `drops`) : elle est suivie telle quelle. `true`
+    /// au drop qui conclut une montée.
+    pub(super) fn follow(&mut self, dt: f32, phase: Phase, build: f32, drop_in: Option<f32>, drops: bool) -> bool {
         self.time += dt;
         self.phase_time += dt;
-        let dropped = self.phase == Phase::BuildUp && phase == Phase::Groove;
+        let dropped = self.phase == Phase::BuildUp && phase == Phase::Groove && !self.no_drop;
+        if phase == Phase::BuildUp {
+            self.no_drop = !drops;
+        }
         if dropped {
             self.anticipated = None;
         } else if self.anticipated.is_some_and(|at| self.time > at + DROP_CONFIRM) {

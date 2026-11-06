@@ -79,7 +79,16 @@ const MONTHS: [&str; 12] =
 impl Set {
     pub fn load(folder: &Path) -> Result<Self> {
         let text = fs::read_to_string(folder.join(SET_FILE))?;
-        Ok(serde_json::from_str(&text)?)
+        let mut set: Self = serde_json::from_str(&text)?;
+        // Titres enregistrés en idéogrammes par [35] : réparés.
+        for entry in &mut set.tracks {
+            for field in [&mut entry.title, &mut entry.artist] {
+                if let Some(repaired) = crate::prolink::TrackInfo::repair(field) {
+                    *field = repaired;
+                }
+            }
+        }
+        Ok(set)
     }
 
     fn local(&self) -> OffsetDateTime {
@@ -392,6 +401,14 @@ mod tests {
     /// Rejoue un journal de la sonde (`DJB_OPUS_JOURNAL`) dans la liaison et l'enregistreur, comme
     /// pendant un live, puis écrit la setlist, ses pochettes, son texte et son image dans
     /// `DJB_SET_OUT`.
+    #[test]
+    #[ignore]
+    /// Affiche la setlist d'un set enregistré (`DJB_SET` : son dossier), telle que l'appli la lit.
+    fn show_set() {
+        let folder = PathBuf::from(std::env::var("DJB_SET").expect("DJB_SET"));
+        print!("{}", Set::load(&folder).unwrap().text());
+    }
+
     #[test]
     #[ignore]
     fn replay_setlist() {

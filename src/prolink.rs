@@ -464,8 +464,8 @@ const INFO_FIELD: usize = 0x100;
 
 impl TrackInfo {
     /// Décode un bloc 0x01. Il est masqué octet par octet : chaque octet est tourné de `r` bits
-    /// vers la gauche puis passé en XOR avec une clé de deux octets (poids fort, poids faible), `r`
-    /// et la clé changeant d'un morceau à l'autre. Le remplissage des champs (des zéros) donne la
+    /// vers la gauche puis passé en XOR avec une clé de deux octets, `r`, la clé et l'ordre des deux
+    /// octets d'un caractère changeant d'un morceau à l'autre. Le remplissage des champs (des zéros) donne la
     /// clé, le caractère de deux octets le plus fréquent ; `r` est celui qui donne le texte le plus
     /// lisible.
     pub fn parse(block: &[u8]) -> Option<Self> {
@@ -478,11 +478,14 @@ impl TrackInfo {
             *counts.entry(*unit).or_default() += 1;
         }
         let key = counts.into_iter().max_by_key(|&(unit, count)| (count, unit))?.0;
-        let decode = |turn: u32| {
+        let decode = |(turn, swapped): (u32, bool)| {
             let field = |units: &[[u8; 2]]| {
                 let chars: Vec<u16> = units
                     .iter()
-                    .map(|&[hi, lo]| u16::from_be_bytes([(hi ^ key[0]).rotate_right(turn), (lo ^ key[1]).rotate_right(turn)]))
+                    .map(|&[a, b]| {
+                        let bytes = [(a ^ key[0]).rotate_right(turn), (b ^ key[1]).rotate_right(turn)];
+                        if swapped { u16::from_le_bytes(bytes) } else { u16::from_be_bytes(bytes) }
+                    })
                     .take_while(|&c| c != 0)
                     .collect();
                 String::from_utf16_lossy(&chars).trim().to_owned()
@@ -490,8 +493,35 @@ impl TrackInfo {
             let half = INFO_FIELD / 2;
             Self { title: field(&units[..half]), artist: field(&units[half..2 * half]) }
         };
-        let best = (0..8).map(decode).max_by_key(|info| legibility(&info.title) + legibility(&info.artist))?;
+        // Selon le morceau, les deux octets d'un caractère arrivent aussi dans un ordre ou l'autre.
+        let masks = (0..8).flat_map(|turn| [(turn, false), (turn, true)]);
+        let best = masks.map(decode).max_by_key(|info| legibility(&info.title) + legibility(&info.artist))?;
         (legibility(&best.title) > 0 && !best.title.is_empty()).then_some(best)
+    }
+
+    /// Répare un texte décodé avant que l'ordre des octets ne soit essayé (sets de [35]) : des
+    /// idéogrammes à la place du titre. Chaque caractère y a ses deux octets inversés et tournés
+    /// d'un même nombre de bits ; `None` si le texte n'en a pas besoin.
+    pub fn repair(text: &str) -> Option<String> {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let before = legibility(text);
+        (0..8)
+            .map(|turn| {
+                let chars: Vec<u16> = units
+                    .iter()
+                    .map(|&unit| {
+                        // Caractère perdu à l'enregistrement : il ne se retrouve pas.
+                        if unit == 0xFFFD {
+                            return u16::from(b'?');
+                        }
+                        let [hi, lo] = unit.to_be_bytes();
+                        u16::from_le_bytes([hi.rotate_right(turn), lo.rotate_right(turn)])
+                    })
+                    .collect();
+                String::from_utf16_lossy(&chars).trim().to_owned()
+            })
+            .max_by_key(|candidate| legibility(candidate))
+            .filter(|candidate| legibility(candidate) > before && legibility(candidate) > 0)
     }
 }
 
@@ -503,7 +533,9 @@ fn legibility(text: &str) -> i32 {
             'a'..='z' | 'A'..='Z' | '0'..='9' | ' ' => 3,
             '(' | ')' | '-' | '&' | ',' | '.' | '\'' | '!' | '/' | ':' | '[' | ']' => 1,
             c if c.is_control() || c == char::REPLACEMENT_CHARACTER => -6,
-            c if c.is_alphabetic() => 1,
+            // Lettres latines accentuées ; un idéogramme est le plus souvent un masque mal défait.
+            c if c.is_alphabetic() && u32::from(c) < 0x2000 => 1,
+            c if c.is_alphabetic() => 0,
             _ => -2,
         })
         .sum()
@@ -548,6 +580,41 @@ mod tests {
         let info = TrackInfo::parse(&block).unwrap();
         assert_eq!(info.title, "I Can't Feel Anything (Extended Mix)");
         assert_eq!(info.artist, "Doolie, Bad Boombox");
+    }
+
+    /// Masque d'un texte comme l'OPUS : octets tournés de `turn` bits puis XOR `key`, les deux
+    /// octets de chaque caractère dans l'ordre inverse si `swapped`.
+    fn mask(text: &str, turn: u32, key: [u8; 2], swapped: bool) -> String {
+        let bytes: Vec<u8> = text
+            .encode_utf16()
+            .flat_map(|c| if swapped { c.to_le_bytes() } else { c.to_be_bytes() })
+            .collect();
+        hex::encode(bytes.chunks(2).flat_map(|pair| [pair[0].rotate_left(turn) ^ key[0], pair[1].rotate_left(turn) ^ key[1]]).collect::<Vec<u8>>())
+    }
+
+    /// Le set du 6 novembre : des titres sortis en idéogrammes, leurs octets étant dans l'ordre
+    /// inverse.
+    #[test]
+    fn decodes_track_info_with_swapped_bytes() {
+        for (title, artist, turn, key) in [
+            ("LATE28-Lie2Me", "", 1, [0x3a, 0x7c]),
+            ("Samba Siren", "Kaiser", 3, [0x00, 0xc5]),
+            ("Acid Fellas", "Kaiser, Cream on Chrome", 2, [0xff, 0xff]),
+            ("FIORÆLLA – Été", "Ñoño", 5, [0x12, 0x34]),
+        ] {
+            let block = info_block(&mask(title, turn, key, true), &mask(artist, turn, key, true), &hex::encode(key), "c693febf");
+            let info = TrackInfo::parse(&block).unwrap();
+            assert_eq!((info.title.as_str(), info.artist.as_str()), (title, artist));
+        }
+    }
+
+    /// Les titres du 6 novembre, tels qu'enregistrés : réparés à la lecture du set.
+    #[test]
+    fn repairs_titles_saved_as_ideograms() {
+        assert_eq!(TrackInfo::repair("頀舀ꠀ言搀瀀娀頀툀쨀搀騀쨀").as_deref(), Some("LATE28-Lie2Me"));
+        assert_eq!(TrackInfo::repair("Ԁ贀ꔀ鄀耀ᤀ销넀넀蔀촀耀ꀀᔀ턀销뤀鄀销鄀耀㔀ꔀꐀ").map(|t| t.starts_with("Acid Fellas")), Some(true));
+        assert_eq!(TrackInfo::repair("On My Mind (Extended)"), None);
+        assert_eq!(TrackInfo::repair("FIORÆLLA"), None);
     }
 
     const MAC: [u8; 6] = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];

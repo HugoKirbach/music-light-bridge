@@ -461,6 +461,22 @@ avec le bouton : elles y restent jusqu'au prochain chargement sur 3 ou 4.
   dis-le-moi. Le plus sûr : lancer le live avant de charger le premier morceau.
 - Si l'OPUS ne signale pas tes faders, c'est la platine maître en lecture qui compte.
 
+## [36] Up et Down qui glissent, titres sans idéogrammes
+
+- **Up → Down** (phrases rekordbox) : plus de drop ni de saut. La luminosité part de celle de la
+  fin du Up et redescend en douceur sur deux mesures (3 s sans tempo), même si le Down a des
+  kicks. Les flashs passent par-dessus.
+- **Down → Up** : la montée part de la luminosité du Down et monte de là, sans retomber d'abord.
+- **Le drop** reste seul à éclater d'un coup : un Up qui débouche sur un Chorus (ou une autre
+  phrase que Down).
+- **Titres en idéogrammes** : pour certains morceaux l'OPUS envoie les deux octets de chaque
+  caractère dans l'ordre inverse ; c'est maintenant essayé aussi. Les sets déjà enregistrés sont
+  réparés à l'ouverture (« LATE28-Lie2Me », « Samba Siren », « Acid Fellas »…). Une lettre perdue
+  à l'enregistrement reste un « ? ».
+
+**À essayer :** un morceau où Up et Down s'enchaînent ; et rouvre **Sets joués** pour revoir le
+set du 6 novembre.
+
 ---
 
 ## Ce qui a été vérifié de mon côté

@@ -91,6 +91,13 @@ const DRIFT_PERIOD: f32 = 16.0;
 /// Houle des breaks : une vague par demi-mesure, sommet sur le temps. Ondulation : deux mesures.
 const SWELL_BEATS: f64 = 2.0;
 const RIPPLE_BEATS: f64 = 8.0;
+/// Hors drop, un changement de phase (Up → Down, Down → Up, retour du groove…) ne fait pas sauter
+/// la luminosité : elle glisse de celle de la phase quittée à celle de la nouvelle, en deux
+/// mesures (en 3 s sans tempo). Les flashs passent par-dessus.
+const GLIDE_BEATS: f32 = 8.0;
+const GLIDE_TIME: f32 = 3.0;
+/// Une montée part d'au moins 35 % de luminosité, ou de celle qu'avait la lumière à son début.
+const BUILD_START: f32 = 0.35;
 /// Un mouvement lent rejoint la grille en douceur (constante de temps, s).
 const LOCK_TIME: f32 = 1.0;
 /// En dessous de cette saturation (OKLab), une couleur n'a pas de teinte propre.
@@ -241,6 +248,8 @@ pub struct Guide {
     pub phase: Phase,
     pub build: f32,
     pub drop_in: Option<f32>,
+    /// La montée débouche sur un drop (pas sur une phrase Down, où la lumière redescend en douceur).
+    pub drops: bool,
     pub color: Option<[f32; 3]>,
 }
 
@@ -436,6 +445,28 @@ pub struct ReactiveLook {
     /// L'OPUS mène la lumière ; et la couleur de la trame atteinte en fondu.
     guide: Option<Guide>,
     trame: Option<Color>,
+    /// Luminosité et blanc de fond de chaque lampe au dernier rendu, sans les flashs ; le
+    /// glissement en cours d'une phase à l'autre ; luminosité de la lumière au début de la montée.
+    rest: Vec<(f32, f32)>,
+    glide: Option<Glide>,
+    rise_from: f32,
+}
+
+/// Glissement de la luminosité d'une phase à l'autre : le fond de chaque lampe au changement,
+/// le temps écoulé et la durée du glissement (s).
+#[derive(Debug, Clone)]
+struct Glide {
+    from: Vec<(f32, f32)>,
+    elapsed: f32,
+    duration: f32,
+}
+
+impl Glide {
+    /// Part de la nouvelle phase (0 à 1), en douceur aux deux bouts.
+    fn progress(&self) -> f32 {
+        let t = (self.elapsed / self.duration.max(1e-3)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
 }
 
 impl Default for ReactiveLook {
@@ -478,6 +509,9 @@ impl Default for ReactiveLook {
             possible: vec![Spread::Auto, Spread::Together],
             guide: None,
             trame: None,
+            rest: Vec::new(),
+            glide: None,
+            rise_from: BUILD_START,
         }
     }
 }
@@ -705,6 +739,7 @@ impl ReactiveLook {
             lamp.fire(1.0, white);
         }
         (self.calm, self.building) = (0.0, 0.0);
+        self.glide = None;
         if self.motion == Motion::Auto {
             self.weights = [1.0, 0.0, 0.0];
         }
@@ -746,7 +781,7 @@ impl ReactiveLook {
         }
         let before = self.phases.phase;
         let dropped = match self.guide {
-            Some(guide) => self.phases.follow(dt, guide.phase, guide.build, guide.drop_in),
+            Some(guide) => self.phases.follow(dt, guide.phase, guide.build, guide.drop_in, guide.drops),
             None => self.phases.update(dt, levels, pulse),
         };
         self.dropped |= dropped;
@@ -759,6 +794,22 @@ impl ReactiveLook {
         }
         if dropped && drops && !std::mem::take(&mut self.drop_shown) {
             self.fire_drop();
+        }
+        // Hors drop, la luminosité glisse d'une phase à l'autre au lieu de sauter.
+        let changed = before != self.phases.phase;
+        if changed && !dropped && !self.drop_shown && !self.rest.is_empty() {
+            let duration = self.beat_time.map_or(GLIDE_TIME, |grid| GLIDE_BEATS * grid.period);
+            self.glide = Some(Glide { from: self.rest.clone(), elapsed: 0.0, duration });
+        } else if let Some(glide) = &mut self.glide {
+            glide.elapsed += dt;
+            if glide.elapsed >= glide.duration {
+                self.glide = None;
+            }
+        }
+        // La montée part de là où était la lumière.
+        if changed && self.phases.phase == Phase::BuildUp {
+            let level = self.rest.iter().map(|&(value, _)| value).sum::<f32>() / self.rest.len().max(1) as f32;
+            self.rise_from = level;
         }
         self.since_turn += dt;
         if self.rotation == Rotation::Off {
@@ -842,11 +893,15 @@ impl ReactiveLook {
         // Dans un break, la respiration part d'une base franche : une couleur intense qui ondule,
         // sauf si la lueur des breaks à zéro permet le noir.
         let breath_base = if self.dynamics.break_glow > 0.0 { BREATH_BASE * self.calm } else { 0.0 };
+        let breath_level = self.breath.min(1.0);
+        let treble_level = self.treble;
+        // La montée part de là où était la lumière, au moins de 35 %.
+        let rise = if floor < 1.0 { ((self.rise_from - floor) / (1.0 - floor)).clamp(0.0, 1.0) } else { 0.0 };
+        let rise = rise.max(BUILD_START);
+        let glide = self.glide.as_ref().map(|glide| (glide.from.as_slice(), glide.progress()));
+        let mut rest = Vec::with_capacity(self.lamps.len());
 
-        for (lamp, out) in self.lamps.iter().zip(&mut self.colors) {
-            let flash = lamp.flash * intensity;
-            // Pulse : le flash part de la lueur de fond et monte, selon l'intensité choisie.
-            let pulse = (glow + (1.0 - glow) * flash, lamp.punch * flash);
+        for (i, (lamp, out)) in self.lamps.iter().zip(&mut self.colors).enumerate() {
             // Respiration : suit l'énergie, un kick n'ajoute qu'une houle. Une ondulation lente
             // parcourt la pièce le long du mouvement (tout autour en rotation).
             // La vague va d'un bout à l'autre de la pièce en une demi-ondulation : les deux bouts
@@ -859,23 +914,40 @@ impl ReactiveLook {
             };
             let ripple =
                 if several { 1.0 - RIPPLE_DEPTH * (0.5 + 0.5 * (TAU * (ripple_phase - place)).sin()) } else { 1.0 };
-            let energy = breath_base + (1.0 - breath_base) * self.breath.min(1.0);
-            let breathing = 0.8 * energy * ripple * swell + BREATH_KICK * flash;
-            let breath = ((floor + (1.0 - floor) * breathing).min(1.0), 0.0);
-            // Montée : la lumière s'intensifie et blanchit, les flashs gagnent en force.
-            let tension = floor + (1.0 - floor) * (0.35 + 0.65 * build);
-            let strength = flash * (0.4 + 0.6 * build);
-            let build_up = (tension + (1.0 - tension) * strength, (lamp.punch * strength + 0.4 * build).min(1.0));
-
-            let (mut value, mut white) = (
-                (w_pulse * pulse.0 + w_breath * breath.0 + w_build * build_up.0) / total,
-                (w_pulse * pulse.1 + w_breath * breath.1 + w_build * build_up.1) / total,
-            );
-            if several && spread == Spread::Split && lamp.at.odd {
-                // Lampes « aigus » : elles suivent médiums et aigus, sans flash de kick.
-                value = (floor + (1.0 - floor) * (TREBLE_GLOW * self.treble + 0.6 * flash)).min(1.0);
-                white = 0.0;
+            let energy = breath_base + (1.0 - breath_base) * breath_level;
+            // Luminosité et blanc de la lampe pour un flash de `flash` (0 : son fond).
+            let mix = |flash: f32| {
+                // Pulse : le flash part de la lueur de fond et monte, selon l'intensité choisie.
+                let pulse = (glow + (1.0 - glow) * flash, lamp.punch * flash);
+                let breathing = 0.8 * energy * ripple * swell + BREATH_KICK * flash;
+                let breath = ((floor + (1.0 - floor) * breathing).min(1.0), 0.0);
+                // Montée : la lumière s'intensifie et blanchit, les flashs gagnent en force.
+                let tension = floor + (1.0 - floor) * (rise + (1.0 - rise) * build);
+                let strength = flash * (0.4 + 0.6 * build);
+                let build_up = (tension + (1.0 - tension) * strength, (lamp.punch * strength + 0.4 * build).min(1.0));
+                if several && spread == Spread::Split && lamp.at.odd {
+                    // Lampes « aigus » : elles suivent médiums et aigus, sans flash de kick.
+                    return ((floor + (1.0 - floor) * (TREBLE_GLOW * treble_level + 0.6 * flash)).min(1.0), 0.0);
+                }
+                (
+                    (w_pulse * pulse.0 + w_breath * breath.0 + w_build * build_up.0) / total,
+                    (w_pulse * pulse.1 + w_breath * breath.1 + w_build * build_up.1) / total,
+                )
+            };
+            let flash = lamp.flash * intensity;
+            let (mut value, mut white) = mix(flash);
+            let (mut rest_value, mut rest_white) = mix(0.0);
+            // Glissement : le fond part de celui de la phase quittée, les flashs passent par-dessus.
+            if let Some((from, progress)) = glide
+                && let Some(&(from_value, from_white)) = from.get(i)
+            {
+                let (shift_value, shift_white) =
+                    ((1.0 - progress) * (from_value - rest_value), (1.0 - progress) * (from_white - rest_white));
+                (rest_value, rest_white) = (rest_value + shift_value, rest_white + shift_white);
+                value = (value + shift_value).clamp(0.0, 1.0);
+                white = (white + shift_white).clamp(0.0, 1.0);
             }
+            rest.push((rest_value, rest_white));
             // Courbe de luminosité, entre la lueur de fond et le plein : le fond et le sommet ne
             // bougent pas.
             if floor < 1.0 {
@@ -888,6 +960,7 @@ impl ReactiveLook {
             let quantize = |u: f32| (u * f32::from(u16::MAX)) as u16;
             *out = Rgb { r: quantize(r), g: quantize(g), b: quantize(b) };
         }
+        self.rest = rest;
         &self.colors
     }
 
@@ -960,7 +1033,7 @@ mod tests {
         let mut look = still(PALETTE);
         let silence = Levels::default();
         let render = |look: &mut ReactiveLook, phase: Phase| {
-            look.set_guide(Some(Guide { phase, build: 0.0, drop_in: None, color: None }));
+            look.set_guide(Some(Guide { phase, build: 0.0, drop_in: None, drops: true, color: None }));
             let mut color = Rgb::OFF;
             for _ in 0..3 * FRAMES_PER_SECOND {
                 color = look.render(FRAME, silence);
@@ -1460,7 +1533,7 @@ mod tests {
     fn the_drop_is_the_pure_groove_color_and_the_build_up_whitens() {
         let mut look = still(PALETTE);
         let guide = |look: &mut ReactiveLook, phase, build, seconds: f32| {
-            look.set_guide(Some(Guide { phase, build, drop_in: None, color: None }));
+            look.set_guide(Some(Guide { phase, build, drop_in: None, drops: true, color: None }));
             let mut color = Rgb::OFF;
             for _ in 0..(seconds * FRAMES_PER_SECOND as f32) as usize {
                 color = look.render(FRAME, sound(0.5, -20.0));
@@ -1476,6 +1549,38 @@ mod tests {
         // Drop : rouge plein d'emblée, sans blanc ni reste de la montée.
         let drop = guide(&mut look, Phase::Groove, 0.0, 1.0 / 60.0);
         assert!(drop.r == u16::MAX && drop.g == 0 && drop.b == 0, "{drop:?}");
+    }
+
+    /// Up puis Down chez rekordbox (ils s'enchaînent souvent) : pas de drop, la luminosité
+    /// redescend en partant de celle de la fin de la montée, sans saut ; et inversement, la
+    /// montée suivante part de la luminosité du Down. Seul un drop éclate d'un coup.
+    #[test]
+    fn up_and_down_phrases_glide_without_a_jump() {
+        let white = [255, 255, 255];
+        let mut look = still(Palette { primary: white, calm: white, filtered: white, build: white });
+        let run = |look: &mut ReactiveLook, phase, build: f32, drops, seconds: f32| -> Vec<u16> {
+            look.set_guide(Some(Guide { phase, build, drop_in: None, drops, color: None }));
+            (0..(seconds * FRAMES_PER_SECOND as f32) as usize).map(|_| brightness(look.render(FRAME, sound(0.5, -20.0)))).collect()
+        };
+        let step = |before: u16, frames: &[u16]| {
+            std::iter::once(before).chain(frames.iter().copied()).collect::<Vec<_>>().windows(2).map(|w| w[0].abs_diff(w[1])).max().unwrap()
+        };
+        let calm = run(&mut look, Phase::Calm, 0.0, true, 3.0);
+        let up = run(&mut look, Phase::BuildUp, 0.95, false, 3.0);
+        assert!(step(*calm.last().unwrap(), &up) < u16::MAX / 50, "Down → Up : saut de {}", step(*calm.last().unwrap(), &up));
+        let top = *up.last().unwrap();
+        let down = run(&mut look, Phase::Calm, 0.0, false, 4.0);
+        assert!(step(top, &down) < u16::MAX / 50, "Up → Down : saut de {}", step(top, &down));
+        assert!(*down.last().unwrap() < top - u16::MAX / 10, "le Down redescend : {top} → {}", down.last().unwrap());
+        assert!(!look.take_drop(), "pas de drop");
+        // Un Down qui groove (kicks) ne fait pas de drop non plus.
+        run(&mut look, Phase::BuildUp, 0.95, false, 3.0);
+        let groove = run(&mut look, Phase::Groove, 0.0, false, 1.0);
+        assert!(groove[0] < u16::MAX && !look.take_drop(), "pas d'éclat : {}", groove[0]);
+        // Une montée qui débouche sur le Chorus : le drop éclate d'un coup.
+        run(&mut look, Phase::BuildUp, 0.95, true, 3.0);
+        let drop = run(&mut look, Phase::Groove, 0.0, true, 0.1);
+        assert!(drop[0] == u16::MAX && look.take_drop(), "drop : {}", drop[0]);
     }
 
     /// Joue `seconds` avec la grille dans l'état `grid`, les basses à `bass`, un kick tous les
