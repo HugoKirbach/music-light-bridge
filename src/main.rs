@@ -163,9 +163,9 @@ struct LiveArgs {
     /// maître ; le son devient facultatif
     #[arg(long)]
     opus: bool,
-    /// Avec `--opus`, garde la palette au lieu des couleurs de la trame (waveform)
+    /// Avec `--opus`, les couleurs de la trame (waveform) au lieu de la palette
     #[arg(long)]
-    palette_only: bool,
+    trame: bool,
     /// Avec `--opus` : aucune entrée audio, la lumière suit l'OPUS seul
     #[arg(long = "sans-son")]
     no_sound: bool,
@@ -199,7 +199,7 @@ impl LiveArgs {
             link: self.link,
             opus: self.opus,
             opus_offset_ms: cfg.opus_offset_ms,
-            trame: !self.palette_only,
+            trame: self.trame,
             midi: self.midi.map(|name| (!name.is_empty()).then_some(name)),
             palette,
             dynamics,

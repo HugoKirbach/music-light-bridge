@@ -90,7 +90,9 @@ pub struct LiveSettings {
     pub link: bool,
     /// Tempo, temps, phrases et kicks viennent de l'OPUS-QUAD, par le réseau.
     pub opus: bool,
-    /// Avec l'OPUS, les couleurs de la trame (waveform) teintent les lampes.
+    /// Avec l'OPUS, les couleurs de la trame (waveform) teintent les lampes au lieu de la palette.
+    /// Nouvelle clé : l'ancienne (`trame`, activée d'office) est oubliée, la palette reprend la main.
+    #[serde(rename = "trame_couleurs")]
     pub trame: bool,
     /// Source « OPUS-QUAD en Wi-Fi » : la lumière suit l'OPUS seul, aucune entrée audio n'est ouverte.
     pub opus_only: bool,
@@ -119,7 +121,7 @@ impl Default for LiveSettings {
             bpm: None,
             link: false,
             opus: false,
-            trame: true,
+            trame: false,
             opus_only: false,
             opus_interface: None,
             expert: false,

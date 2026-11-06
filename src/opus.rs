@@ -55,6 +55,9 @@ const CALL_ATTACK: f32 = 0.3;
 const CALL_PEAK: f32 = 0.35;
 /// Plancher de la hauteur de référence d'un morceau, pour qu'un morceau très calme ne sature pas.
 const LOUDNESS_MIN: f32 = 0.2;
+/// Couleur de la trame : sous 15 % d'écart entre la plus forte et la plus faible composante, le
+/// passage est gris (tout le spectre à la fois) et ne teinte pas les lampes.
+const TRAME_GREY: f32 = 0.15;
 /// Têtes de phrase de la lumière : tous les 16 temps depuis le début de la phrase rekordbox.
 const PHRASE_BEATS: u32 = 16;
 /// Kicks cherchés au plus 8 temps devant.
@@ -169,7 +172,9 @@ impl Waveform {
         if attack >= CALL_ATTACK && peak >= CALL_PEAK { attack } else { 0.0 }
     }
 
-    /// Couleur moyenne entre `from` et `to` (ms), pondérée par la hauteur et portée à son plein.
+    /// Couleur moyenne entre `from` et `to` (ms), pondérée par la hauteur, sans sa part de blanc
+    /// (la plus faible des trois composantes) et portée à son plein : un rose pâle devient magenta,
+    /// un bleu clair devient bleu. Un passage presque gris n'a pas de couleur.
     fn color(&self, from: f64, to: f64) -> Option<[f32; 3]> {
         let (start, end) = (self.index(from), self.index(to));
         let points = self.points.get(start..=end)?;
@@ -180,7 +185,9 @@ impl Waveform {
             sum[2] += p.blue * p.height;
         }
         let max = sum.iter().copied().fold(0.0, f32::max);
-        (max > 1e-3).then(|| sum.map(|c| c / max))
+        let min = sum.iter().copied().fold(f32::MAX, f32::min);
+        let chroma = max - min;
+        (max > 1e-3 && chroma > TRAME_GREY * max).then(|| sum.map(|c| (c - min) / chroma))
     }
 }
 
@@ -917,6 +924,18 @@ mod tests {
         assert_eq!(pad.levels.bass, 0.0);
         let color = pad.color.unwrap();
         assert!(color[2] > color[1] && color[0] == 0.0, "break bleuté : {color:?}");
+    }
+
+    #[test]
+    fn the_trame_color_has_no_white() {
+        let point = |red, green, blue| Point { height: 1.0, red, green, blue };
+        let waveform = |p: Point| Waveform { per_second: 150.0, points: vec![p; 10] };
+        // Rose pâle : le blanc retiré, il reste un magenta franc.
+        let pink = waveform(point(1.0, 0.6, 0.9)).color(0.0, 50.0).unwrap();
+        assert_eq!(pink[1], 0.0, "{pink:?}");
+        assert_eq!(pink[0], 1.0, "{pink:?}");
+        // Presque gris : pas de couleur, la palette reprend la main.
+        assert_eq!(waveform(point(0.9, 0.85, 0.88)).color(0.0, 50.0), None);
     }
 
     #[test]

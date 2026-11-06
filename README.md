@@ -158,7 +158,7 @@ fenêtre est étroite, la lumière passe sous la session, sur une seule colonne.
 **Lampes pendant le live** (onglet Lampes du dock) : un clic sur une lampe l'ajoute au live ou la
 rend à son état d'avant, sans arrêter le live. Le choix est gardé pour les sessions suivantes.
 
-**Raccourcis du live :** Espace pour le drop (éclat blanc), 1 à 9 pour rappeler les scènes, Échap
+**Raccourcis du live :** Espace pour le drop (éclat plein), 1 à 9 pour rappeler les scènes, Échap
 pour replier le dock.
 
 **Au centre, l'essentiel :**
@@ -193,8 +193,9 @@ contient :
 à la fois :
 - **Mouvement** : animation (Auto, Pulse, Respiration, Montée), disposition des lampes (parmi
   celles que la configuration rend possibles), case **Régisseur auto**, houle des breaks.
-- **Couleurs** : Groove, Creux, Filtres, rotation des couleurs, dégradé entre les lampes.
-- **Flashs** : intensité, redescente, lueur de fond, contraste.
+- **Couleurs** : une par moment du morceau (Drop, Montée, Break, et Filtres à l'écoute du son),
+  rotation des couleurs, dégradé entre les lampes.
+- **Flashs** : intensité, blanc des flashs, redescente, lueur de fond, contraste.
 - **Scènes** : rappeler, enregistrer, supprimer.
 
 Les réglages sont repris à l'ouverture suivante.
@@ -212,7 +213,7 @@ scène dégagée : un clic sur un onglet l'ouvre, un second (ou **Replier**) le 
 | Onglet | Contenu |
 |---|---|
 | Mouvement | Animation, disposition (la carte Auto montre celle jouée en ce moment), régisseur, houle |
-| Couleurs | Les trois couleurs et leur nuancier, rotation, dégradé |
+| Couleurs | Une couleur par moment du morceau et son nuancier, rotation, dégradé |
 | Flashs | Allure des flashs |
 | Scènes | Rappeler, enregistrer (avec une note MIDI facultative), supprimer (clic droit) |
 | Tempo | Imposer un BPM ou revenir à la détection |
@@ -424,8 +425,8 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
     8 temps après le début de la montée (puis la suivante s'il ne vient pas). L'intensité suit
     l'avancement vers ce drop.
   - Sans structure, l'intensité monte en 8 s.
-- **Drop** : un kick aux basses pleines conclut la montée par un éclat blanc sur toutes les
-  lampes. Il peut suivre de près un roulement de caisse claire : un kick qui ramène les
+- **Drop** : un kick aux basses pleines conclut la montée par un éclat plein sur toutes les
+  lampes, d'emblée dans la couleur Drop (ni le blanc ni la couleur de la montée ne traînent). Il peut suivre de près un roulement de caisse claire : un kick qui ramène les
   basses au niveau du groove suffit.
   - Quand le drop est prévu, l'éclat part avec l'avance des lampes pour tomber pile.
   - Un kick aux basses nettement plus fortes que pendant la montée le confirme.
@@ -458,8 +459,17 @@ position ne ressort nettement, elle reste inconnue et rien ne change.
     en groove, c'est le régisseur qui choisit.
 
   Un mouvement demande des lampes assez étalées dans son sens (au moins 80 cm). Pendant un break,
-  la respiration ondule le long du mouvement choisi.
-- **Accents** : en tête de phrase, toutes les lampes flashent en blanc plus franc.
+  la respiration ondule en vague le long du mouvement choisi (de gauche à droite pour Ensemble) :
+  les deux bouts de la pièce sont en opposition, l'un monte quand l'autre descend.
+- **Accents** : en tête de phrase, toutes les lampes flashent (avec plus de blanc si « Blanc des
+  flashs » en demande).
+- **Couleurs** : une par moment du morceau, en fondu de l'une à l'autre. **Drop** pour le groove
+  et le drop, **Montée** au départ d'une montée (elle blanchit jusqu'au drop), **Break** pour les
+  passages sans kick (une base franche qui ondule), **Filtres** pour les passe-haut et passe-bas
+  reconnus à l'écoute du son.
+- **Blanc des flashs** (aucun par défaut) : kicks, têtes de phrase et drop restent de la couleur
+  pure. À 100 %, l'ancien rendu revient (moitié de blanc sur les kicks, drop tout blanc). Les
+  montées blanchissent quoi qu'il en soit.
 - **Régisseur** (disposition Auto) : une nouvelle section s'ouvre au drop, au retour du groove et
   toutes les deux phrases (64 kicks sans structure). Il choisit alors, parmi les mouvements que la
   configuration permet, selon l'énergie des 4 dernières secondes comparée à celle du set :
@@ -578,9 +588,12 @@ avoir besoin du son.
   l'imposer.
 - **Lueur des breaks** (30 % par défaut) : dans un break, la lumière ne descend jamais sous ce
   niveau, elle flotte au-dessus.
-- **Couleurs de la trame :** la couleur de la waveform sur le temps en cours (rouge pour les graves,
-  vert pour les médiums, bleu pour les aigus) teinte les lampes. Case « Couleurs de la trame » de
-  l'onglet Couleurs, ou `--palette-only`, pour garder la palette.
+- **Couleurs :** la palette, une couleur par moment (Drop, Montée, Break), comme les phrases
+  rekordbox les annoncent.
+- **Couleurs de la trame** (décochée par défaut) : la couleur de la waveform sur le temps en cours
+  (rouge pour les graves, vert pour les médiums, bleu pour les aigus), sans sa part de blanc, teinte
+  les lampes au lieu de la palette. Case « Couleurs de la trame » de l'onglet Couleurs, ou
+  `--trame`.
 - **Retard de l'OPUS :** onglet Tempo du live. Si les flashs tombent toujours un peu après les kicks,
   monte-le ; il s'ajoute à l'avance des lampes et reste enregistré.
 - Limites : la waveform est celle du morceau, pas du mix (faders, EQ et filtres n'y changent rien) ;

@@ -399,6 +399,32 @@ flashe que sur les rolls de kicks, comme avant.
 **À essayer :** charge un morceau sur la platine 3 : les bandes passent en 4 pistes. Repasse en 2
 avec le bouton : elles y restent jusqu'au prochain chargement sur 3 ou 4.
 
+## [34] Moins de blanc, une couleur par moment du morceau
+
+- **Plus de blanc sur les kicks ni au drop.** Kicks, têtes de phrase et drop restent de la couleur
+  pure. Seules les montées blanchissent, de plus en plus jusqu'au drop. Nouveau curseur **Blanc
+  des flashs** (mode simple et onglet Flashs) : à 100 %, on retrouve l'ancien rendu.
+- **Le drop tombe d'emblée dans sa couleur**, à pleine puissance, sans le fondu depuis la couleur
+  de la montée ni le blanc qui traînait.
+- **Une couleur par moment** (onglet Couleurs) : **Drop**, **Montée** (au départ, elle blanchit
+  ensuite), **Break**. **Filtres** n'apparaît qu'à l'écoute du son : avec l'OPUS en Wi-Fi, aucun
+  filtre n'est reconnu.
+- **Couleurs de la trame décochées par défaut** : c'est elle qui donnait le rose et le bleu-vert
+  clair (la waveform mélange les trois bandes, donc beaucoup de blanc). L'ancien réglage est
+  oublié, la palette reprend la main. Si tu la recoches, sa couleur est maintenant purifiée de
+  son blanc.
+- **Breaks plus intenses, en vague** : la lumière part d'une base franche (au lieu de suivre la
+  seule énergie, souvent faible) et ondule d'une lampe à l'autre sur deux mesures, l'une monte
+  quand l'autre descend. Avant, avec deux lampes aux deux bouts de la pièce, elles ondulaient
+  ensemble et la vague ne se voyait pas, et en disposition Ensemble il n'y en avait pas du tout.
+
+**À essayer :**
+1. Règle Drop en rouge et Break en bleu (ta palette enregistrée est rose et violette).
+2. Un groove : rouge pur sur les kicks, sans blanc. Un drop : rouge plein d'un coup.
+3. Une montée : la couleur Montée, qui blanchit jusqu'au drop.
+4. Un Down ou un break : bleu franc, qui passe d'une lampe à l'autre en vague. Trop sombre ou trop
+   fort : « Lueur des breaks ». Vague trop rapide sur le temps : « Houle des breaks » (Mouvement).
+
 ---
 
 ## Ce qui a été vérifié de mon côté

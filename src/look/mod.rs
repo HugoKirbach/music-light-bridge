@@ -29,12 +29,13 @@ use phases::PhaseTracker;
 
 /// Part de la lueur qui suit les basses, au-dessus du fond.
 const GLOW: f32 = 0.25;
-/// Part de blanc au sommet d'un flash de kick, pour un impact plus franc.
+/// Part de blanc au sommet d'un flash de kick : dans une montée (elle blanchit), ou ailleurs avec le
+/// réglage « Blanc des flashs » au maximum.
 const WHITE_PUNCH: f32 = 0.5;
 /// En tête de phrase, toutes les lampes flashent, avec plus de blanc.
 const PHRASE_PUNCH: f32 = 0.85;
 /// Appel d'une montée : un flash sans blanc, de 20 % plus 60 % de son attaque, au plus 70 %
-/// (un kick monte à 100 %, le drop à 100 % et tout blanc).
+/// (un kick monte à 100 %, le drop à 100 %).
 const CALL_BASE: f32 = 0.2;
 const CALL_GAIN: f32 = 0.6;
 const CALL_MAX: f32 = 0.7;
@@ -66,10 +67,13 @@ const BREATH_RELEASE: f32 = 0.9;
 const BREATH_KICK: f32 = 0.25;
 /// Fondu d'une animation à l'autre.
 const MOTION_FADE: f32 = 0.4;
-/// Ondulation des breaks : elle parcourt la pièce en deux mesures (en 4 s sans tempo) et creuse la
-/// respiration de 35 %.
+/// Ondulation des breaks : une vague qui parcourt la pièce en deux mesures (en 4 s sans tempo) et
+/// creuse la respiration de 45 %.
 const RIPPLE_PERIOD: f32 = 4.0;
-const RIPPLE_DEPTH: f32 = 0.35;
+const RIPPLE_DEPTH: f32 = 0.45;
+/// Respiration : une base franche (50 %), le reste suit l'énergie, pour une couleur intense même
+/// dans un break calme.
+const BREATH_BASE: f32 = 0.5;
 /// Lampes « aigus » (graves / aigus) : jusqu'à 70 % de luminosité avec médiums et aigus.
 const TREBLE_GLOW: f32 = 0.7;
 /// Hors groove, un kick porte au moins le quart des basses habituelles du groove : un charleston ou
@@ -172,21 +176,30 @@ impl Rotation {
     }
 }
 
-/// Les trois couleurs choisies, en sRGB 8 bits. Leur luminosité plafonne celle de la scène :
-/// du noir en temps creux éteint la lampe pendant les breaks.
+/// Les couleurs choisies, une par moment du morceau, en sRGB 8 bits. Leur luminosité plafonne
+/// celle de la scène : du noir en temps creux éteint la lampe pendant les breaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Palette {
-    /// Groove : kicks réguliers, son équilibré.
+    /// Groove et drop : kicks réguliers, son équilibré.
     pub primary: [u8; 3],
     /// Temps creux : break, passage sans kick.
     pub calm: [u8; 3],
-    /// Filtres passe-haut ou passe-bas.
+    /// Filtres passe-haut ou passe-bas (à l'écoute du son).
     pub filtered: [u8; 3],
+    /// Montée : la couleur de départ, qui blanchit jusqu'au drop.
+    #[serde(default = "Palette::default_build")]
+    pub build: [u8; 3],
+}
+
+impl Palette {
+    fn default_build() -> [u8; 3] {
+        [255, 110, 0]
+    }
 }
 
 impl Default for Palette {
     fn default() -> Self {
-        Self { primary: [255, 40, 0], calm: [40, 70, 255], filtered: [180, 0, 255] }
+        Self { primary: [255, 0, 0], calm: [0, 40, 255], filtered: [180, 0, 255], build: Self::default_build() }
     }
 }
 
@@ -210,11 +223,14 @@ pub struct Dynamics {
     pub swell: f32,
     /// Lueur des breaks (0 à 1) : la lumière n'y descend jamais plus bas, elle flotte au-dessus.
     pub break_glow: f32,
+    /// Blanc au sommet des flashs hors des montées, et au drop (0 : couleur pure ; 1 : moitié de
+    /// blanc sur les kicks, drop tout blanc). Les montées blanchissent quoi qu'il en soit.
+    pub white: f32,
 }
 
 impl Default for Dynamics {
     fn default() -> Self {
-        Self { flash: 1.0, decay: 0.12, floor: 0.04, curve: 1.4, gradient: 20.0, swell: 0.35, break_glow: 0.3 }
+        Self { flash: 1.0, decay: 0.12, floor: 0.04, curve: 1.4, gradient: 20.0, swell: 0.35, break_glow: 0.3, white: 0.0 }
     }
 }
 
@@ -389,8 +405,9 @@ pub struct ReactiveLook {
     since_kick: f32,
     /// La grille de temps confirme des kicks réguliers (`None` tant que le tempo est inconnu).
     grid_groove: Option<bool>,
-    /// Part des couleurs « temps creux » et « filtres » dans la scène, en fondu.
+    /// Part des couleurs « temps creux », « montée » et « filtres » dans la scène, en fondu.
     calm: f32,
+    building: f32,
     filtered: f32,
     /// Équilibre grave/aigu habituel du morceau.
     tilt_reference: Option<f32>,
@@ -444,6 +461,7 @@ impl Default for ReactiveLook {
             since_kick: 0.0,
             grid_groove: None,
             calm: 0.0,
+            building: 0.0,
             filtered: 0.0,
             tilt_reference: None,
             drift: None,
@@ -527,21 +545,24 @@ impl ReactiveLook {
         });
         self.kicks += 1;
         let bar = accent != Accent::Beat;
+        // Du blanc sur les kicks dans une montée seulement, ou ailleurs si le réglage en demande.
+        let white = if self.phases.phase == Phase::BuildUp { 1.0 } else { self.dynamics.white.clamp(0.0, 1.0) };
+        let (phrase_punch, punch) = (PHRASE_PUNCH * white, WHITE_PUNCH * white);
         for (i, lamp) in self.lamps.iter_mut().enumerate() {
             let at = lamp.at;
             let chased = chase.as_ref().is_some_and(|(steps, current)| steps[i] == *current);
             match spread {
-                _ if accent == Accent::Phrase => lamp.fire(1.0, PHRASE_PUNCH),
-                _ if single => lamp.fire(1.0, WHITE_PUNCH),
-                Spread::Auto | Spread::Together => lamp.fire(1.0, WHITE_PUNCH),
+                _ if accent == Accent::Phrase => lamp.fire(1.0, phrase_punch),
+                _ if single => lamp.fire(1.0, punch),
+                Spread::Auto | Spread::Together => lamp.fire(1.0, punch),
                 Spread::Wave | Spread::Diagonal | Spread::Depth | Spread::Rise | Spread::Ripple if bar || chased => {
-                    lamp.fire(1.0, WHITE_PUNCH);
+                    lamp.fire(1.0, punch);
                 }
-                Spread::Alternate if bar || at.right == parity => lamp.fire(1.0, WHITE_PUNCH),
-                Spread::PingPong if bar || at.back == parity => lamp.fire(1.0, WHITE_PUNCH),
-                Spread::Corners if bar || at.corner == parity => lamp.fire(1.0, WHITE_PUNCH),
-                Spread::Rotate if at.turn == turn => lamp.fire(1.0, WHITE_PUNCH),
-                Spread::Split if !at.odd => lamp.fire(1.0, WHITE_PUNCH),
+                Spread::Alternate if bar || at.right == parity => lamp.fire(1.0, punch),
+                Spread::PingPong if bar || at.back == parity => lamp.fire(1.0, punch),
+                Spread::Corners if bar || at.corner == parity => lamp.fire(1.0, punch),
+                Spread::Rotate if at.turn == turn => lamp.fire(1.0, punch),
+                Spread::Split if !at.odd => lamp.fire(1.0, punch),
                 _ => {}
             }
         }
@@ -671,14 +692,21 @@ impl ReactiveLook {
         self.drop_advance = advance;
     }
 
-    /// Drop à la main (télécommande) : éclat blanc à pleine puissance, partout.
+    /// Drop à la main (télécommande) : éclat à pleine puissance, partout, dans la couleur du groove.
     pub fn drop_now(&mut self) {
         self.fire_drop();
     }
 
+    /// Le drop : pleine puissance partout, d'emblée dans la couleur du groove (le blanc et la
+    /// couleur de la montée ne s'effacent pas en fondu), avec le blanc du réglage.
     fn fire_drop(&mut self) {
+        let white = self.dynamics.white.clamp(0.0, 1.0);
         for lamp in &mut self.lamps {
-            lamp.fire(1.0, 1.0);
+            lamp.fire(1.0, white);
+        }
+        (self.calm, self.building) = (0.0, 0.0);
+        if self.motion == Motion::Auto {
+            self.weights = [1.0, 0.0, 0.0];
         }
     }
 
@@ -710,7 +738,7 @@ impl ReactiveLook {
 
         let pulse = Pulse { since_kick: self.since_kick, grid_groove: self.grid_groove };
         let drops = matches!(self.motion, Motion::Auto | Motion::BuildUp);
-        // Le drop : un éclat blanc à pleine puissance, partout ; d'avance quand la structure le
+        // Le drop : un éclat à pleine puissance, partout ; d'avance quand la structure le
         // prévoit, pour qu'il tombe pile.
         if drops && self.phases.anticipate_drop(self.drop_advance) {
             self.fire_drop();
@@ -740,7 +768,10 @@ impl ReactiveLook {
             self.turn();
         }
         self.hue = approach(self.hue, self.hue_target, dt, SCENE_FADE);
+        // Drop montré d'avance : la scène est déjà celle du groove, en attendant sa confirmation.
+        let dropping = self.drop_shown && self.motion == Motion::Auto;
         let target = match self.active_motion() {
+            _ if dropping => 0,
             Motion::Breath => 1,
             Motion::BuildUp => 2,
             Motion::Auto | Motion::Pulse => 0,
@@ -752,12 +783,18 @@ impl ReactiveLook {
             *weight = approach(*weight, if i == target { 1.0 } else { 0.0 }, dt, MOTION_FADE);
         }
 
-        let calm = if self.phases.grooving { 0.0 } else { 1.0 };
+        let calm = if self.phases.grooving || self.drop_shown { 0.0 } else { 1.0 };
+        let building = if self.phases.phase == Phase::BuildUp && !self.drop_shown { 1.0 } else { 0.0 };
         let filtered = self.filter_amount(levels.tilt, dt);
         self.calm = approach(self.calm, calm, dt, SCENE_FADE);
+        self.building = approach(self.building, building, dt, SCENE_FADE);
         self.filtered = approach(self.filtered, filtered, dt, SCENE_FADE);
         let chosen = blend(
-            blend(color(self.palette.primary), color(self.palette.calm), self.calm),
+            blend(
+                blend(color(self.palette.primary), color(self.palette.calm), self.calm),
+                color(self.palette.build),
+                self.building,
+            ),
             color(self.palette.filtered),
             self.filtered,
         );
@@ -802,6 +839,9 @@ impl ReactiveLook {
         let [w_pulse, w_breath, w_build] = self.weights;
         let total = (w_pulse + w_breath + w_build).max(1e-6);
         let several = self.lamps.len() > 1;
+        // Dans un break, la respiration part d'une base franche : une couleur intense qui ondule,
+        // sauf si la lueur des breaks à zéro permet le noir.
+        let breath_base = if self.dynamics.break_glow > 0.0 { BREATH_BASE * self.calm } else { 0.0 };
 
         for (lamp, out) in self.lamps.iter().zip(&mut self.colors) {
             let flash = lamp.flash * intensity;
@@ -809,14 +849,21 @@ impl ReactiveLook {
             let pulse = (glow + (1.0 - glow) * flash, lamp.punch * flash);
             // Respiration : suit l'énergie, un kick n'ajoute qu'une houle. Une ondulation lente
             // parcourt la pièce le long du mouvement (tout autour en rotation).
-            let ripple = match lamps::sweep_coordinate(spread, &lamp.at) {
-                Some(place) if several => 1.0 - RIPPLE_DEPTH * (0.5 + 0.5 * (TAU * (ripple_phase - place)).sin()),
-                _ => 1.0,
+            // La vague va d'un bout à l'autre de la pièce en une demi-ondulation : les deux bouts
+            // sont en opposition (avec deux lampes, l'une monte quand l'autre descend) ; un tour
+            // entier en rotation ; de gauche à droite pour une disposition sans direction.
+            let place = match lamps::sweep_coordinate(spread, &lamp.at) {
+                Some(angle) if spread == Spread::Rotate => angle,
+                Some(place) => 0.5 * place,
+                None => 0.5 * lamp.at.x,
             };
-            let breathing = 0.8 * self.breath * ripple * swell + BREATH_KICK * flash;
+            let ripple =
+                if several { 1.0 - RIPPLE_DEPTH * (0.5 + 0.5 * (TAU * (ripple_phase - place)).sin()) } else { 1.0 };
+            let energy = breath_base + (1.0 - breath_base) * self.breath.min(1.0);
+            let breathing = 0.8 * energy * ripple * swell + BREATH_KICK * flash;
             let breath = ((floor + (1.0 - floor) * breathing).min(1.0), 0.0);
             // Montée : la lumière s'intensifie et blanchit, les flashs gagnent en force.
-            let tension = floor + (1.0 - floor) * (0.15 + 0.55 * build);
+            let tension = floor + (1.0 - floor) * (0.35 + 0.65 * build);
             let strength = flash * (0.4 + 0.6 * build);
             let build_up = (tension + (1.0 - tension) * strength, (lamp.punch * strength + 0.4 * build).min(1.0));
 
@@ -880,8 +927,8 @@ mod tests {
     const FRAME: Duration = Duration::from_micros(16_667);
     const FRAMES_PER_SECOND: usize = 60;
 
-    /// Rouge pour le groove, bleu pour les temps creux, vert pour les filtres.
-    const PALETTE: Palette = Palette { primary: [255, 0, 0], calm: [0, 0, 255], filtered: [0, 255, 0] };
+    /// Rouge pour le groove, bleu pour les temps creux, vert pour les filtres, jaune pour la montée.
+    const PALETTE: Palette = Palette { primary: [255, 0, 0], calm: [0, 0, 255], filtered: [0, 255, 0], build: [255, 255, 0] };
 
     /// Rendu sans dégradé de teintes ni variantes du régisseur, pour juger les couleurs de la scène.
     fn still(palette: Palette) -> ReactiveLook {
@@ -1026,7 +1073,7 @@ mod tests {
     /// la scène, pour ne mesurer que la luminosité).
     fn after_flash(dynamics: Dynamics, frames: usize) -> u16 {
         let white = [255, 255, 255];
-        let palette = Palette { primary: white, calm: white, filtered: white };
+        let palette = Palette { primary: white, calm: white, filtered: white, build: white };
         let mut look = ReactiveLook { dynamics, palette, ..ReactiveLook::default() };
         look.kick();
         let mut color = look.render(FRAME, Levels::default());
@@ -1054,7 +1101,7 @@ mod tests {
 
     fn white_look(motion: Motion) -> ReactiveLook {
         let white = [255, 255, 255];
-        let palette = Palette { primary: white, calm: white, filtered: white };
+        let palette = Palette { primary: white, calm: white, filtered: white, build: white };
         ReactiveLook { motion, palette, ..ReactiveLook::default() }
     }
 
@@ -1090,7 +1137,7 @@ mod tests {
         let early = perform(&mut look, 3.0, |t| sound(0.1, -20.0 + 3.3 * t), None);
         assert_eq!((look.phase(), look.active_motion()), (Phase::BuildUp, Motion::BuildUp));
         let late = perform(&mut look, 4.0, |t| sound(0.1, -10.1 + 3.3 * t), None);
-        assert!(brightness(late) > brightness(early) + u16::MAX / 10, "la montée s'intensifie");
+        assert!(brightness(late) > brightness(early) + u16::MAX / 10, "la montée s'intensifie : {} puis {}", brightness(early), brightness(late));
 
         // Drop : le premier gros kick ramène le groove, dans un éclat blanc.
         let drop = perform(&mut look, 1.0 / 60.0, |_| sound(0.9, 0.0), Some(1));
@@ -1391,14 +1438,44 @@ mod tests {
             look.kick_at(Accent::Phrase);
             assert_eq!(lit(&mut look, FRAME), [true; 4], "{spread:?}");
         }
-        // Plus de blanc qu'un temps ordinaire : le vert et le bleu montent avec le rouge.
+        // Sans blanc demandé, kicks et têtes de phrase restent de la couleur pure.
         let mut look = room(Spread::Together);
-        look.kick_at(Accent::Beat);
-        let beat = look.render(FRAME, Levels::default());
-        look.cancel_flash();
-        look.kick_at(Accent::Phrase);
-        let phrase = look.render(FRAME, Levels::default());
-        assert!(phrase.g > beat.g && phrase.b > beat.b, "{beat:?} {phrase:?}");
+        let flash = |look: &mut ReactiveLook, accent| {
+            look.cancel_flash();
+            look.kick_at(accent);
+            look.render(FRAME, Levels::default())
+        };
+        for accent in [Accent::Beat, Accent::Phrase] {
+            let color = flash(&mut look, accent);
+            assert!(color.r == u16::MAX && color.g == 0 && color.b == 0, "{accent:?} : {color:?}");
+        }
+        // Avec du blanc : plus en tête de phrase qu'un temps ordinaire, le vert et le bleu montent.
+        look.dynamics.white = 1.0;
+        let beat = flash(&mut look, Accent::Beat);
+        let phrase = flash(&mut look, Accent::Phrase);
+        assert!(beat.g > 0 && phrase.g > beat.g && phrase.b > beat.b, "{beat:?} {phrase:?}");
+    }
+
+    #[test]
+    fn the_drop_is_the_pure_groove_color_and_the_build_up_whitens() {
+        let mut look = still(PALETTE);
+        let guide = |look: &mut ReactiveLook, phase, build, seconds: f32| {
+            look.set_guide(Some(Guide { phase, build, drop_in: None, color: None }));
+            let mut color = Rgb::OFF;
+            for _ in 0..(seconds * FRAMES_PER_SECOND as f32) as usize {
+                color = look.render(FRAME, sound(0.5, -20.0));
+            }
+            color
+        };
+        // Break : le bleu choisi, franc et sans blanc.
+        let calm = guide(&mut look, Phase::Calm, 0.0, 3.0);
+        assert!(calm.r < u16::MAX / 20 && calm.g == 0 && calm.b > u16::MAX / 3, "{calm:?}");
+        // Fin de montée : sa couleur (jaune), blanchie.
+        let late = guide(&mut look, Phase::BuildUp, 0.95, 3.0);
+        assert!(late.b > u16::MAX / 5 && late.r > late.b, "{late:?}");
+        // Drop : rouge plein d'emblée, sans blanc ni reste de la montée.
+        let drop = guide(&mut look, Phase::Groove, 0.0, 1.0 / 60.0);
+        assert!(drop.r == u16::MAX && drop.g == 0 && drop.b == 0, "{drop:?}");
     }
 
     /// Joue `seconds` avec la grille dans l'état `grid`, les basses à `bass`, un kick tous les
@@ -1556,6 +1633,25 @@ mod tests {
         look.dynamics.gradient = 0.0;
         let still = look.render_lamps(FRAME, quiet).to_vec();
         assert!(still.iter().all(|c| *c == still[0]), "{still:?}");
+    }
+
+    #[test]
+    fn a_break_wave_goes_from_one_lamp_to_the_other() {
+        // Deux lampes, toutes ensemble (sans direction) : la vague passe quand même de l'une à
+        // l'autre, l'une à son sommet quand l'autre est au creux.
+        let mut look = white_look(Motion::Breath);
+        look.spread = Spread::Together;
+        look.dynamics.swell = 0.0;
+        look.set_lamps(&[-1.0, 1.0]);
+        let mut beats = 0.0;
+        let mut widest = 0u16;
+        for _ in 0..8 * FRAMES_PER_SECOND {
+            beats += FRAME.as_secs_f64() / 0.5;
+            look.set_beat_time(Some(BeatTime { beats, period: 0.5 }));
+            let lamps = look.render_lamps(FRAME, sound(0.5, -20.0));
+            widest = widest.max(brightness(lamps[0]).abs_diff(brightness(lamps[1])));
+        }
+        assert!(widest > u16::MAX / 10, "écart le plus grand entre les deux lampes : {widest}");
     }
 
     #[test]

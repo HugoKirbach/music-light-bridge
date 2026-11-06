@@ -41,6 +41,7 @@ pub(super) const STAGE_SKIN: Skin =
 #[derive(Clone, Copy)]
 enum Knob {
     Intensity,
+    White,
     Decay,
     Floor,
     Curve,
@@ -59,7 +60,7 @@ impl App {
             Page::Colors if !self.settings.expert => {
                 self.palette_block(ui, width, skin);
                 ui.add_space(6.0);
-                knobs(ui, width, &[Knob::Intensity, Knob::BreakGlow], |ui, knob| self.knob(ui, knob, skin.label));
+                knobs(ui, width, &[Knob::Intensity, Knob::White, Knob::BreakGlow], |ui, knob| self.knob(ui, knob, skin.label));
             }
             Page::Colors => self.colors_page(ui, width, skin),
             Page::Flashes => self.flashes_page(ui, width, skin),
@@ -76,7 +77,7 @@ impl App {
         self.palette_block(ui, width, skin);
         ui.add_space(6.0);
         theme::section(ui, "FLASHS ET BREAKS");
-        knobs(ui, width, &[Knob::Intensity, Knob::BreakGlow], |ui, knob| self.knob(ui, knob, skin.label));
+        knobs(ui, width, &[Knob::Intensity, Knob::White, Knob::BreakGlow], |ui, knob| self.knob(ui, knob, skin.label));
     }
 
     fn motion_page(&mut self, ui: &mut Ui, width: f32, skin: &Skin, status: Option<&Status>) {
@@ -148,7 +149,8 @@ impl App {
     /// Les trois couleurs et leur nuancier, et, avec l'OPUS, les couleurs de la trame.
     fn palette_block(&mut self, ui: &mut Ui, width: f32, skin: &Skin) {
         let wide = width > 700.0;
-        let swatch = if wide { vec2(120.0, 64.0) } else { vec2((width - 16.0) / 3.0, 64.0) };
+        let count = self.shown_colors().len() as f32;
+        let swatch = if wide { vec2(110.0, 64.0) } else { vec2((width - 8.0 * (count - 1.0)) / count, 64.0) };
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 theme::section(ui, "COULEURS");
@@ -164,7 +166,8 @@ impl App {
         });
         if self.follows_opus() {
             let hint = "Avec l'OPUS : les lampes prennent la couleur de la waveform du morceau (rouge pour les graves, \
-                        vert pour les médiums, bleu pour les aigus) au lieu de la palette";
+                        vert pour les médiums, bleu pour les aigus), purifiée de son blanc, au lieu de la palette. \
+                        Éteint : chaque moment du morceau a sa couleur de la palette";
             if theme::chip(ui, "Couleurs de la trame", self.settings.trame).on_hover_text(hint).clicked() {
                 self.set_trame(!self.settings.trame);
             }
@@ -184,7 +187,7 @@ impl App {
 
     fn flashes_page(&mut self, ui: &mut Ui, width: f32, skin: &Skin) {
         theme::section(ui, "ALLURE DES FLASHS");
-        let all = [Knob::Intensity, Knob::Decay, Knob::Floor, Knob::Curve];
+        let all = [Knob::Intensity, Knob::White, Knob::Decay, Knob::Floor, Knob::Curve];
         knobs(ui, width, &all, |ui, knob| self.knob(ui, knob, skin.label));
     }
 
@@ -197,6 +200,13 @@ impl App {
                 let changed = theme::slider_row(ui, "Intensité", format!("{v:.0} %"), egui::Slider::new(&mut v, 0.0..=100.0), label);
                 d.flash = v / 100.0;
                 (changed, "Jusqu'où monte un flash au-dessus de la lueur")
+            }
+            Knob::White => {
+                let mut v = d.white * 100.0;
+                let shown = if v < 0.5 { "aucun".to_owned() } else { format!("{v:.0} %") };
+                let changed = theme::slider_row(ui, "Blanc des flashs", shown, egui::Slider::new(&mut v, 0.0..=100.0), label);
+                d.white = v / 100.0;
+                (changed, "Blanc au sommet des kicks et du drop : aucun, la couleur reste pure ; les montées blanchissent quoi qu'il en soit")
             }
             Knob::Decay => {
                 let mut v = d.decay * 1000.0;

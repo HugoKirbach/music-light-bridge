@@ -444,14 +444,21 @@ impl App {
         match index {
             0 => &mut self.palette.primary,
             1 => &mut self.palette.calm,
+            3 => &mut self.palette.build,
             _ => &mut self.palette.filtered,
         }
     }
 
-    /// Les trois pastilles de la palette ; un clic ouvre ou ferme le nuancier de l'une d'elles.
+    /// Couleurs de la palette montrées : sans « Filtres » quand l'OPUS mène la lumière (le son
+    /// n'est pas écouté, aucun filtre n'est reconnu).
+    fn shown_colors(&self) -> Vec<(usize, &'static str, &'static str)> {
+        COLORS.into_iter().filter(|&(i, _, _)| i != 2 || !self.follows_opus()).collect()
+    }
+
+    /// Les pastilles de la palette ; un clic ouvre ou ferme le nuancier de l'une d'elles.
     fn swatches(&mut self, ui: &mut egui::Ui, size: egui::Vec2, ring: egui::Color32) {
         ui.horizontal(|ui| {
-            for (i, (name, hint)) in COLOR_NAMES.into_iter().zip(COLOR_HINTS).enumerate() {
+            for (i, name, hint) in self.shown_colors() {
                 let color = theme::rgb(*self.color_mut(i));
                 let editing = self.editing_color == Some(i);
                 if theme::swatch(ui, size, color, name, editing, ring).on_hover_text(hint).clicked() {
@@ -467,7 +474,8 @@ impl App {
             ui.label(theme::text("Clique une couleur pour la changer.", theme::regular(13.0), hint_color));
             return;
         };
-        ui.label(theme::text(COLOR_HINTS[i], theme::regular(13.0), hint_color));
+        let hint = COLORS.iter().find(|&&(index, _, _)| index == i).map_or("", |&(_, _, hint)| hint);
+        ui.label(theme::text(hint, theme::regular(13.0), hint_color));
         let mut color = theme::rgb(*self.color_mut(i));
         let changed = ui
             .scope(|ui| {
@@ -578,9 +586,13 @@ fn flash_text(mode: FlashMode) -> (&'static str, &'static str) {
     }
 }
 
-const COLOR_NAMES: [&str; 3] = ["Groove", "Creux", "Filtres"];
-const COLOR_HINTS: [&str; 3] =
-    ["Couleur principale : kicks réguliers", "Temps creux : break, passage sans kick", "Filtres passe-haut ou passe-bas"];
+/// Les couleurs de la palette, dans l'ordre du morceau : rang (voir `color_mut`), nom, explication.
+const COLORS: [(usize, &str, &str); 4] = [
+    (0, "Drop", "Groove et drop : kicks réguliers, couleur pure"),
+    (3, "Montée", "Montée : cette couleur au départ, qui blanchit jusqu'au drop"),
+    (1, "Break", "Break, passage sans kick : la lumière ondule en vagues, jamais noire"),
+    (2, "Filtres", "Filtres passe-haut ou passe-bas, reconnus à l'écoute du son"),
+];
 
 /// Tempo lisible : sans décimale quand il tombe juste.
 fn format_bpm(bpm: Option<f64>) -> String {
