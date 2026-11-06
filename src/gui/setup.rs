@@ -34,6 +34,12 @@ impl App {
             .exact_size(60.0)
             .frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(24, 0)))
             .show(ui, |ui| self.header(ui));
+        if self.history.is_some() {
+            egui::CentralPanel::default()
+                .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(40, 24)))
+                .show(ui, |ui| self.history_view(ui));
+            return;
+        }
         if two_columns {
             egui::Panel::right("allure")
                 .exact_size(ASIDE_WIDTH)
@@ -64,6 +70,7 @@ impl App {
         let bridge = self.bridge.clone();
         let bridge = bridge.lock().unwrap_or_else(PoisonError::into_inner);
         let mut picked = None;
+        let mut toggle_history = false;
         ui.horizontal_centered(|ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
             ui.painter().circle_stroke(rect.center(), 11.0, Stroke::new(2.0, ACCENT));
@@ -80,6 +87,12 @@ impl App {
             ui.add_space(12.0);
             let current = usize::from(self.settings.expert);
             picked = ui.scope(|ui| theme::segmented(ui, 170.0, &WINDOW_MODES, current)).inner;
+            ui.add_space(8.0);
+            let (label, hint) = match self.history {
+                Some(_) => ("Retour à la session", "Revenir à la préparation du live"),
+                None => ("Sets joués", "Historique des sets joués avec l'OPUS-QUAD : setlists, exports en image et en texte"),
+            };
+            toggle_history = theme::small_button(ui, Icon::List, label).on_hover_text(hint).clicked();
             let wide = ui.available_width() > 520.0;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &*bridge {
                 _ if !wide => {}
@@ -107,6 +120,10 @@ impl App {
         drop(bridge);
         if let Some(i) = picked {
             self.set_expert(i == 1);
+        }
+        if toggle_history {
+            // Relu à chaque ouverture : le set qui vient de se finir y est.
+            self.history = if self.history.is_some() { None } else { Some(super::history::History::load()) };
         }
     }
 

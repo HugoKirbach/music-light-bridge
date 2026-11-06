@@ -4,6 +4,7 @@
 //! tempo en très grand, et un dock replié en bas qui rouvre ces mêmes pages.
 
 mod capture;
+mod history;
 pub mod icon;
 mod light;
 mod plan;
@@ -52,6 +53,9 @@ pub fn run(rt: Arc<Runtime>, cfg: Config) -> Result<()> {
     let mut app = App::new(rt, cfg);
     if let Some(capture) = capture {
         app.settings.expert = capture.expert;
+        if std::env::var_os("DJB_CAPTURE_HISTORY").is_some() {
+            app.history = Some(history::History::load());
+        }
         app.capture = Some(capture);
     }
     eframe::run_native(
@@ -91,6 +95,8 @@ enum Tab {
     Tempo,
     Lamps,
     Source,
+    /// La setlist du set en cours (avec l'OPUS).
+    Setlist,
 }
 
 struct App {
@@ -149,6 +155,8 @@ struct App {
     /// dont l'arrivée fait passer en 4 pistes.
     deck_layout: waveform::Layout,
     outer_tracks: [u32; 2],
+    /// Historique des sets joués, ouvert à la place de la session.
+    history: Option<history::History>,
 }
 
 impl App {
@@ -200,6 +208,7 @@ impl App {
             two_columns: true,
             deck_layout: waveform::Layout::Two,
             outer_tracks: [0; 2],
+            history: None,
         };
         app.refresh_devices();
         app

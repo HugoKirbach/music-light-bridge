@@ -29,6 +29,8 @@ pub const OPUS_FIRST_DEVICE: u8 = 9;
 
 /// Types des blocs de métadonnées que l'OPUS envoie d'un morceau quand il est chargé.
 pub mod block {
+    /// Titre et artiste (masqués, voir `TrackInfo`).
+    pub const TRACK_INFO: u8 = 0x01;
     /// Pochette, en JPEG.
     pub const ARTWORK: u8 = 0x02;
     /// Aperçu de la waveform en couleur (1200 points).
@@ -450,9 +452,103 @@ impl SongStructure {
     }
 }
 
+/// Titre et artiste d'un morceau (bloc de métadonnées 0x01).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrackInfo {
+    pub title: String,
+    pub artist: String,
+}
+
+/// Champs du bloc 0x01 : titre puis artiste, 128 caractères UTF-16 (gros-boutiste) chacun.
+const INFO_FIELD: usize = 0x100;
+
+impl TrackInfo {
+    /// Décode un bloc 0x01. Il est masqué octet par octet : chaque octet est tourné de `r` bits
+    /// vers la gauche puis passé en XOR avec une clé de deux octets (poids fort, poids faible), `r`
+    /// et la clé changeant d'un morceau à l'autre. Le remplissage des champs (des zéros) donne la
+    /// clé, le caractère de deux octets le plus fréquent ; `r` est celui qui donne le texte le plus
+    /// lisible.
+    pub fn parse(block: &[u8]) -> Option<Self> {
+        if block.len() < 2 * INFO_FIELD {
+            return None;
+        }
+        let units: Vec<[u8; 2]> = block[..2 * INFO_FIELD].as_chunks::<2>().0.to_vec();
+        let mut counts: HashMap<[u8; 2], usize> = HashMap::new();
+        for unit in &units {
+            *counts.entry(*unit).or_default() += 1;
+        }
+        let key = counts.into_iter().max_by_key(|&(unit, count)| (count, unit))?.0;
+        let decode = |turn: u32| {
+            let field = |units: &[[u8; 2]]| {
+                let chars: Vec<u16> = units
+                    .iter()
+                    .map(|&[hi, lo]| u16::from_be_bytes([(hi ^ key[0]).rotate_right(turn), (lo ^ key[1]).rotate_right(turn)]))
+                    .take_while(|&c| c != 0)
+                    .collect();
+                String::from_utf16_lossy(&chars).trim().to_owned()
+            };
+            let half = INFO_FIELD / 2;
+            Self { title: field(&units[..half]), artist: field(&units[half..2 * half]) }
+        };
+        let best = (0..8).map(decode).max_by_key(|info| legibility(&info.title) + legibility(&info.artist))?;
+        (legibility(&best.title) > 0 && !best.title.is_empty()).then_some(best)
+    }
+}
+
+/// Lisibilité d'un texte : les lettres, chiffres et espaces comptent, la ponctuation un peu, les
+/// caractères de contrôle ou de remplacement pénalisent.
+fn legibility(text: &str) -> i32 {
+    text.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | ' ' => 3,
+            '(' | ')' | '-' | '&' | ',' | '.' | '\'' | '!' | '/' | ':' | '[' | ']' => 1,
+            c if c.is_control() || c == char::REPLACEMENT_CHARACTER => -6,
+            c if c.is_alphabetic() => 1,
+            _ => -2,
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bloc 0x01 reconstitué : titre et artiste masqués tels que reçus, puis le remplissage
+    /// (la clé, zéros masqués) et la fin du bloc.
+    fn info_block(title: &str, artist: &str, key: &str, tail: &str) -> Vec<u8> {
+        let field = |hex: &str| {
+            let mut bytes = hex::decode(hex).unwrap();
+            while bytes.len() < INFO_FIELD {
+                bytes.extend(hex::decode(key).unwrap());
+            }
+            bytes
+        };
+        [field(title), field(artist), hex::decode(tail).unwrap()].concat()
+    }
+
+    #[test]
+    fn decodes_real_track_info_whatever_its_mask() {
+        // Platine 1, morceau 0x511 : chaque octet inversé.
+        let block = info_block(
+            "ffb0ff91ffdfffb2ff86ffdfffb2ff96ff91ff9bffdfffd7ffbaff87ff8bff9aff91ff9bff9aff9bffd6",
+            "ffb2ff9eff8dff93ff90ff91ffdfffb7ff90ff99ff99ff8cff8bff9eff9bff8bffd3ffdfffb1ff96ff94ff90ffdfffadff8aff9dff96ff90",
+            "ffff",
+            "c693febfffceffbeffffffffffffffffffffffffffffffff",
+        );
+        let info = TrackInfo::parse(&block).unwrap();
+        assert_eq!(info.title, "On My Mind (Extended)");
+        assert_eq!(info.artist, "Marlon Hoffstadt, Niko Rubio");
+        // Platine 2, morceau 0x512 : octets tournés de deux bits, puis XOR 0xc5.
+        let block = info_block(
+            "00e0004500c80040007c00590014004500dc005000500074004500c0007c0020001400640060007c00580045006500d0002400140050007c005400500054004500f0006000240061",
+            "00d4007800780074006000500075004500cc00400054004500cc007800780070004c00780024",
+            "00c5",
+            "3607004e000900c000c500c500c500c500c500c500c500c5",
+        );
+        let info = TrackInfo::parse(&block).unwrap();
+        assert_eq!(info.title, "I Can't Feel Anything (Extended Mix)");
+        assert_eq!(info.artist, "Doolie, Bad Boombox");
+    }
 
     const MAC: [u8; 6] = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
     const IP: Ipv4Addr = Ipv4Addr::new(169, 254, 10, 20);

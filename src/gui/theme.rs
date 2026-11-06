@@ -209,6 +209,13 @@ pub enum Icon {
     Record,
     Refresh,
     Wifi,
+    /// Liste : les sets joués.
+    List,
+    /// Exports : image, texte, copie ; et dossier.
+    Image,
+    Text,
+    Copy,
+    Folder,
 }
 
 pub fn icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32) {
@@ -267,6 +274,31 @@ pub fn icon(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32) {
                 painter.add(Shape::line(arc, stroke));
             }
             painter.circle_filled(p(11.0, 17.0), 1.6 * s, color);
+        }
+        Icon::List => {
+            for y in [6.0, 11.0, 16.0] {
+                painter.circle_filled(p(4.5, y), 1.5 * s, color);
+                painter.line_segment([p(8.0, y), p(19.0, y)], stroke);
+            }
+        }
+        Icon::Image => {
+            painter.rect_stroke(Rect::from_min_max(p(3.0, 4.0), p(19.0, 18.0)), 2.0 * s, stroke, StrokeKind::Middle);
+            painter.add(Shape::line(vec![p(4.0, 16.0), p(9.0, 10.0), p(13.0, 14.0), p(15.5, 11.5), p(18.0, 14.0)], stroke));
+            painter.circle_filled(p(14.5, 7.5), 1.6 * s, color);
+        }
+        Icon::Text => {
+            painter.rect_stroke(Rect::from_min_max(p(5.0, 2.5), p(17.0, 19.5)), 1.5 * s, stroke, StrokeKind::Middle);
+            for y in [7.0, 11.0, 15.0] {
+                painter.line_segment([p(8.0, y), p(14.0, y)], stroke);
+            }
+        }
+        Icon::Copy => {
+            painter.rect_stroke(Rect::from_min_max(p(7.0, 7.0), p(18.0, 19.0)), 1.5 * s, stroke, StrokeKind::Middle);
+            painter.add(Shape::line(vec![p(4.0, 15.0), p(4.0, 3.5), p(14.0, 3.5)], stroke));
+        }
+        Icon::Folder => {
+            let outline = vec![p(3.0, 6.0), p(9.0, 6.0), p(11.0, 8.0), p(19.0, 8.0), p(19.0, 17.0), p(3.0, 17.0)];
+            painter.add(Shape::closed_line(outline, stroke));
         }
     }
 }

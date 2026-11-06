@@ -7,6 +7,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/HugoKirbach/music-light-bridge"
 
 [dependencies]
+ab_glyph = "0.2.32"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 cpal = { version = "0.18.2", features = ["asio", "realtime"] }
@@ -14,12 +15,14 @@ crossterm = "0.29.0"
 dirs = "7.0.0"
 eframe = "0.37.0"
 hex = "0.4.3"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 midir = "0.11.1"
 netdev = "0.47.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "native-tls"] }
 rusty_link = "0.4.9"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+time = { version = "0.3.55", features = ["local-offset"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time"] }
 webrtc-dtls = "0.12.0"
 

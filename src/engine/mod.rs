@@ -193,6 +193,9 @@ pub struct Status {
     pub auto_captures: u32,
     /// Liaison OPUS, si elle est suivie.
     pub opus: Option<OpusStatus>,
+    /// Setlist du live en cours (avec l'OPUS) : début du chrono, une fois le premier morceau
+    /// entré, et les morceaux entrés.
+    pub set: Option<SetStatus>,
 }
 
 /// Une lampe de la zone, pendant le live.
@@ -204,6 +207,14 @@ pub struct LampInfo {
     pub lag_ms: f32,
     /// Le live l'allume ; sinon elle garde (ou retrouve) son état d'avant le live.
     pub enabled: bool,
+}
+
+/// Setlist du live en cours, pour l'affichage.
+#[derive(Debug, Clone)]
+pub struct SetStatus {
+    /// Le 0:00 du chrono : l'entrée du premier morceau.
+    pub started: Option<Instant>,
+    pub tracks: Vec<crate::setlist::Entry>,
 }
 
 /// État de la liaison OPUS, pour l'affichage.
@@ -296,6 +307,8 @@ struct Shared {
     opus_offset_us: AtomicI64,
     trame: AtomicBool,
     opus_now: Mutex<Option<OpusNow>>,
+    /// Setlist enregistrée par la liaison OPUS.
+    setlist: Mutex<crate::setlist::SetNow>,
     flashes: AtomicU32,
     /// Le groove tient (publié par la boucle d'éclairage), et captures automatiques enregistrées.
     grooving: AtomicBool,
@@ -542,6 +555,7 @@ impl Engine {
             opus_offset_us: AtomicI64::new(offset_us(options.opus_offset_ms)),
             trame: AtomicBool::new(options.trame),
             opus_now: Mutex::new(None),
+            setlist: Mutex::new(crate::setlist::SetNow::default()),
             flashes: AtomicU32::new(0),
             grooving: AtomicBool::new(false),
             auto_captures: AtomicU32::new(0),
@@ -709,6 +723,10 @@ impl Engine {
                 now: opus_now,
                 decks: lock(&self.shared.opus_decks).clone(),
                 error: lock(&self.shared.opus_error).clone(),
+            }),
+            set: self.shared.opus.then(|| {
+                let set = lock(&self.shared.setlist).clone();
+                SetStatus { started: set.origin.map(|origin| features.instant(origin)), tracks: set.tracks }
             }),
         }
     }

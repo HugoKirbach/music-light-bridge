@@ -19,6 +19,7 @@ pub mod opus;
 pub mod phrase;
 pub mod prolink;
 pub mod rhythm;
+pub mod setlist;
 pub mod room;
 pub mod tempo;
 pub mod timing;

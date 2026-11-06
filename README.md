@@ -599,6 +599,24 @@ avoir besoin du son.
 - Limites : la waveform est celle du morceau, pas du mix (faders, EQ et filtres n'y changent rien) ;
   pendant une transition, c'est la platine maître qui mène.
 
+### Setlist et sets joués
+
+- **Pendant le live**, un chrono « SET » part à 0:00 quand le premier morceau s'entend, et l'onglet
+  **Setlist** du dock liste les morceaux entrés.
+- Un morceau **entre** quand il est en lecture, fader ouvert, depuis 4 s. Son heure d'entrée est
+  le début de ces 4 s. Un morceau parmi les deux derniers ne rentre pas une seconde fois. Si l'OPUS
+  ne signale aucun fader ouvert, la platine maître en lecture compte.
+- Titre, artiste et pochette viennent de l'OPUS (envoyés au chargement, redemandés s'ils
+  manquent). Le titre et l'artiste arrivent masqués, avec une clé propre à chaque morceau : le
+  remplissage des champs donne la clé, et la rotation des bits est celle qui donne le texte le plus
+  lisible.
+- Chaque set s'écrit au fil de l'eau dans `%APPDATA%\dj-bridge\sets\<date heure>\` : `set.json`
+  et les pochettes `01.jpg`, `02.jpg`…
+- **Sets joués** (en haut de l'écran d'accueil) : la liste des sets et, pour chacun, sa setlist
+  avec les pochettes. **Exporter l'image** (PNG avec pochettes) et **Exporter le texte** (une ligne
+  par morceau, « 0:00 Artiste - Titre ») écrivent dans Téléchargements ; **Copier la liste** met
+  le texte dans le presse-papiers.
+
 ## OPUS-QUAD sur le réseau (sonde)
 
 L'OPUS-QUAD parle au PC par le réseau : par sa carte réseau USB intégrée (« AlphaTheta Network
@@ -613,7 +631,7 @@ Ce que l'OPUS envoie (vérifié le 4 novembre 2026, firmware 1.32, par le Wi-Fi)
   numéro du temps dans le morceau, lecture, boucle, maître, à l'antenne, sync ;
 - à chaque chargement, sans rien demander : la grille des temps, la structure du morceau
   (analyse de phrases de rekordbox : Intro, Up, Down, Chorus, Outro), l'aperçu et la waveform
-  détaillée en couleur (150 points par seconde), la pochette ;
+  détaillée en couleur (150 points par seconde), la pochette, le titre et l'artiste (masqués) ;
 - ni paquets de temps ni position précise : la phase restera l'affaire du son. Ces informations
   serviront de carte (tempo exact, mesures, phrases, ce qui arrive).
 
@@ -635,6 +653,7 @@ plantage, elle est reprise au lancement suivant (si elle a moins de 6 h), ou tou
 |---|---|
 | `%APPDATA%\dj-bridge\config.json` | Identifiants du bridge, zone, latence, réglages, pièces et configurations des lampes, retards des lampes, scènes, jeton de la télécommande |
 | `%APPDATA%\dj-bridge\captures\` | Captures audio, leurs fiches, `bench.json` |
+| `%APPDATA%\dj-bridge\sets\` | Un dossier par set joué avec l'OPUS : `set.json` (setlist) et les pochettes |
 | `%APPDATA%\dj-bridge\lampes-avant-flux.json` | État des lampes à rétablir |
 
 Ne publiez pas `config.json` : il contient les clés d'accès au bridge.

@@ -9,13 +9,18 @@ use super::theme::{self, BOLD, Icon, LIVE, MONO_BOLD, SEMIBOLD, STAGE_BG};
 use super::{App, MODES, Tab, flash_text, format_bpm, waveform};
 use crate::audio::WINDOWS_LOOPBACK;
 use crate::engine::{MAX_LAMP_DELAY_MS, OPUS_OFFSET_RANGE, OpusStatus, Status};
+use crate::setlist;
 use crate::tempo::TempoSource;
 
 const DOCK_WIDTH: f32 = 1040.0;
 /// Onglets du mode simple : de quoi changer d'ambiance et de lampes en plein morceau.
-pub(super) const SIMPLE_TABS: [(Tab, &str); 3] =
-    [(Tab::Light(Page::Presets), "Scènes"), (Tab::Light(Page::Colors), "Couleurs"), (Tab::Lamps, "Lampes")];
-const EXPERT_TABS: [(Tab, &str); 7] = [
+pub(super) const SIMPLE_TABS: [(Tab, &str); 4] = [
+    (Tab::Light(Page::Presets), "Scènes"),
+    (Tab::Light(Page::Colors), "Couleurs"),
+    (Tab::Lamps, "Lampes"),
+    (Tab::Setlist, "Setlist"),
+];
+const EXPERT_TABS: [(Tab, &str); 8] = [
     (Tab::Light(Page::Motion), "Mouvement"),
     (Tab::Light(Page::Colors), "Couleurs"),
     (Tab::Light(Page::Flashes), "Flashs"),
@@ -23,6 +28,7 @@ const EXPERT_TABS: [(Tab, &str); 7] = [
     (Tab::Tempo, "Tempo"),
     (Tab::Lamps, "Lampes"),
     (Tab::Source, "Source"),
+    (Tab::Setlist, "Setlist"),
 ];
 /// Que faire quand la sortie du PC n'entend pas Ableton.
 const ASIO_HINT: &str = "Ableton en ASIO joue directement sur la carte, sans passer par Windows. Une carte avec \
@@ -122,6 +128,15 @@ impl App {
             let elapsed = self.started.elapsed().as_secs();
             let time = format!("LIVE {:02}:{:02}", elapsed / 60, elapsed % 60);
             theme::pill(ui, theme::spaced(&time, theme::font(12.0, BOLD), Color32::WHITE, 1.2), theme::black(0.45), Some(LIVE));
+            // Chrono du set : 0:00 à l'entrée du premier morceau.
+            if let Some(set) = &status.set {
+                let (text, dot) = match set.started {
+                    Some(started) => (format!("SET {} · {}", setlist::timecode(started.elapsed().as_secs_f64()), tracks(set.tracks.len())), Some(theme::ACCENT)),
+                    None => ("SET · EN ATTENTE DU PREMIER SON".to_owned(), None),
+                };
+                theme::pill(ui, theme::spaced(&text, theme::font(12.0, BOLD), Color32::WHITE, 1.2), theme::black(0.45), dot)
+                    .on_hover_text("Setlist : chaque morceau entendu (lecture, fader ouvert) est noté avec son heure d'entrée. Historique et exports sur l'écran d'accueil, bouton Sets joués");
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let (rect, response) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::click());
                 let fill = if response.hovered() { theme::black(0.75) } else { theme::black(0.55) };
@@ -317,6 +332,7 @@ impl App {
                             Tab::Tempo => self.tempo_tab(ui, status),
                             Tab::Lamps => self.lamps_tab(ui, width - 36.0),
                             Tab::Source => self.source_tab(ui, status, width - 36.0),
+                            Tab::Setlist => setlist_tab(ui, status),
                         }
                     });
                 }));
@@ -619,4 +635,46 @@ fn lamp_dots(ui: &mut Ui, colors: &[[u8; 3]]) {
         ui.painter().circle_stroke(center, 6.0, Stroke::new(1.0, theme::white(0.25)));
     }
     response.on_hover_text("Couleur envoyée à chaque lampe de la zone");
+}
+
+/// « 1 MORCEAU », « 12 MORCEAUX ».
+fn tracks(count: usize) -> String {
+    if count == 1 { "1 MORCEAU".to_owned() } else { format!("{count} MORCEAUX") }
+}
+
+/// Onglet Setlist : le chrono du set et les morceaux entrés, le dernier en bas.
+fn setlist_tab(ui: &mut Ui, status: &Status) {
+    let Some(set) = &status.set else {
+        ui.label(theme::text(
+            "La setlist s'enregistre avec l'OPUS-QUAD (source « OPUS-QUAD en Wi-Fi » ou tempo OPUS-QUAD) : le titre, l'artiste et la pochette viennent des platines.",
+            theme::regular(14.0),
+            DIM,
+        ));
+        return;
+    };
+    let Some(started) = set.started else {
+        ui.label(theme::text(
+            "En attente du premier son : le chrono part à 0:00 quand un morceau s'entend (en lecture, fader ouvert) depuis 4 secondes.",
+            theme::regular(14.0),
+            DIM,
+        ));
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.label(theme::text(setlist::timecode(started.elapsed().as_secs_f64()), theme::font(30.0, MONO_BOLD), Color32::WHITE));
+        ui.label(theme::spaced(&tracks(set.tracks.len()), theme::font(12.0, BOLD), DIM, 1.2));
+    });
+    egui::ScrollArea::vertical().max_height(240.0).stick_to_bottom(true).show(ui, |ui| {
+        for entry in &set.tracks {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                ui.add_sized(vec2(64.0, 20.0), egui::Label::new(theme::text(setlist::timecode(entry.at), theme::font(15.0, MONO_BOLD), theme::ACCENT)));
+                ui.label(theme::text(entry.shown_title(), theme::font(15.0, SEMIBOLD), Color32::WHITE));
+                if !entry.artist.is_empty() {
+                    ui.label(theme::text(&entry.artist, theme::regular(14.0), DIM));
+                }
+            });
+        }
+    });
+    ui.label(theme::text("Enregistrée au fil du set : historique et exports sur l'écran d'accueil, bouton « Sets joués ».", theme::regular(12.0), DIM));
 }

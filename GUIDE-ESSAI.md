@@ -425,6 +425,42 @@ avec le bouton : elles y restent jusqu'au prochain chargement sur 3 ou 4.
 4. Un Down ou un break : bleu franc, qui passe d'une lampe à l'autre en vague. Trop sombre ou trop
    fort : « Lueur des breaks ». Vague trop rapide sur le temps : « Houle des breaks » (Mouvement).
 
+## [35] Setlist : chaque morceau joué, son heure, sa pochette
+
+- **Pendant le live** (OPUS-QUAD) : un chrono « SET 0:00 » en haut, qui part quand le premier
+  morceau s'entend, et un onglet **Setlist** dans le dock avec les morceaux déjà entrés.
+- **Quand un morceau entre** : il est en lecture, fader ouvert, depuis 4 secondes. Son heure
+  d'entrée est le début de ces 4 secondes (le moment où tu as ouvert le fader). Un coup de fader
+  de moins de 4 s ne compte pas, et un morceau parmi les deux derniers ne rentre pas une seconde
+  fois.
+- **Titre, artiste, pochette** : l'OPUS les envoie au chargement. Le titre et l'artiste étaient
+  masqués (un masque différent pour chaque morceau) : décodés, et vérifiés sur les deux morceaux
+  de ton journal du 4 novembre.
+- **Enregistré au fil de l'eau** dans `%APPDATA%\dj-bridge\sets\<date heure>\` (setlist et
+  pochettes) : rien n'est perdu si l'appli se ferme en plein set.
+- **Historique** : bouton **Sets joués** en haut de l'écran d'accueil. À gauche la liste des sets,
+  à droite la setlist avec les pochettes, et quatre boutons :
+  - **Exporter l'image** : une image PNG avec la date, la durée, puis chaque morceau (heure,
+    pochette, titre, artiste, tempo), dans Téléchargements ;
+  - **Exporter le texte** : un .txt, une ligne par morceau, « 0:00 Artiste - Titre » (le format
+    des chapitres YouTube et des tracklists), dans Téléchargements ;
+  - **Copier la liste** : le même texte, à coller où tu veux ;
+  - **Ouvrir le dossier** du set.
+
+**À essayer :**
+1. Lance un live avec la source « OPUS-QUAD en Wi-Fi ». Le haut de l'écran dit « SET · EN
+   ATTENTE DU PREMIER SON ».
+2. Lance un morceau, fader ouvert : 4 s plus tard, le chrono part de 0:00 et l'onglet Setlist le
+   montre.
+3. Mixe le suivant : il entre à l'heure où tu as ouvert son fader.
+4. Arrête, puis **Sets joués** : exporte l'image et le texte.
+
+**À vérifier :**
+- Un morceau chargé avant le lancement du live : DJ-Bridge redemande son titre et sa pochette,
+  mais je ne sais pas encore si l'OPUS y répond. S'il apparaît en « Morceau n° … » sans pochette,
+  dis-le-moi. Le plus sûr : lancer le live avant de charger le premier morceau.
+- Si l'OPUS ne signale pas tes faders, c'est la platine maître en lecture qui compte.
+
 ---
 
 ## Ce qui a été vérifié de mon côté

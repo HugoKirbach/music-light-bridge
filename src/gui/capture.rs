@@ -1,6 +1,7 @@
 //! Capture d'écran de la fenêtre, pour le développement : avec `DJB_CAPTURE=chemin.png`, la
 //! fenêtre s'ouvre à la taille `DJB_CAPTURE_SIZE` (« 1180x780 » par défaut), en mode expert si
-//! `DJB_CAPTURE_EXPERT` est défini, se photographie après quelques images, écrit un PNG et se ferme.
+//! `DJB_CAPTURE_EXPERT` est défini (sur l'historique des sets si `DJB_CAPTURE_HISTORY` l'est), se
+//! photographie après quelques images, écrit un PNG et se ferme.
 //! Rien n'est enregistré dans la configuration.
 //!
 //! Avec `DJB_CAPTURE_JOURNAL` (un journal de la sonde) et `DJB_CAPTURE_AT` (secondes), elle montre

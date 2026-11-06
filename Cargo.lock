@@ -1410,6 +1410,7 @@ dependencies = [
 name = "dj-bridge"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "clap",
  "cpal",
@@ -1418,12 +1419,14 @@ dependencies = [
  "eframe",
  "embed-resource",
  "hex",
+ "image",
  "midir",
  "netdev",
  "reqwest",
  "rusty_link",
  "serde",
  "serde_json",
+ "time",
  "tokio",
  "webrtc-dtls",
 ]
@@ -2532,6 +2535,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -3201,6 +3206,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "num_threads"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cabcc654086861f9e1bc5115258de62ef92c79b20f4615a1b0cc57c4e82027d4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -5047,7 +5061,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
+ "libc",
  "num-conv",
+ "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",

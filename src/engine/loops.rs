@@ -8,6 +8,7 @@ use super::*;
 use crate::look::Guide;
 use crate::opus::{self, Client};
 use crate::prolink;
+use crate::setlist::Recorder;
 
 /// Durée d'un flash du test de synchro, et sa cadence sans tempo connu.
 const SYNC_FLASH: f64 = 0.08;
@@ -367,6 +368,8 @@ pub(super) fn opus_loop(shared: &Shared, features: &Features, interface: Option<
             client.prefer(label);
         }
         let mut out = Vec::new();
+        // Setlist : chaque morceau entendu, enregistré au fil de l'eau dans le dossier des sets.
+        let mut setlist = Recorder::new(crate::setlist::sets_dir().ok());
         while !shared.stopped() {
             match rx.recv_timeout(OPUS_POLL) {
                 Ok((at, port, from, data)) => client.on_packet(features.seconds(at), port, from, &data, &mut out),
@@ -381,7 +384,11 @@ pub(super) fn opus_loop(shared: &Shared, features: &Features, interface: Option<
             *lock(&shared.opus_playing) = client.playing(now);
             *lock(&shared.opus_decks) = client.decks(now);
             *lock(&shared.opus_link) = client.state(now);
+            if setlist.update(now, SystemTime::now(), &client.loaded(now)) {
+                *lock(&shared.setlist) = setlist.now();
+            }
         }
+        setlist.finish();
     });
 }
 

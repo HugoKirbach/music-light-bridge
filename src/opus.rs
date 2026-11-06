@@ -16,7 +16,7 @@ use netdev::ipnet::Ipv4Net;
 
 use crate::audio::analysis::Levels;
 use crate::look::{Accent, Phase};
-use crate::prolink::{self, BeatGrid, Packet, Reassembler, SongStructure, Status, block};
+use crate::prolink::{self, BeatGrid, Packet, Reassembler, SongStructure, Status, TrackInfo, block};
 
 /// Cadence de l'annonce de présence et de la demande d'état (celle de Beat Link).
 const ANNOUNCE_INTERVAL: f64 = 1.5;
@@ -205,9 +205,24 @@ pub struct Track {
     /// Hauteur des passages forts du morceau (95e centile de la waveform) : les niveaux s'y
     /// rapportent, comme le gain automatique du son.
     pub loudness: f32,
+    /// Titre et artiste, et pochette en JPEG (pour la setlist).
+    pub info: Option<TrackInfo>,
+    pub artwork: Option<Arc<[u8]>>,
 }
 
 impl Track {
+    /// Le bloc de type `kind` est arrivé.
+    fn has(&self, kind: u8) -> bool {
+        match kind {
+            block::BEAT_GRID => self.grid.is_some(),
+            block::SONG_STRUCTURE => self.song.is_some(),
+            block::WAVEFORM_DETAIL => self.waveform.is_some(),
+            block::TRACK_INFO => self.info.is_some(),
+            block::ARTWORK => self.artwork.is_some(),
+            _ => false,
+        }
+    }
+
     /// Repère les kicks et les appels de la grille dans la waveform.
     fn analyze(&mut self) {
         let (Some(grid), Some(waveform)) = (&self.grid, &self.waveform) else {
@@ -553,6 +568,19 @@ pub struct DeckView {
     pub bpm: Option<f64>,
 }
 
+/// Une platine chargée, pour la setlist : son morceau, ce qu'on en sait, et s'il s'entend.
+#[derive(Debug, Clone)]
+pub struct LoadedDeck {
+    pub deck: u8,
+    pub track_id: u32,
+    /// En lecture et à l'antenne (fader ouvert). Si l'OPUS ne met aucune platine à l'antenne, la
+    /// maître en lecture compte.
+    pub audible: bool,
+    pub bpm: Option<f64>,
+    pub info: Option<TrackInfo>,
+    pub artwork: Option<Arc<[u8]>>,
+}
+
 /// État de la liaison, pour l'affichage.
 #[derive(Debug, Clone, Default)]
 pub struct LinkState {
@@ -667,8 +695,12 @@ impl Client {
         deck.status = Some(status);
         deck.at = t;
         if track != 0 {
-            for kind in [block::BEAT_GRID, block::SONG_STRUCTURE, block::WAVEFORM_DETAIL] {
-                self.requests.entry((number, track, kind)).or_insert(Request { tries: 0, next: t + REQUEST_RETRY });
+            // Ce qui manque encore du morceau est redemandé (chargé avant le lancement, paquet perdu).
+            let known = self.tracks.get(&(number, track)).cloned();
+            for kind in [block::BEAT_GRID, block::SONG_STRUCTURE, block::WAVEFORM_DETAIL, block::TRACK_INFO, block::ARTWORK] {
+                if !known.as_ref().is_some_and(|t| t.has(kind)) {
+                    self.requests.entry((number, track, kind)).or_insert(Request { tries: 0, next: t + REQUEST_RETRY });
+                }
             }
         }
         self.forget_unloaded();
@@ -694,6 +726,9 @@ impl Client {
             block::BEAT_GRID => track.grid = BeatGrid::parse(&whole),
             block::SONG_STRUCTURE => track.song = SongStructure::parse(&whole),
             block::WAVEFORM_DETAIL => track.waveform = Waveform::parse(&whole),
+            block::TRACK_INFO => track.info = TrackInfo::parse(&whole),
+            // Une pochette JPEG commence par FF D8.
+            block::ARTWORK => track.artwork = whole.starts_with(&[0xff, 0xd8]).then(|| whole.into()),
             _ => return,
         }
         self.requests.remove(&(key.0, key.1, part.kind));
@@ -756,6 +791,31 @@ impl Client {
                     on_air: status.on_air(),
                     bpm: status.effective_bpm(),
                 })
+            })
+            .collect()
+    }
+
+    /// Les platines chargées à l'instant `now`, grille reçue ou non, pour la setlist.
+    pub fn loaded(&self, now: f64) -> Vec<LoadedDeck> {
+        let fresh: Vec<(u8, &Status)> = self
+            .decks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| d.status.as_ref().filter(|s| s.track_id != 0 && now - d.at < STALE).map(|s| (i as u8 + 1, s)))
+            .collect();
+        let any_on_air = fresh.iter().any(|(_, s)| s.on_air());
+        fresh
+            .into_iter()
+            .map(|(deck, status)| {
+                let track = self.tracks.get(&(deck, status.track_id));
+                LoadedDeck {
+                    deck,
+                    track_id: status.track_id,
+                    audible: status.playing() && if any_on_air { status.on_air() } else { status.master() },
+                    bpm: status.effective_bpm(),
+                    info: track.and_then(|t| t.info.clone()),
+                    artwork: track.and_then(|t| t.artwork.clone()),
+                }
             })
             .collect()
     }
@@ -827,6 +887,7 @@ mod tests {
             kicks: Vec::new(),
             calls: Vec::new(),
             loudness: 1.0,
+            ..Track::default()
         };
         track.analyze();
         track
